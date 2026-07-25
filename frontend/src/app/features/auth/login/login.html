@@ -1,24 +1,28 @@
 <div class="login-page">
+  <div class="lang-bar">
+    <app-language-switcher></app-language-switcher>
+  </div>
+
   <mat-card class="login-card">
     <mat-card-header>
-      <mat-card-title>Cafe Manager</mat-card-title>
-      <mat-card-subtitle>Đăng nhập để tiếp tục</mat-card-subtitle>
+      <mat-card-title>{{ 'common.appName' | transloco }}</mat-card-title>
+      <mat-card-subtitle>{{ 'auth.subtitle' | transloco }}</mat-card-subtitle>
     </mat-card-header>
 
     <form [formGroup]="form" (ngSubmit)="submit()">
       <mat-card-content>
         <mat-form-field appearance="outline" class="full-width">
-          <mat-label>Tên đăng nhập</mat-label>
+          <mat-label>{{ 'auth.username' | transloco }}</mat-label>
           <input matInput formControlName="username" autocomplete="username" />
         </mat-form-field>
 
         <mat-form-field appearance="outline" class="full-width">
-          <mat-label>Mật khẩu</mat-label>
+          <mat-label>{{ 'auth.password' | transloco }}</mat-label>
           <input matInput type="password" formControlName="password" autocomplete="current-password" />
         </mat-form-field>
 
-        @if (errorMessage()) {
-          <p class="error">{{ errorMessage() }}</p>
+        @if (loginFailed()) {
+          <p class="error">{{ 'auth.invalidCredentials' | transloco }}</p>
         }
       </mat-card-content>
 
@@ -27,7 +31,7 @@
           @if (loading()) {
             <mat-spinner diameter="20"></mat-spinner>
           } @else {
-            Đăng nhập
+            {{ 'auth.login' | transloco }}
           }
         </button>
       </mat-card-actions>
