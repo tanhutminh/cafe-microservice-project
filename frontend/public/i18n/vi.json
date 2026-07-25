@@ -1,0 +1,23 @@
+{
+  "common": {
+    "appName": "Cafe Manager",
+    "language": "Ngôn ngữ"
+  },
+  "auth": {
+    "subtitle": "Đăng nhập để tiếp tục",
+    "username": "Tên đăng nhập",
+    "password": "Mật khẩu",
+    "login": "Đăng nhập",
+    "logout": "Đăng xuất",
+    "invalidCredentials": "Sai tên đăng nhập hoặc mật khẩu"
+  },
+  "home": {
+    "welcome": "Xin chào, {{name}} ({{role}})",
+    "loadingUser": "Đang tải thông tin người dùng...",
+    "comingSoon": "Menu, order/POS, quản lý bàn, kho, báo cáo sẽ được bổ sung ở các milestone tiếp theo."
+  },
+  "role": {
+    "ADMIN": "Quản trị viên",
+    "CASHIER": "Thu ngân"
+  }
+}

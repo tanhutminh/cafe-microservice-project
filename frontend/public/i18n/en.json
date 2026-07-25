@@ -1,0 +1,23 @@
+{
+  "common": {
+    "appName": "Cafe Manager",
+    "language": "Language"
+  },
+  "auth": {
+    "subtitle": "Sign in to continue",
+    "username": "Username",
+    "password": "Password",
+    "login": "Sign in",
+    "logout": "Sign out",
+    "invalidCredentials": "Invalid username or password"
+  },
+  "home": {
+    "welcome": "Hello, {{name}} ({{role}})",
+    "loadingUser": "Loading user info...",
+    "comingSoon": "Menu, order/POS, table management, inventory, and reports will be added in upcoming milestones."
+  },
+  "role": {
+    "ADMIN": "Administrator",
+    "CASHIER": "Cashier"
+  }
+}

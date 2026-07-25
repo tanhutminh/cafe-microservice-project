@@ -1,0 +1,8 @@
+<mat-button-toggle-group
+  [value]="activeLang()"
+  (change)="onLangChange($event.value)"
+  aria-label="Language"
+>
+  <mat-button-toggle value="vi">VI</mat-button-toggle>
+  <mat-button-toggle value="en">EN</mat-button-toggle>
+</mat-button-toggle-group>

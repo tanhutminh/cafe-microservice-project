@@ -23,8 +23,15 @@ export class AuthService {
   readonly isAuthenticated = computed(() => this.accessToken() !== null);
 
   constructor(private readonly http: HttpClient, private readonly router: Router) {
+    // Deferred to a microtask: calling loadCurrentUser() synchronously here would
+    // make jwtInterceptor's inject(AuthService) re-enter this constructor while it's
+    // still on the stack, which Angular's DI reports as a circular dependency (NG0200).
+    // Queuing it lets this constructor fully return first, so the singleton is already
+    // registered by the time the interceptor asks for it.
     if (this.isAuthenticated()) {
-      this.loadCurrentUser().subscribe({ error: () => this.clearSession() });
+      queueMicrotask(() => {
+        this.loadCurrentUser().subscribe({ error: () => this.clearSession() });
+      });
     }
   }
 

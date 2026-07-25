@@ -6,7 +6,9 @@ import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { TranslocoModule } from '@jsverse/transloco';
 import { AuthService } from '../../../core/auth/auth.service';
+import { LanguageSwitcher } from '../../../shared/language-switcher/language-switcher';
 
 @Component({
   selector: 'app-login',
@@ -17,7 +19,9 @@ import { AuthService } from '../../../core/auth/auth.service';
     MatCardModule,
     MatFormFieldModule,
     MatInputModule,
-    MatProgressSpinnerModule
+    MatProgressSpinnerModule,
+    TranslocoModule,
+    LanguageSwitcher
   ],
   templateUrl: './login.html',
   styleUrl: './login.scss'
@@ -28,7 +32,7 @@ export class Login {
   private readonly router = inject(Router);
 
   readonly loading = signal(false);
-  readonly errorMessage = signal<string | null>(null);
+  readonly loginFailed = signal(false);
 
   readonly form = this.fb.group({
     username: ['', Validators.required],
@@ -40,7 +44,7 @@ export class Login {
       return;
     }
     this.loading.set(true);
-    this.errorMessage.set(null);
+    this.loginFailed.set(false);
 
     const { username, password } = this.form.getRawValue();
     this.authService.login(username!, password!).subscribe({
@@ -50,7 +54,7 @@ export class Login {
       },
       error: () => {
         this.loading.set(false);
-        this.errorMessage.set('Sai tên đăng nhập hoặc mật khẩu');
+        this.loginFailed.set(true);
       }
     });
   }

@@ -1,18 +1,24 @@
 <div class="home-page">
+  <div class="lang-bar">
+    <app-language-switcher></app-language-switcher>
+  </div>
+
   <mat-card>
     <mat-card-header>
-      <mat-card-title>Cafe Manager</mat-card-title>
+      <mat-card-title>{{ 'common.appName' | transloco }}</mat-card-title>
     </mat-card-header>
     <mat-card-content>
       @if (authService.currentUser(); as user) {
-        <p>Xin chào, <strong>{{ user.fullName }}</strong> ({{ user.role }})</p>
+        <p>
+          {{ 'home.welcome' | transloco: { name: user.fullName, role: ('role.' + user.role | transloco) } }}
+        </p>
       } @else {
-        <p>Đang tải thông tin người dùng...</p>
+        <p>{{ 'home.loadingUser' | transloco }}</p>
       }
-      <p class="note">Menu, order/POS, quản lý bàn, kho, báo cáo sẽ được bổ sung ở các milestone tiếp theo.</p>
+      <p class="note">{{ 'home.comingSoon' | transloco }}</p>
     </mat-card-content>
     <mat-card-actions>
-      <button mat-stroked-button (click)="logout()">Đăng xuất</button>
+      <button mat-stroked-button (click)="logout()">{{ 'auth.logout' | transloco }}</button>
     </mat-card-actions>
   </mat-card>
 </div>
