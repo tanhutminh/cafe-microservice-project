@@ -1,0 +1,18 @@
+<div class="home-page">
+  <mat-card>
+    <mat-card-header>
+      <mat-card-title>Cafe Manager</mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      @if (authService.currentUser(); as user) {
+        <p>Xin chào, <strong>{{ user.fullName }}</strong> ({{ user.role }})</p>
+      } @else {
+        <p>Đang tải thông tin người dùng...</p>
+      }
+      <p class="note">Menu, order/POS, quản lý bàn, kho, báo cáo sẽ được bổ sung ở các milestone tiếp theo.</p>
+    </mat-card-content>
+    <mat-card-actions>
+      <button mat-stroked-button (click)="logout()">Đăng xuất</button>
+    </mat-card-actions>
+  </mat-card>
+</div>

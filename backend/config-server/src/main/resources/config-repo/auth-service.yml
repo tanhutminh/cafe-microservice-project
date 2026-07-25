@@ -1,0 +1,37 @@
+# Served by config-server to the client named "auth-service" (spring.application.name).
+# DEV-ONLY key material: this RSA keypair (see gateway.yml for the matching public key)
+# is committed for local-dev convenience only. A real deployment must inject the private
+# key via a secrets manager / env-var-backed profile, never commit it.
+app:
+  jwt:
+    access-token-ttl-minutes: 15
+    refresh-token-ttl-days: 7
+    private-key: |
+      -----BEGIN PRIVATE KEY-----
+      MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDtlhlMwhNpHEqQ
+      +b0VXil1U8RjijohetEFOXTEmPY3gdAMNrRUzO2fTyD+AL3pfS5iwQ/2e756lvhk
+      WDP34JcmpdZLqyNtCa2Nqi69v4YC7AOSRAQgaUjPJJFAyYANEiKwGoZZFI1D0dc2
+      StHeze+vXdZUBAu9JPNZHl6g8+ISQVU5sL394FoCWHy39eBSndyUYs26xwSaKyPO
+      AgPHDeRjY8+rfEYSgY/v/X1JHBX7pJVMwwRGRFWiAFHKbWMLHj2OdlrsiGgjbjrd
+      TTgvD1ZPg2OCEDsHj2in9Gaq7dY/MmjUuzlOM5FwGQNK/tEo3Y4RANbcI6F9a+ZE
+      bsS1kOL1AgMBAAECggEADvwz4c8ZkCcNk/R7MYe+zSyTUI+ayDBPJ97JHOT58056
+      gRQKjpEItCQ2nuwMjmzLxMT2Z7PuiRxlvoHVW0nSNsjodIgu4+p473G/tiOdmqho
+      tuxtJzSEzV3k1HrbxaydEqbwTi+Ok8ET6356G20OnwISlI+BxF8Pgzw4DeZRXhhw
+      4Jial9kStij69Glzu322OT2m5ROk1dXrudknTAmLIJrof6rOxNh0tDR3gxlnTSw7
+      Cxf8UdYe0XDO84OYNVm7Ttvd8Op+CV43AF7c/eu9T/GGpvCMYMhF+5tCVMWMkxh0
+      li5Vv6JzrOinmxqKL33hNO4Zy4479V1J8u8AJcvgOQKBgQD5AEG3Ds6stBlYK8PB
+      J4dhH4ujOssLJ6VDs48U/mPNfOLEdgOZLeiSms/r7T0W2/guSP8lontUjuvINLdn
+      7Fai0yzenzxjgs0I+XIScEUl77exv+vEiaXLr9jLh0kp9ZKeLp8ufpDsWOo6zmPZ
+      xQVJ/KdvmJw8ujENnM1Iv5jXKQKBgQD0Q7SIoyv2m6o4haryYTRCFF/A0zfXj8e4
+      c0mEaNB0z4kX+PNEncEiPpFHqpTLA4YDEVjWHADonjeva61RPrBG/TZ+xvSlSXs2
+      h5dfJhKMAvMKePkgiTIFT5o2vaYrO8kmlU9sk86jdT82/OiXGDOSbgSFtYMubpsA
+      cUdL15Ri7QKBgFkSsm9dqKk3M+nKnhg2n8MqmbUmjwPKhuAVF5YW+nTDvAszfE4L
+      kir/nmlzUGsg/ULxcfRwj1XMWqQf14whi0xr5p0ssVmXrOkM8rWN2+6aNkgrs5d2
+      9gxLN253UsDjzDMx0le7hvRFSmUG98krJZ01+F9/ZESFBo8sDHN9tpshAoGBAImF
+      CMIYo6q+rxINZ1X4lfRSBirIf9rzzuyws4ZBgIMTSMrfVQ6fhlmiQibICedWP3/A
+      p3Q75eMRGKbBh52DHrmI28J6fsgD28OyiO1/wNdk3bJas1+2/htxWpBRK5mRmkkH
+      rOSjPqZWX1W1A7n1XSumlxM0QvvEN64DGLHBWIBtAoGBAOL6ugI2M7YlUy8sIm4F
+      hB77qDEnJ/M1YXbdJi/0Z1TdTlYjgeBShyRpygdk6xTXsFCrVyak1pg3uAdF4P21
+      EeooiMyyYkbCslvoRBNPpzD5n+MFdU+xAHQVGsTS2qwUqdCP9Sis9TjNy8jc9tgm
+      jWqVHEXogt6VxS0S72kSC/xb
+      -----END PRIVATE KEY-----

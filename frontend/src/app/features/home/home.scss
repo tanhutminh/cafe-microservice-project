@@ -1,0 +1,17 @@
+.home-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 16px;
+
+  mat-card {
+    width: 100%;
+    max-width: 480px;
+  }
+
+  .note {
+    color: var(--mat-sys-on-surface-variant);
+    font-size: 0.9rem;
+  }
+}
