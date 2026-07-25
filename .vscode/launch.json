@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "Debug auth-service (infra via Docker)",
+      "request": "launch",
+      "mainClass": "com.cafe.authservice.AuthServiceApplication",
+      "projectName": "auth-service",
+      "vmArgs": "-Xmx256m"
+      // No env overrides needed — application.yml's defaults (Postgres on
+      // localhost:5432, config-server on 8888, eureka on 8761) already match
+      // docker-compose's host port mappings for the infra containers.
+    },
+    {
+      "type": "chrome",
+      "name": "Debug Angular (Chrome)",
+      "request": "launch",
+      "url": "http://localhost:4200",
+      "webRoot": "${workspaceFolder}/frontend",
+      "sourceMapPathOverrides": {
+        "webpack:/*": "${webRoot}/*"
+      }
+    }
+  ]
+}

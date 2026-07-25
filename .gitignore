@@ -4,11 +4,14 @@ target/
 *.jar
 !.mvn/wrapper/maven-wrapper.jar
 hs_err_pid*.log
+replay_pid*.log
 
 # IDE
 .idea/
 *.iml
-.vscode/
+# .vscode/launch.json, tasks.json, extensions.json are shared team config —
+# tracked intentionally. Only ignore personal workspace settings.
+.vscode/settings.json
 .classpath
 .project
 .settings/
