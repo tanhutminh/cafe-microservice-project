@@ -1,8 +1,7 @@
-package com.cafe.authservice.config;
+package com.cafe.menuservice.config;
 
 import com.cafe.common.error.ApiError;
 import com.cafe.common.exception.BusinessRuleException;
-import com.cafe.common.exception.InvalidCredentialsException;
 import com.cafe.common.exception.ResourceNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -28,11 +27,6 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BusinessRuleException.class)
     public ResponseEntity<ApiError> handleBusinessRule(BusinessRuleException e, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, e.getMessage(), request);
-    }
-
-    @ExceptionHandler(InvalidCredentialsException.class)
-    public ResponseEntity<ApiError> handleInvalidCredentials(InvalidCredentialsException e, HttpServletRequest request) {
-        return build(HttpStatus.UNAUTHORIZED, e.getMessage(), request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

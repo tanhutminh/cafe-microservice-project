@@ -1,34 +1,28 @@
-package com.cafe.authservice.config;
+package com.cafe.menuservice.config;
 
 import com.cafe.common.security.HeaderAuthenticationFilter;
 import com.cafe.common.security.Roles;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.access.AccessDeniedHandlerImpl;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 /**
- * auth-service trusts identity headers set by the gateway for every route EXCEPT
- * login/refresh, which are the entry points that establish identity in the first
- * place and are reached with the headers already stripped (gateway bypasses JWT
- * verification for these two paths — see gateway's JwtAuthGlobalFilter).
+ * menu-service never sees a JWT — it trusts the X-User-* headers the gateway
+ * sets after verifying the token (plan section 5). Reads are open to any
+ * authenticated staff (ADMIN or CASHIER, e.g. for a future POS screen);
+ * writes are ADMIN-only except the availability toggle, which CASHIER also
+ * needs to 86 an item from the counter.
  */
 @Configuration
 public class SecurityConfig {
-
-    @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
-    }
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -36,14 +30,14 @@ public class SecurityConfig {
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/refresh").permitAll()
                         // /error must stay open: a denied request forwards internally to /error to
                         // render the response body, and that forward re-enters this same filter chain
-                        // with a fresh (anonymous) context — without this, a real 403 gets clobbered
-                        // into a misleading 401 from anyRequest().authenticated() below.
+                        // with a fresh (anonymous) context — without this, the real 403 gets clobbered
+                        // into a misleading 401 from anyRequest().hasRole(ADMIN) below.
                         .requestMatchers("/actuator/**", "/error").permitAll()
-                        .requestMatchers("/api/users/**").hasRole(Roles.ADMIN)
-                        .anyRequest().authenticated())
+                        .requestMatchers(HttpMethod.GET, "/api/categories/**", "/api/menu-items/**").hasAnyRole(Roles.ADMIN, Roles.CASHIER)
+                        .requestMatchers(HttpMethod.PATCH, "/api/menu-items/*/availability").hasAnyRole(Roles.ADMIN, Roles.CASHIER)
+                        .anyRequest().hasRole(Roles.ADMIN))
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
                         .accessDeniedHandler(new AccessDeniedHandlerImpl()))
