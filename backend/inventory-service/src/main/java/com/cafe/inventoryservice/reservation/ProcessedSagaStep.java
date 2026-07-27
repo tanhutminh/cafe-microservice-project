@@ -11,9 +11,11 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * Idempotency record for the reserve-stock saga command (plan section 4). Kafka is
- * at-least-once, so the same command can be redelivered; once an order_id row exists here,
- * a redelivered command is answered with the stored outcome instead of being reprocessed.
+ * Idempotency record for the reserve-stock saga command (plan section 4). Keyed by
+ * sagaAttemptId — one per checkout attempt, not per order — so a redelivered Kafka command
+ * (same attempt id) is correctly answered with the stored outcome, while a genuinely new
+ * checkout attempt for the same order (e.g. retried after a prior failure) gets its own id
+ * and is evaluated fresh instead of replaying a stale result.
  */
 @Entity
 @Table(name = "processed_saga_steps")
@@ -25,7 +27,10 @@ import java.time.Instant;
 public class ProcessedSagaStep {
 
     @Id
-    @Column(name = "order_id")
+    @Column(name = "saga_attempt_id", length = 64)
+    private String sagaAttemptId;
+
+    @Column(name = "order_id", nullable = false)
     private Long orderId;
 
     @Column(nullable = false, length = 30)
