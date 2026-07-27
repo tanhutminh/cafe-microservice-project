@@ -1,4 +1,5 @@
 import { Component } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { TranslocoModule } from '@jsverse/transloco';
@@ -8,7 +9,7 @@ import { LanguageSwitcher } from '../../shared/language-switcher/language-switch
 @Component({
   selector: 'app-home',
   standalone: true,
-  imports: [MatButtonModule, MatCardModule, TranslocoModule, LanguageSwitcher],
+  imports: [MatButtonModule, MatCardModule, TranslocoModule, LanguageSwitcher, RouterLink],
   templateUrl: './home.html',
   styleUrl: './home.scss'
 })
