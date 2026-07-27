@@ -53,21 +53,22 @@ public class OrderCheckoutSaga {
 
     /** Step 2: publish the reservation command after the step-1 transaction has committed. */
     public void publishReservationCommand(Order order) {
+        String sagaAttemptId = sagaStateService.getCurrentAttemptId(order.getId());
         List<OrderLineItem> lines = order.getItems().stream()
                 .map(item -> new OrderLineItem(item.getMenuItemId(), item.getQuantity()))
                 .toList();
         kafkaTemplate.send(RESERVE_STOCK_TOPIC, String.valueOf(order.getId()),
-                new InventoryReserveStockCommand(order.getId(), lines));
+                new InventoryReserveStockCommand(order.getId(), sagaAttemptId, lines));
         sagaStateService.markStockReservationRequested(order.getId());
-        log.info("Checkout saga: requested stock reservation for order {}", order.getId());
+        log.info("Checkout saga: requested stock reservation for order {} (attempt {})", order.getId(), sagaAttemptId);
     }
 
     /** Step 4: apply inventory-service's reply — complete (PAID) or compensate (back to OPEN). */
     @KafkaListener(topics = STOCK_RESERVATION_REPLY_TOPIC)
     @Transactional
     public void onStockReservationReply(InventoryStockReservationReply reply) {
-        if (sagaStateService.isTerminal(reply.orderId())) {
-            log.info("Checkout saga: ignoring stock-reservation reply for order {} — already settled", reply.orderId());
+        if (sagaStateService.shouldIgnoreReply(reply.orderId(), reply.sagaAttemptId())) {
+            log.info("Checkout saga: ignoring stale/settled stock-reservation reply for order {}", reply.orderId());
             return;
         }
 

@@ -26,8 +26,10 @@ public class StockReservationListener {
 
     @KafkaListener(topics = "inventory.reserve-stock.command")
     public void onReserveStockCommand(InventoryReserveStockCommand command) {
-        InventoryStockReservationReply reply = stockReservationService.reserve(command.orderId(), command.items());
+        InventoryStockReservationReply reply =
+                stockReservationService.reserve(command.orderId(), command.sagaAttemptId(), command.items());
         kafkaTemplate.send(REPLY_TOPIC, String.valueOf(command.orderId()), reply);
-        log.info("Inventory saga step: order {} reservation success={}", command.orderId(), reply.success());
+        log.info("Inventory saga step: order {} attempt {} reservation success={}",
+                command.orderId(), command.sagaAttemptId(), reply.success());
     }
 }

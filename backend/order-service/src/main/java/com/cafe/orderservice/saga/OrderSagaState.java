@@ -29,6 +29,15 @@ public class OrderSagaState {
     @Column(name = "order_id")
     private Long orderId;
 
+    /**
+     * Identifies one checkout attempt (fresh UUID each time startCheckout runs), distinct from
+     * orderId. Kafka redelivery of the same command carries the same sagaAttemptId (correctly
+     * deduped); a brand-new checkout click for the same order after a prior failure gets a new
+     * one, so it's evaluated fresh instead of replaying the old outcome — see StockReservationService.
+     */
+    @Column(name = "saga_attempt_id", nullable = false, length = 64)
+    private String sagaAttemptId;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
     private SagaStep step;

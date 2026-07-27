@@ -43,19 +43,19 @@ public class StockReservationService {
     }
 
     @Transactional
-    public InventoryStockReservationReply reserve(Long orderId, List<OrderLineItem> items) {
-        var alreadyProcessed = processedSagaStepRepository.findById(orderId);
+    public InventoryStockReservationReply reserve(Long orderId, String sagaAttemptId, List<OrderLineItem> items) {
+        var alreadyProcessed = processedSagaStepRepository.findById(sagaAttemptId);
         if (alreadyProcessed.isPresent()) {
             ProcessedSagaStep step = alreadyProcessed.get();
             return step.isSuccess()
-                    ? InventoryStockReservationReply.success(orderId)
-                    : InventoryStockReservationReply.failure(orderId, step.getReason());
+                    ? InventoryStockReservationReply.success(orderId, sagaAttemptId)
+                    : InventoryStockReservationReply.failure(orderId, sagaAttemptId, step.getReason());
         }
 
         Map<Long, BigDecimal> requiredByIngredientId = computeRequiredQuantities(items);
         if (requiredByIngredientId.isEmpty()) {
-            saveProcessedStep(orderId, true, null);
-            return InventoryStockReservationReply.success(orderId);
+            saveProcessedStep(orderId, sagaAttemptId, true, null);
+            return InventoryStockReservationReply.success(orderId, sagaAttemptId);
         }
 
         List<Ingredient> lockedIngredients =
@@ -65,8 +65,8 @@ public class StockReservationService {
             BigDecimal required = requiredByIngredientId.get(ingredient.getId());
             if (ingredient.getCurrentStock().compareTo(required) < 0) {
                 String reason = "Insufficient stock: " + ingredient.getName();
-                saveProcessedStep(orderId, false, reason);
-                return InventoryStockReservationReply.failure(orderId, reason);
+                saveProcessedStep(orderId, sagaAttemptId, false, reason);
+                return InventoryStockReservationReply.failure(orderId, sagaAttemptId, reason);
             }
         }
 
@@ -82,8 +82,8 @@ public class StockReservationService {
                     .build());
         }
 
-        saveProcessedStep(orderId, true, null);
-        return InventoryStockReservationReply.success(orderId);
+        saveProcessedStep(orderId, sagaAttemptId, true, null);
+        return InventoryStockReservationReply.success(orderId, sagaAttemptId);
     }
 
     private Map<Long, BigDecimal> computeRequiredQuantities(List<OrderLineItem> items) {
@@ -102,8 +102,9 @@ public class StockReservationService {
         return required;
     }
 
-    private void saveProcessedStep(Long orderId, boolean success, String reason) {
+    private void saveProcessedStep(Long orderId, String sagaAttemptId, boolean success, String reason) {
         processedSagaStepRepository.save(ProcessedSagaStep.builder()
+                .sagaAttemptId(sagaAttemptId)
                 .orderId(orderId)
                 .step(STEP_RESERVE_STOCK)
                 .success(success)
