@@ -10,6 +10,12 @@
 <div class="pos-layout">
   <div class="tables-panel">
     <h3>{{ 'pos.tables' | transloco }}</h3>
+    @if (movingTable()) {
+      <div class="move-hint">
+        <span>{{ 'pos.moveTableHint' | transloco }}</span>
+        <button mat-button (click)="cancelMoveTable()">{{ 'common.cancel' | transloco }}</button>
+      </div>
+    }
     <div class="table-grid">
       @for (table of tables(); track table.id) {
         <button
@@ -95,6 +101,7 @@
       } @else if (order.status === 'OPEN') {
         <div class="actions">
           <button mat-stroked-button (click)="cancelOrder()">{{ 'pos.cancelOrder' | transloco }}</button>
+          <button mat-stroked-button (click)="startMoveTable()">{{ 'pos.moveTable' | transloco }}</button>
           <button mat-flat-button color="primary" [disabled]="order.items.length === 0" (click)="checkout('CASH')">
             {{ 'pos.payCash' | transloco }}
           </button>
@@ -104,6 +111,10 @@
         </div>
       } @else if (order.status === 'PAID') {
         <div class="success-banner">{{ 'pos.paid' | transloco }}</div>
+        <div class="actions">
+          <button mat-stroked-button (click)="startMoveTable()">{{ 'pos.moveTable' | transloco }}</button>
+          <button mat-flat-button color="primary" (click)="releaseTable()">{{ 'pos.releaseTable' | transloco }}</button>
+        </div>
       }
     </div>
   }

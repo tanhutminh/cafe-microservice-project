@@ -29,6 +29,18 @@ h4 {
   gap: 8px;
 }
 
+.move-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--mat-sys-tertiary-container);
+  padding: 6px 8px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
 .table-tile {
   display: flex;
   flex-direction: column;

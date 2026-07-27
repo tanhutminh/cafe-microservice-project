@@ -38,4 +38,11 @@ public class DiningTableController {
     public void delete(@PathVariable Long id) {
         diningTableService.delete(id);
     }
+
+    /** Staff action: mark a table empty again — independent of order/payment status. */
+    @PostMapping("/{id}/release")
+    public DiningTableResponse release(@PathVariable Long id) {
+        diningTableService.release(id);
+        return DiningTableResponse.from(diningTableService.findById(id));
+    }
 }

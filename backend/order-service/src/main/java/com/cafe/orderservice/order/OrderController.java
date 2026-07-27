@@ -3,6 +3,7 @@ package com.cafe.orderservice.order;
 import com.cafe.orderservice.order.dto.AddOrderItemRequest;
 import com.cafe.orderservice.order.dto.CheckoutRequest;
 import com.cafe.orderservice.order.dto.CreateOrderRequest;
+import com.cafe.orderservice.order.dto.MoveTableRequest;
 import com.cafe.orderservice.order.dto.OrderResponse;
 import com.cafe.orderservice.saga.OrderCheckoutSaga;
 import jakarta.validation.Valid;
@@ -50,6 +51,11 @@ public class OrderController {
     @PostMapping("/{id}/cancel")
     public OrderResponse cancel(@PathVariable Long id) {
         return OrderResponse.from(orderService.cancel(id));
+    }
+
+    @PostMapping("/{id}/move")
+    public OrderResponse moveTable(@PathVariable Long id, @Valid @RequestBody MoveTableRequest request) {
+        return OrderResponse.from(orderService.moveTable(id, request.tableId()));
     }
 
     /**

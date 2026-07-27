@@ -33,3 +33,7 @@ export interface AddOrderItemRequest {
 export interface CheckoutRequest {
   paymentMethod: string;
 }
+
+export interface MoveTableRequest {
+  tableId: number;
+}

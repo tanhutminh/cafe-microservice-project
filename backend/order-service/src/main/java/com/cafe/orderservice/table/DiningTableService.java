@@ -2,6 +2,8 @@ package com.cafe.orderservice.table;
 
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
+import com.cafe.orderservice.order.OrderRepository;
+import com.cafe.orderservice.order.OrderStatus;
 import com.cafe.orderservice.table.dto.DiningTableRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -11,10 +13,14 @@ import java.util.List;
 @Service
 public class DiningTableService {
 
-    private final DiningTableRepository diningTableRepository;
+    private static final List<OrderStatus> ACTIVE_ORDER_STATUSES = List.of(OrderStatus.OPEN, OrderStatus.PENDING_CONFIRMATION);
 
-    public DiningTableService(DiningTableRepository diningTableRepository) {
+    private final DiningTableRepository diningTableRepository;
+    private final OrderRepository orderRepository;
+
+    public DiningTableService(DiningTableRepository diningTableRepository, OrderRepository orderRepository) {
         this.diningTableRepository = diningTableRepository;
+        this.orderRepository = orderRepository;
     }
 
     public List<DiningTable> findAll() {
@@ -64,10 +70,18 @@ public class DiningTableService {
         diningTableRepository.save(table);
     }
 
-    /** Called by OrderService when an order on this table is paid or cancelled. */
+    /**
+     * Frees a table — called when an order is cancelled, when a table is moved off it, or by
+     * staff explicitly marking it empty (e.g. a customer paid but is still sitting, or has now
+     * left). Refuses while an OPEN/PENDING_CONFIRMATION order still claims the table, since two
+     * active orders on the same table would break the one-active-order-per-table invariant.
+     */
     @Transactional
     public void release(Long id) {
         DiningTable table = findById(id);
+        if (orderRepository.existsByTable_IdAndStatusIn(id, ACTIVE_ORDER_STATUSES)) {
+            throw new BusinessRuleException("Cannot release table with an active order: " + id);
+        }
         table.setStatus(TableStatus.AVAILABLE);
         diningTableRepository.save(table);
     }

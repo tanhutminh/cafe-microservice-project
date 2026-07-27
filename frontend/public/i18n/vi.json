@@ -57,6 +57,9 @@
     "payCash": "Thanh toán tiền mặt",
     "payCard": "Thanh toán thẻ",
     "processingPayment": "Đang xử lý thanh toán...",
-    "paid": "Đã thanh toán"
+    "paid": "Đã thanh toán",
+    "moveTable": "Đổi bàn",
+    "moveTableHint": "Chọn một bàn trống để chuyển đơn tới.",
+    "releaseTable": "Bàn đã trống / Giải phóng bàn"
   }
 }
