@@ -1,5 +1,6 @@
 import { Component, inject, signal } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
+import { MatChipsModule } from '@angular/material/chips';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
@@ -15,11 +16,15 @@ import { LanguageSwitcher } from '../../shared/language-switcher/language-switch
 import { CategoryDialog, CategoryDialogData } from './category-dialog';
 import { MenuItemDialog, MenuItemDialogData } from './menu-item-dialog';
 
+const CATEGORIES_TAB_INDEX = 0;
+const ITEMS_TAB_INDEX = 1;
+
 @Component({
   selector: 'app-menu-admin',
   standalone: true,
   imports: [
     MatButtonModule,
+    MatChipsModule,
     MatDialogModule,
     MatIconModule,
     MatSlideToggleModule,
@@ -39,6 +44,8 @@ export class MenuAdmin {
 
   readonly categories = signal<Category[]>([]);
   readonly menuItems = signal<MenuItem[]>([]);
+  readonly selectedTabIndex = signal(CATEGORIES_TAB_INDEX);
+  readonly filterCategory = signal<Category | null>(null);
 
   readonly categoryColumns = ['name', 'displayOrder', 'active', 'actions'];
   readonly itemColumns = ['name', 'categoryName', 'price', 'available', 'active', 'actions'];
@@ -53,10 +60,23 @@ export class MenuAdmin {
   }
 
   private reloadMenuItems(): void {
-    this.menuApi.listMenuItems().subscribe((items) => this.menuItems.set(items));
+    this.menuApi.listMenuItems(this.filterCategory()?.id).subscribe((items) => this.menuItems.set(items));
   }
 
-  openCategoryDialog(category: Category | null): void {
+  /** Row click on the Categories tab — jump to Menu Items filtered to that category. */
+  viewCategoryItems(category: Category): void {
+    this.filterCategory.set(category);
+    this.selectedTabIndex.set(ITEMS_TAB_INDEX);
+    this.reloadMenuItems();
+  }
+
+  clearCategoryFilter(): void {
+    this.filterCategory.set(null);
+    this.reloadMenuItems();
+  }
+
+  openCategoryDialog(category: Category | null, event?: Event): void {
+    event?.stopPropagation();
     const ref = this.dialog.open<CategoryDialog, CategoryDialogData, CategoryRequest>(CategoryDialog, {
       width: '400px',
       data: { category }
@@ -75,7 +95,8 @@ export class MenuAdmin {
     });
   }
 
-  deleteCategory(category: Category): void {
+  deleteCategory(category: Category, event: Event): void {
+    event.stopPropagation();
     this.menuApi.deleteCategory(category.id).subscribe(() => this.reloadCategories());
   }
 

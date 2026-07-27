@@ -14,8 +14,27 @@
 
 .toolbar-row {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   margin-bottom: 12px;
+}
+
+.filter-chip-set {
+  margin-right: auto;
+}
+
+.clickable-row {
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--mat-sys-surface-container-high);
+  }
+}
+
+.empty-hint {
+  color: var(--mat-sys-on-surface-variant);
+  text-align: center;
+  padding: 24px 0;
 }
 
 table {

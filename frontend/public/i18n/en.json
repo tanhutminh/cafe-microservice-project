@@ -38,6 +38,8 @@
     "description": "Description",
     "price": "Price",
     "imageUrl": "Image URL",
-    "available": "Available"
+    "available": "Available",
+    "filteredBy": "Category: {{name}}",
+    "noItems": "No items in this category yet."
   }
 }

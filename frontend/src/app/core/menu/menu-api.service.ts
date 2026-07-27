@@ -1,4 +1,4 @@
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 import { environment } from '../../../environments/environment';
@@ -25,8 +25,9 @@ export class MenuApiService {
     return this.http.delete<void>(`${environment.apiBaseUrl}/categories/${id}`);
   }
 
-  listMenuItems(): Observable<MenuItem[]> {
-    return this.http.get<MenuItem[]>(`${environment.apiBaseUrl}/menu-items`);
+  listMenuItems(categoryId?: number): Observable<MenuItem[]> {
+    const params = categoryId != null ? new HttpParams().set('categoryId', categoryId) : undefined;
+    return this.http.get<MenuItem[]>(`${environment.apiBaseUrl}/menu-items`, { params });
   }
 
   createMenuItem(request: MenuItemRequest): Observable<MenuItem> {
