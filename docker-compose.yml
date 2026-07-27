@@ -43,6 +43,18 @@ services:
       retries: 10
       start_period: 20s
 
+  kafka-ui:
+    image: kafbat/kafka-ui:latest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: cafe
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8090:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   config-server:
     build:
       context: ./backend
