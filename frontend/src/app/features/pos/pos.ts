@@ -41,6 +41,7 @@ export class Pos {
   readonly selectedTable = signal<DiningTable | null>(null);
   readonly currentOrder = signal<Order | null>(null);
   readonly checkingOut = signal(false);
+  readonly movingTable = signal(false);
 
   constructor() {
     this.reloadTables();
@@ -57,6 +58,12 @@ export class Pos {
   }
 
   selectTable(table: DiningTable): void {
+    if (this.movingTable()) {
+      if (table.status === 'AVAILABLE') {
+        this.moveToTable(table);
+      }
+      return;
+    }
     this.selectedTable.set(table);
     if (table.status === 'AVAILABLE') {
       this.orderApi.createOrder({ tableId: table.id }).subscribe((order) => {
@@ -71,6 +78,41 @@ export class Pos {
   closeOrderPanel(): void {
     this.selectedTable.set(null);
     this.currentOrder.set(null);
+    this.movingTable.set(false);
+  }
+
+  startMoveTable(): void {
+    this.movingTable.set(true);
+  }
+
+  cancelMoveTable(): void {
+    this.movingTable.set(false);
+  }
+
+  private moveToTable(table: DiningTable): void {
+    const order = this.currentOrder();
+    if (!order) {
+      this.movingTable.set(false);
+      return;
+    }
+    this.orderApi.moveTable(order.id, { tableId: table.id }).subscribe((updated) => {
+      this.currentOrder.set(updated);
+      this.selectedTable.set(table);
+      this.movingTable.set(false);
+      this.reloadTables();
+    });
+  }
+
+  /** Staff marks the table empty independent of payment status (pay-first-then-dine is allowed here). */
+  releaseTable(): void {
+    const order = this.currentOrder();
+    if (!order) {
+      return;
+    }
+    this.orderApi.releaseTable(order.tableId).subscribe(() => {
+      this.closeOrderPanel();
+      this.reloadTables();
+    });
   }
 
   addItem(item: MenuItem): void {

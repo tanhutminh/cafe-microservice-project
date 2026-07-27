@@ -57,6 +57,9 @@
     "payCash": "Pay cash",
     "payCard": "Pay card",
     "processingPayment": "Processing payment...",
-    "paid": "Paid"
+    "paid": "Paid",
+    "moveTable": "Move table",
+    "moveTableHint": "Pick an available table to move this order to.",
+    "releaseTable": "Table is empty / Release table"
   }
 }
