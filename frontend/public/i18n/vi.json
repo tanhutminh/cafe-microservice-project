@@ -16,7 +16,7 @@
   "home": {
     "welcome": "Xin chào, {{name}} ({{role}})",
     "loadingUser": "Đang tải thông tin người dùng...",
-    "comingSoon": "Order/POS, quản lý bàn, kho, báo cáo sẽ được bổ sung ở các milestone tiếp theo."
+    "comingSoon": "Quản lý kho và báo cáo sẽ được bổ sung ở các milestone tiếp theo."
   },
   "role": {
     "ADMIN": "Quản trị viên",
@@ -41,5 +41,22 @@
     "available": "Còn hàng",
     "filteredBy": "Danh mục: {{name}}",
     "noItems": "Danh mục này chưa có món nào."
+  },
+  "pos": {
+    "title": "Bán hàng (POS)",
+    "tables": "Bàn",
+    "tableStatus": {
+      "AVAILABLE": "Trống",
+      "OCCUPIED": "Có khách"
+    },
+    "menu": "Thực đơn",
+    "orderLocked": "Đơn đang xử lý, không thể sửa món.",
+    "emptyCart": "Chưa có món nào trong đơn.",
+    "grandTotal": "Tổng cộng",
+    "cancelOrder": "Hủy đơn",
+    "payCash": "Thanh toán tiền mặt",
+    "payCard": "Thanh toán thẻ",
+    "processingPayment": "Đang xử lý thanh toán...",
+    "paid": "Đã thanh toán"
   }
 }

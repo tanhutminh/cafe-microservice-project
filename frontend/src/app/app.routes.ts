@@ -17,5 +17,10 @@ export const routes: Routes = [
     loadComponent: () => import('./features/menu-admin/menu-admin').then((m) => m.MenuAdmin),
     canActivate: [roleGuard('ADMIN')]
   },
+  {
+    path: 'pos',
+    loadComponent: () => import('./features/pos/pos').then((m) => m.Pos),
+    canActivate: [roleGuard('ADMIN', 'CASHIER')]
+  },
   { path: '**', redirectTo: '' }
 ];

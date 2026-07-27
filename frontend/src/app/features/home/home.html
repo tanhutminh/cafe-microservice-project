@@ -18,6 +18,7 @@
       <p class="note">{{ 'home.comingSoon' | transloco }}</p>
     </mat-card-content>
     <mat-card-actions>
+      <button mat-flat-button color="primary" routerLink="/pos">{{ 'pos.title' | transloco }}</button>
       @if (authService.currentUser()?.role === 'ADMIN') {
         <button mat-flat-button color="primary" routerLink="/menu">{{ 'menu.title' | transloco }}</button>
       }

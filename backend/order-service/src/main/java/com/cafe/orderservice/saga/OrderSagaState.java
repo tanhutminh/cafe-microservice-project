@@ -1,0 +1,55 @@
+package com.cafe.orderservice.saga;
+
+import jakarta.persistence.*;
+import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+
+import java.time.Instant;
+
+/**
+ * Checkout saga orchestration bookkeeping (plan section 4) — one row per order that has
+ * ever started checkout. Not exposed via API; the order's own status/failureReason are
+ * what clients poll. sagaId == orderId (order-service is the orchestrator for its own
+ * aggregate, so no separate saga identity is needed).
+ */
+@Entity
+@Table(name = "order_saga_state")
+@Getter
+@Setter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+@AllArgsConstructor
+@Builder
+public class OrderSagaState {
+
+    @Id
+    @Column(name = "order_id")
+    private Long orderId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 30)
+    private SagaStep step;
+
+    @Column(name = "requested_at", nullable = false)
+    private Instant requestedAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private Instant updatedAt;
+
+    @PrePersist
+    void onCreate() {
+        Instant now = Instant.now();
+        if (requestedAt == null) {
+            requestedAt = now;
+        }
+        updatedAt = now;
+    }
+
+    @PreUpdate
+    void onUpdate() {
+        updatedAt = Instant.now();
+    }
+}

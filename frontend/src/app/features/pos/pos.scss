@@ -1,0 +1,145 @@
+.spacer {
+  flex: 1 1 auto;
+}
+
+.pos-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr 320px;
+  gap: 16px;
+  padding: 16px;
+  align-items: start;
+}
+
+.tables-panel,
+.menu-panel,
+.cart-panel {
+  background: var(--mat-sys-surface-container-low);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+h3,
+h4 {
+  margin: 0 0 8px;
+}
+
+.table-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.table-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 8px;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background: var(--mat-sys-tertiary-container);
+  cursor: pointer;
+  font: inherit;
+
+  &.occupied {
+    background: var(--mat-sys-error-container);
+  }
+
+  &.selected {
+    border-color: var(--mat-sys-primary);
+  }
+}
+
+.table-number {
+  font-weight: 600;
+}
+
+.table-status {
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+.category-block {
+  margin-bottom: 16px;
+}
+
+.item-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.menu-item-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 8px;
+  border-radius: 8px;
+  border: none;
+  background: var(--mat-sys-surface-container-high);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+
+  &:hover {
+    background: var(--mat-sys-surface-container-highest);
+  }
+
+  .price {
+    font-size: 0.8rem;
+    opacity: 0.75;
+  }
+}
+
+.cart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cart-table {
+  width: 100%;
+  margin-bottom: 8px;
+
+  td {
+    padding: 4px 2px;
+  }
+}
+
+.grand-total {
+  font-weight: 600;
+  margin: 8px 0;
+}
+
+.hint {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.error-banner {
+  background: var(--mat-sys-error-container);
+  color: var(--mat-sys-on-error-container);
+  padding: 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+.success-banner {
+  background: var(--mat-sys-tertiary-container);
+  padding: 8px;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.processing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

@@ -1,0 +1,110 @@
+<mat-toolbar color="primary">
+  <a mat-icon-button routerLink="/">
+    <mat-icon>arrow_back</mat-icon>
+  </a>
+  <span>{{ 'pos.title' | transloco }}</span>
+  <span class="spacer"></span>
+  <app-language-switcher></app-language-switcher>
+</mat-toolbar>
+
+<div class="pos-layout">
+  <div class="tables-panel">
+    <h3>{{ 'pos.tables' | transloco }}</h3>
+    <div class="table-grid">
+      @for (table of tables(); track table.id) {
+        <button
+          type="button"
+          class="table-tile"
+          [class.occupied]="table.status === 'OCCUPIED'"
+          [class.selected]="selectedTable()?.id === table.id"
+          (click)="selectTable(table)"
+        >
+          <span class="table-number">{{ table.tableNumber }}</span>
+          <span class="table-status">{{ 'pos.tableStatus.' + table.status | transloco }}</span>
+        </button>
+      }
+    </div>
+  </div>
+
+  @if (currentOrder(); as order) {
+    <div class="menu-panel">
+      <h3>{{ 'pos.menu' | transloco }}</h3>
+      @if (order.status !== 'OPEN') {
+        <p class="hint">{{ 'pos.orderLocked' | transloco }}</p>
+      } @else {
+        @for (category of categories(); track category.id) {
+          @if (itemsByCategory(category.id).length > 0) {
+            <div class="category-block">
+              <h4>{{ category.name }}</h4>
+              <div class="item-grid">
+                @for (item of itemsByCategory(category.id); track item.id) {
+                  <button type="button" class="menu-item-tile" (click)="addItem(item)">
+                    <span>{{ item.name }}</span>
+                    <span class="price">{{ item.price }}</span>
+                  </button>
+                }
+              </div>
+            </div>
+          }
+        }
+      }
+    </div>
+
+    <div class="cart-panel">
+      <div class="cart-header">
+        <h3>{{ order.tableNumber }}</h3>
+        <button mat-icon-button (click)="closeOrderPanel()">
+          <mat-icon>close</mat-icon>
+        </button>
+      </div>
+
+      @if (order.failureReason) {
+        <div class="error-banner">{{ order.failureReason }}</div>
+      }
+
+      <table class="cart-table">
+        <tbody>
+          @for (item of order.items; track item.id) {
+            <tr>
+              <td>{{ item.name }}</td>
+              <td>x{{ item.quantity }}</td>
+              <td>{{ item.price * item.quantity }}</td>
+              <td>
+                @if (order.status === 'OPEN') {
+                  <button mat-icon-button (click)="removeItem(item.id)">
+                    <mat-icon>delete</mat-icon>
+                  </button>
+                }
+              </td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="4" class="hint">{{ 'pos.emptyCart' | transloco }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+
+      <div class="grand-total">{{ 'pos.grandTotal' | transloco }}: {{ order.grandTotal }}</div>
+
+      @if (checkingOut()) {
+        <div class="processing">
+          <mat-spinner diameter="32"></mat-spinner>
+          <p>{{ 'pos.processingPayment' | transloco }}</p>
+        </div>
+      } @else if (order.status === 'OPEN') {
+        <div class="actions">
+          <button mat-stroked-button (click)="cancelOrder()">{{ 'pos.cancelOrder' | transloco }}</button>
+          <button mat-flat-button color="primary" [disabled]="order.items.length === 0" (click)="checkout('CASH')">
+            {{ 'pos.payCash' | transloco }}
+          </button>
+          <button mat-flat-button color="accent" [disabled]="order.items.length === 0" (click)="checkout('CARD')">
+            {{ 'pos.payCard' | transloco }}
+          </button>
+        </div>
+      } @else if (order.status === 'PAID') {
+        <div class="success-banner">{{ 'pos.paid' | transloco }}</div>
+      }
+    </div>
+  }
+</div>

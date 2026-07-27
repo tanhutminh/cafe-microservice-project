@@ -16,7 +16,7 @@
   "home": {
     "welcome": "Hello, {{name}} ({{role}})",
     "loadingUser": "Loading user info...",
-    "comingSoon": "Order/POS, table management, inventory, and reports will be added in upcoming milestones."
+    "comingSoon": "Inventory management and reports will be added in upcoming milestones."
   },
   "role": {
     "ADMIN": "Administrator",
@@ -41,5 +41,22 @@
     "available": "Available",
     "filteredBy": "Category: {{name}}",
     "noItems": "No items in this category yet."
+  },
+  "pos": {
+    "title": "POS",
+    "tables": "Tables",
+    "tableStatus": {
+      "AVAILABLE": "Available",
+      "OCCUPIED": "Occupied"
+    },
+    "menu": "Menu",
+    "orderLocked": "Order is being processed and can no longer be edited.",
+    "emptyCart": "No items in this order yet.",
+    "grandTotal": "Grand total",
+    "cancelOrder": "Cancel order",
+    "payCash": "Pay cash",
+    "payCard": "Pay card",
+    "processingPayment": "Processing payment...",
+    "paid": "Paid"
   }
 }

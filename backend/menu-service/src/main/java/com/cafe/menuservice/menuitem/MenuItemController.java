@@ -27,6 +27,11 @@ public class MenuItemController {
         return menuItemService.search(categoryId, available).stream().map(MenuItemResponse::from).toList();
     }
 
+    @GetMapping("/{id}")
+    public MenuItemResponse findById(@PathVariable Long id) {
+        return MenuItemResponse.from(menuItemService.findById(id));
+    }
+
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public MenuItemResponse create(@Valid @RequestBody MenuItemRequest request) {
