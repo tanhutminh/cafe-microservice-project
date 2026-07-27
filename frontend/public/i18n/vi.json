@@ -38,6 +38,8 @@
     "description": "Mô tả",
     "price": "Giá",
     "imageUrl": "URL hình ảnh",
-    "available": "Còn hàng"
+    "available": "Còn hàng",
+    "filteredBy": "Danh mục: {{name}}",
+    "noItems": "Danh mục này chưa có món nào."
   }
 }
