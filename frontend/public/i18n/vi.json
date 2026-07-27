@@ -1,7 +1,9 @@
 {
   "common": {
     "appName": "Cafe Manager",
-    "language": "Ngôn ngữ"
+    "language": "Ngôn ngữ",
+    "cancel": "Hủy",
+    "save": "Lưu"
   },
   "auth": {
     "subtitle": "Đăng nhập để tiếp tục",
@@ -14,10 +16,28 @@
   "home": {
     "welcome": "Xin chào, {{name}} ({{role}})",
     "loadingUser": "Đang tải thông tin người dùng...",
-    "comingSoon": "Menu, order/POS, quản lý bàn, kho, báo cáo sẽ được bổ sung ở các milestone tiếp theo."
+    "comingSoon": "Order/POS, quản lý bàn, kho, báo cáo sẽ được bổ sung ở các milestone tiếp theo."
   },
   "role": {
     "ADMIN": "Quản trị viên",
     "CASHIER": "Thu ngân"
+  },
+  "menu": {
+    "title": "Quản lý Menu",
+    "categoriesTab": "Danh mục",
+    "itemsTab": "Món",
+    "newCategory": "Thêm danh mục",
+    "editCategory": "Sửa danh mục",
+    "categoryName": "Tên danh mục",
+    "displayOrder": "Thứ tự hiển thị",
+    "active": "Đang dùng",
+    "newItem": "Thêm món",
+    "editItem": "Sửa món",
+    "category": "Danh mục",
+    "itemName": "Tên món",
+    "description": "Mô tả",
+    "price": "Giá",
+    "imageUrl": "URL hình ảnh",
+    "available": "Còn hàng"
   }
 }

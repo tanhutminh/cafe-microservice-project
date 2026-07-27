@@ -1,5 +1,6 @@
 import { Routes } from '@angular/router';
 import { authGuard } from './core/auth/auth.guard';
+import { roleGuard } from './core/auth/role.guard';
 
 export const routes: Routes = [
   {
@@ -10,6 +11,11 @@ export const routes: Routes = [
     path: '',
     loadComponent: () => import('./features/home/home').then((m) => m.Home),
     canActivate: [authGuard]
+  },
+  {
+    path: 'menu',
+    loadComponent: () => import('./features/menu-admin/menu-admin').then((m) => m.MenuAdmin),
+    canActivate: [roleGuard('ADMIN')]
   },
   { path: '**', redirectTo: '' }
 ];

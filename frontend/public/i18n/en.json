@@ -1,7 +1,9 @@
 {
   "common": {
     "appName": "Cafe Manager",
-    "language": "Language"
+    "language": "Language",
+    "cancel": "Cancel",
+    "save": "Save"
   },
   "auth": {
     "subtitle": "Sign in to continue",
@@ -14,10 +16,28 @@
   "home": {
     "welcome": "Hello, {{name}} ({{role}})",
     "loadingUser": "Loading user info...",
-    "comingSoon": "Menu, order/POS, table management, inventory, and reports will be added in upcoming milestones."
+    "comingSoon": "Order/POS, table management, inventory, and reports will be added in upcoming milestones."
   },
   "role": {
     "ADMIN": "Administrator",
     "CASHIER": "Cashier"
+  },
+  "menu": {
+    "title": "Manage Menu",
+    "categoriesTab": "Categories",
+    "itemsTab": "Menu Items",
+    "newCategory": "New Category",
+    "editCategory": "Edit Category",
+    "categoryName": "Category Name",
+    "displayOrder": "Display Order",
+    "active": "Active",
+    "newItem": "New Item",
+    "editItem": "Edit Item",
+    "category": "Category",
+    "itemName": "Item Name",
+    "description": "Description",
+    "price": "Price",
+    "imageUrl": "Image URL",
+    "available": "Available"
   }
 }
