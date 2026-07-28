@@ -51,6 +51,7 @@
     },
     "menu": "Thực đơn",
     "orderLocked": "Đơn đang xử lý, không thể sửa món.",
+    "orderPaidHint": "Đơn đã thanh toán, không thể sửa món.",
     "emptyCart": "Chưa có món nào trong đơn.",
     "grandTotal": "Tổng cộng",
     "cancelOrder": "Hủy đơn",

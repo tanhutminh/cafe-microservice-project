@@ -51,6 +51,7 @@
     },
     "menu": "Menu",
     "orderLocked": "Order is being processed and can no longer be edited.",
+    "orderPaidHint": "Order is already paid and can no longer be edited.",
     "emptyCart": "No items in this order yet.",
     "grandTotal": "Grand total",
     "cancelOrder": "Cancel order",
