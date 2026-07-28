@@ -8,10 +8,10 @@ import java.util.List;
  * it, attempts an all-or-nothing stock deduction, and replies on
  * "inventory.stock-reservation.reply" with an {@link InventoryStockReservationReply}.
  *
- * sagaAttemptId identifies this specific checkout attempt (fresh per attempt, not per order) —
- * it's the idempotency key inventory-service dedupes on, so a redelivered command is correctly
- * ignored while a genuinely new attempt for the same order (e.g. retried after a prior failure)
- * is evaluated fresh instead of replaying the old outcome.
+ * The idempotency/correlation key for this attempt travels as the Kafka correlation id
+ * header (KafkaHeaders.CORRELATION_ID — the Correlation Identifier pattern), not as a
+ * payload field — it's message envelope metadata, not business data, so it stays out of
+ * this record. See com.cafe.orderservice.saga.OrderCheckoutSaga for how it's set.
  */
-public record InventoryReserveStockCommand(Long orderId, String sagaAttemptId, List<OrderLineItem> items) {
+public record InventoryReserveStockCommand(Long orderId, List<OrderLineItem> items) {
 }

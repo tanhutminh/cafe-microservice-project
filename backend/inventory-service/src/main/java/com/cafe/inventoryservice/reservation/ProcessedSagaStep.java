@@ -12,10 +12,11 @@ import java.time.Instant;
 
 /**
  * Idempotency record for the reserve-stock saga command (plan section 4). Keyed by
- * sagaAttemptId — one per checkout attempt, not per order — so a redelivered Kafka command
- * (same attempt id) is correctly answered with the stored outcome, while a genuinely new
- * checkout attempt for the same order (e.g. retried after a prior failure) gets its own id
- * and is evaluated fresh instead of replaying a stale result.
+ * correlationId — the Kafka Correlation Identifier (KafkaHeaders.CORRELATION_ID), one per
+ * checkout attempt rather than per order — so a redelivered Kafka command (same correlation
+ * id) is correctly answered with the stored outcome, while a genuinely new checkout attempt
+ * for the same order (e.g. retried after a prior failure) gets its own id and is evaluated
+ * fresh instead of replaying a stale result.
  */
 @Entity
 @Table(name = "processed_saga_steps")
@@ -27,8 +28,8 @@ import java.time.Instant;
 public class ProcessedSagaStep {
 
     @Id
-    @Column(name = "saga_attempt_id", length = 64)
-    private String sagaAttemptId;
+    @Column(name = "correlation_id", length = 64)
+    private String correlationId;
 
     @Column(name = "order_id", nullable = false)
     private Long orderId;

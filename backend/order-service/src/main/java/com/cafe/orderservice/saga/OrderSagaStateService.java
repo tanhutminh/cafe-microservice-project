@@ -16,24 +16,24 @@ public class OrderSagaStateService {
         this.sagaStateRepository = sagaStateRepository;
     }
 
-    /** Starts (or restarts) the saga for an order and returns the fresh attempt id to publish with. */
+    /** Starts (or restarts) the saga for an order and returns the fresh correlation id to publish with. */
     @Transactional
     public String start(Long orderId) {
-        String sagaAttemptId = UUID.randomUUID().toString();
+        String correlationId = UUID.randomUUID().toString();
         OrderSagaState state = OrderSagaState.builder()
                 .orderId(orderId)
-                .sagaAttemptId(sagaAttemptId)
+                .correlationId(correlationId)
                 .step(SagaStep.STARTED)
                 .requestedAt(Instant.now())
                 .build();
         sagaStateRepository.save(state);
-        return sagaAttemptId;
+        return correlationId;
     }
 
     @Transactional(readOnly = true)
-    public String getCurrentAttemptId(Long orderId) {
+    public String getCurrentCorrelationId(Long orderId) {
         return sagaStateRepository.findById(orderId)
-                .map(OrderSagaState::getSagaAttemptId)
+                .map(OrderSagaState::getCorrelationId)
                 .orElseThrow(() -> ResourceNotFoundException.of("OrderSagaState", orderId));
     }
 
@@ -58,11 +58,11 @@ public class OrderSagaStateService {
      * (the order was checked out again — e.g. after a prior failure — before this one arrived).
      */
     @Transactional(readOnly = true)
-    public boolean shouldIgnoreReply(Long orderId, String sagaAttemptId) {
+    public boolean shouldIgnoreReply(Long orderId, String correlationId) {
         return sagaStateRepository.findById(orderId)
                 .map(state -> state.getStep() == SagaStep.COMPLETED
                         || state.getStep() == SagaStep.COMPENSATED
-                        || !state.getSagaAttemptId().equals(sagaAttemptId))
+                        || !state.getCorrelationId().equals(correlationId))
                 .orElse(true);
     }
 
