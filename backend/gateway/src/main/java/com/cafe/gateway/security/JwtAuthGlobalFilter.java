@@ -5,12 +5,14 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import jakarta.annotation.PostConstruct;
+import org.springframework.cloud.gateway.config.GlobalCorsProperties;
 import org.springframework.core.Ordered;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.stereotype.Component;
+import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
@@ -35,10 +37,12 @@ public class JwtAuthGlobalFilter implements WebFilter, Ordered {
     );
 
     private final JwtProperties jwtProperties;
+    private final GlobalCorsProperties globalCorsProperties;
     private PublicKey publicKey;
 
-    public JwtAuthGlobalFilter(JwtProperties jwtProperties) {
+    public JwtAuthGlobalFilter(JwtProperties jwtProperties, GlobalCorsProperties globalCorsProperties) {
         this.jwtProperties = jwtProperties;
+        this.globalCorsProperties = globalCorsProperties;
     }
 
     @PostConstruct
@@ -116,7 +120,35 @@ public class JwtAuthGlobalFilter implements WebFilter, Ordered {
     }
 
     private Mono<Void> unauthorized(ServerWebExchange exchange) {
+        applyCorsHeaders(exchange);
         exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
         return exchange.getResponse().setComplete();
+    }
+
+    /**
+     * A 401 short-circuits the exchange before it reaches Gateway's route handler mapping,
+     * which is where {@code spring.cloud.gateway.server.webflux.globalcors} normally adds
+     * CORS response headers. Without this, a browser sees a response with no
+     * Access-Control-Allow-Origin header and reports a CORS failure instead of a 401,
+     * so the SPA's redirect-to-login on 401 never fires.
+     */
+    private void applyCorsHeaders(ServerWebExchange exchange) {
+        String requestOrigin = exchange.getRequest().getHeaders().getOrigin();
+        if (requestOrigin == null) {
+            return;
+        }
+        CorsConfiguration corsConfig = globalCorsProperties.getCorsConfigurations().get("/**");
+        if (corsConfig == null) {
+            return;
+        }
+        String allowedOrigin = corsConfig.checkOrigin(requestOrigin);
+        if (allowedOrigin == null) {
+            return;
+        }
+        HttpHeaders headers = exchange.getResponse().getHeaders();
+        headers.set(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, allowedOrigin);
+        if (Boolean.TRUE.equals(corsConfig.getAllowCredentials())) {
+            headers.set(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+        }
     }
 }
