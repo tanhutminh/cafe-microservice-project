@@ -37,7 +37,16 @@ eureka:
     service-url:
       defaultZone: http://localhost:8761/eureka/
   instance:
-    prefer-ip-address: true
+    # Registering the auto-detected host IP breaks when this service runs bare
+    # (e.g. from an IDE) alongside the rest of the stack in Docker: Windows may
+    # pick a virtual adapter address (VPN/WSL/Hyper-V) that containers can't
+    # route to, so the gateway's lb://ORDER-SERVICE calls hang/500. Advertise
+    # host.docker.internal instead - Docker's Linux containers can always
+    # reach the host through it. Dockerized runs override this back to
+    # prefer-ip-address (see docker-compose.yml) since same-network container
+    # IPs work fine there.
+    hostname: host.docker.internal
+    prefer-ip-address: false
 
 management:
   endpoints:
