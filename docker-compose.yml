@@ -170,6 +170,7 @@ services:
       SPRING_DATASOURCE_USERNAME: cafe
       SPRING_DATASOURCE_PASSWORD: cafe
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
     depends_on:
       postgres:
         condition: service_healthy
