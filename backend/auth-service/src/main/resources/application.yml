@@ -13,8 +13,8 @@ spring:
         max-interval: 10000
   datasource:
     url: jdbc:postgresql://localhost:5432/auth_db
-    username: cafe
-    password: cafe
+    username: auth_service
+    password: auth_service_pw
   jpa:
     hibernate:
       ddl-auto: validate

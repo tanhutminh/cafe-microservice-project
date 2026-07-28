@@ -8,8 +8,8 @@ spring:
       uri: http://localhost:8888
   datasource:
     url: jdbc:postgresql://localhost:5432/inventory_db
-    username: cafe
-    password: cafe
+    username: inventory_service
+    password: inventory_service_pw
   jpa:
     hibernate:
       ddl-auto: validate
