@@ -87,7 +87,7 @@ public class OrderCheckoutSaga {
         if (reply.success()) {
             Order order = orderService.markPaid(reply.orderId());
             sagaStateService.markCompleted(reply.orderId());
-            publishOrderPaid(order);
+            publishOrderPaid(order, correlationId);
             log.info("Checkout saga: order {} PAID", reply.orderId());
         } else {
             orderService.compensateToOpen(reply.orderId(), reply.reason());
@@ -96,7 +96,7 @@ public class OrderCheckoutSaga {
         }
     }
 
-    private void publishOrderPaid(Order order) {
+    private void publishOrderPaid(Order order, String correlationId) {
         List<OrderLineItem> lines = order.getItems().stream()
                 .map(item -> new OrderLineItem(item.getMenuItemId(), item.getQuantity()))
                 .toList();
@@ -105,6 +105,13 @@ public class OrderCheckoutSaga {
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
         OrderPaidEvent event = new OrderPaidEvent(
                 order.getId(), order.getTable().getId(), order.getClosedAt(), lines, grandTotal, order.getPaymentMethod());
-        kafkaTemplate.send(ORDER_PAID_TOPIC, String.valueOf(order.getId()), event);
+
+        Message<OrderPaidEvent> message = MessageBuilder
+                .withPayload(event)
+                .setHeader(KafkaHeaders.TOPIC, ORDER_PAID_TOPIC)
+                .setHeader(KafkaHeaders.KEY, String.valueOf(order.getId()))
+                .setHeader(KafkaHeaders.CORRELATION_ID, correlationId)
+                .build();
+        kafkaTemplate.send(message);
     }
 }
