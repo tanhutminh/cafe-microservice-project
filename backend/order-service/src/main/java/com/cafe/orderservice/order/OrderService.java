@@ -30,10 +30,13 @@ public class OrderService {
                 .orElseThrow(() -> ResourceNotFoundException.of("Order", id));
     }
 
-    /** The order currently open (or mid-checkout) on a table, if any — used by the POS screen. */
-    public Order getActiveOrderForTable(Long tableId) {
-        return orderRepository.findActiveByTableId(tableId)
-                .orElseThrow(() -> ResourceNotFoundException.of("Active order for table", tableId));
+    /**
+     * The order currently holding a table (open, mid-checkout, or paid-but-not-yet-released) —
+     * used by the POS screen when staff click an OCCUPIED table.
+     */
+    public Order getCurrentOrderForTable(Long tableId) {
+        return orderRepository.findCurrentByTableId(tableId)
+                .orElseThrow(() -> ResourceNotFoundException.of("Current order for table", tableId));
     }
 
     @Transactional

@@ -28,8 +28,8 @@ public class OrderController {
     }
 
     @GetMapping(params = "tableId")
-    public OrderResponse getActiveOrderForTable(@RequestParam Long tableId) {
-        return OrderResponse.from(orderService.getActiveOrderForTable(tableId));
+    public OrderResponse getCurrentOrderForTable(@RequestParam Long tableId) {
+        return OrderResponse.from(orderService.getCurrentOrderForTable(tableId));
     }
 
     @PostMapping

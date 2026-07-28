@@ -71,7 +71,10 @@ export class Pos {
         this.reloadTables();
       });
     } else {
-      this.orderApi.getActiveOrderForTable(table.id).subscribe((order) => this.currentOrder.set(order));
+      this.orderApi.getCurrentOrderForTable(table.id).subscribe({
+        next: (order) => this.currentOrder.set(order),
+        error: () => this.selectedTable.set(null)
+      });
     }
   }
 

@@ -17,7 +17,7 @@ export class OrderApiService {
     return this.http.get<Order>(`${environment.apiBaseUrl}/orders/${orderId}`);
   }
 
-  getActiveOrderForTable(tableId: number): Observable<Order> {
+  getCurrentOrderForTable(tableId: number): Observable<Order> {
     const params = new HttpParams().set('tableId', tableId);
     return this.http.get<Order>(`${environment.apiBaseUrl}/orders`, { params });
   }
