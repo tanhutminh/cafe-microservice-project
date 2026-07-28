@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.List;
 
@@ -34,6 +35,11 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleServiceUnavailable(ServiceUnavailableException e, HttpServletRequest request) {
         log.warn("Downstream call unavailable handling {} {}: {}", request.getMethod(), request.getRequestURI(), e.getMessage());
         return build(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage(), request);
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiError> handleNoResource(NoResourceFoundException e, HttpServletRequest request) {
+        return build(HttpStatus.NOT_FOUND, "No resource found for this path", request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
