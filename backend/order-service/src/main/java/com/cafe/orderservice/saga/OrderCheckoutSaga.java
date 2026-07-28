@@ -10,6 +10,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -53,21 +57,29 @@ public class OrderCheckoutSaga {
 
     /** Step 2: publish the reservation command after the step-1 transaction has committed. */
     public void publishReservationCommand(Order order) {
-        String sagaAttemptId = sagaStateService.getCurrentAttemptId(order.getId());
+        String correlationId = sagaStateService.getCurrentCorrelationId(order.getId());
         List<OrderLineItem> lines = order.getItems().stream()
                 .map(item -> new OrderLineItem(item.getMenuItemId(), item.getQuantity()))
                 .toList();
-        kafkaTemplate.send(RESERVE_STOCK_TOPIC, String.valueOf(order.getId()),
-                new InventoryReserveStockCommand(order.getId(), sagaAttemptId, lines));
+
+        Message<InventoryReserveStockCommand> message = MessageBuilder
+                .withPayload(new InventoryReserveStockCommand(order.getId(), lines))
+                .setHeader(KafkaHeaders.TOPIC, RESERVE_STOCK_TOPIC)
+                .setHeader(KafkaHeaders.KEY, String.valueOf(order.getId()))
+                .setHeader(KafkaHeaders.CORRELATION_ID, correlationId)
+                .build();
+        kafkaTemplate.send(message);
+
         sagaStateService.markStockReservationRequested(order.getId());
-        log.info("Checkout saga: requested stock reservation for order {} (attempt {})", order.getId(), sagaAttemptId);
+        log.info("Checkout saga: requested stock reservation for order {} (correlation {})", order.getId(), correlationId);
     }
 
     /** Step 4: apply inventory-service's reply — complete (PAID) or compensate (back to OPEN). */
     @KafkaListener(topics = STOCK_RESERVATION_REPLY_TOPIC)
     @Transactional
-    public void onStockReservationReply(InventoryStockReservationReply reply) {
-        if (sagaStateService.shouldIgnoreReply(reply.orderId(), reply.sagaAttemptId())) {
+    public void onStockReservationReply(InventoryStockReservationReply reply,
+                                         @Header(KafkaHeaders.CORRELATION_ID) String correlationId) {
+        if (sagaStateService.shouldIgnoreReply(reply.orderId(), correlationId)) {
             log.info("Checkout saga: ignoring stale/settled stock-reservation reply for order {}", reply.orderId());
             return;
         }

@@ -30,13 +30,16 @@ public class OrderSagaState {
     private Long orderId;
 
     /**
-     * Identifies one checkout attempt (fresh UUID each time startCheckout runs), distinct from
-     * orderId. Kafka redelivery of the same command carries the same sagaAttemptId (correctly
-     * deduped); a brand-new checkout click for the same order after a prior failure gets a new
-     * one, so it's evaluated fresh instead of replaying the old outcome — see StockReservationService.
+     * The Kafka Correlation Identifier (KafkaHeaders.CORRELATION_ID) for the current checkout
+     * attempt — fresh UUID each time startCheckout runs, distinct from orderId. Kafka
+     * redelivery of the same command carries the same correlationId (correctly deduped by
+     * inventory-service's idempotent receiver); a brand-new checkout click for the same order
+     * after a prior failure gets a new one, so it's evaluated fresh instead of replaying the
+     * old outcome. order-service also uses it to match an incoming reply to the attempt it's
+     * currently waiting on — see OrderSagaStateService.shouldIgnoreReply.
      */
-    @Column(name = "saga_attempt_id", nullable = false, length = 64)
-    private String sagaAttemptId;
+    @Column(name = "correlation_id", nullable = false, length = 64)
+    private String correlationId;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
