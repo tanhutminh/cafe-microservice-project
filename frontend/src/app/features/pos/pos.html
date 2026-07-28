@@ -35,9 +35,11 @@
   @if (currentOrder(); as order) {
     <div class="menu-panel">
       <h3>{{ 'pos.menu' | transloco }}</h3>
-      @if (order.status !== 'OPEN') {
+      @if (order.status === 'PENDING_CONFIRMATION') {
         <p class="hint">{{ 'pos.orderLocked' | transloco }}</p>
-      } @else {
+      } @else if (order.status === 'PAID') {
+        <p class="hint">{{ 'pos.orderPaidHint' | transloco }}</p>
+      } @else if (order.status === 'OPEN') {
         @for (category of categories(); track category.id) {
           @if (itemsByCategory(category.id).length > 0) {
             <div class="category-block">
