@@ -15,10 +15,21 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     /** Used to guard table release/move — a table must not be freed while an order is still active on it. */
     boolean existsByTable_IdAndStatusIn(Long tableId, Collection<OrderStatus> statuses);
 
+    /**
+     * The order currently holding a table — OPEN/PENDING_CONFIRMATION (actively being worked
+     * on) or PAID (settled but the table hasn't been released yet, since payment no longer
+     * auto-releases it). CANCELLED is excluded because cancelling always releases the table
+     * immediately, so no CANCELLED order is ever the "current" one for an OCCUPIED table.
+     * LIMIT 1 matters here: unlike before, a table can accumulate more than one non-cancelled
+     * order over time (an old PAID one, then a new one after release+reoccupy), so this must
+     * pick the single most recent instead of relying on at-most-one-row-ever like the old
+     * OPEN/PENDING_CONFIRMATION-only query could.
+     */
     @Query("""
             SELECT o FROM Order o JOIN FETCH o.table LEFT JOIN FETCH o.items
-            WHERE o.table.id = :tableId AND o.status NOT IN (com.cafe.orderservice.order.OrderStatus.PAID, com.cafe.orderservice.order.OrderStatus.CANCELLED)
+            WHERE o.table.id = :tableId AND o.status <> com.cafe.orderservice.order.OrderStatus.CANCELLED
             ORDER BY o.createdAt DESC
+            LIMIT 1
             """)
-    Optional<Order> findActiveByTableId(@Param("tableId") Long tableId);
+    Optional<Order> findCurrentByTableId(@Param("tableId") Long tableId);
 }
