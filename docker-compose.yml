@@ -115,8 +115,8 @@ services:
       SPRING_CLOUD_CONFIG_URI: "http://config-server:8888"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://eureka-server:8761/eureka/"
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/auth_db"
-      SPRING_DATASOURCE_USERNAME: cafe
-      SPRING_DATASOURCE_PASSWORD: cafe
+      SPRING_DATASOURCE_USERNAME: auth_service
+      SPRING_DATASOURCE_PASSWORD: auth_service_pw
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,8 +141,8 @@ services:
       SPRING_CLOUD_CONFIG_URI: "http://config-server:8888"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://eureka-server:8761/eureka/"
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/menu_db"
-      SPRING_DATASOURCE_USERNAME: cafe
-      SPRING_DATASOURCE_PASSWORD: cafe
+      SPRING_DATASOURCE_USERNAME: menu_service
+      SPRING_DATASOURCE_PASSWORD: menu_service_pw
     depends_on:
       postgres:
         condition: service_healthy
@@ -167,8 +167,8 @@ services:
       SPRING_CLOUD_CONFIG_URI: "http://config-server:8888"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://eureka-server:8761/eureka/"
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/order_db"
-      SPRING_DATASOURCE_USERNAME: cafe
-      SPRING_DATASOURCE_PASSWORD: cafe
+      SPRING_DATASOURCE_USERNAME: order_service
+      SPRING_DATASOURCE_PASSWORD: order_service_pw
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
     depends_on:
@@ -197,8 +197,8 @@ services:
       SPRING_CLOUD_CONFIG_URI: "http://config-server:8888"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://eureka-server:8761/eureka/"
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/inventory_db"
-      SPRING_DATASOURCE_USERNAME: cafe
-      SPRING_DATASOURCE_PASSWORD: cafe
+      SPRING_DATASOURCE_USERNAME: inventory_service
+      SPRING_DATASOURCE_PASSWORD: inventory_service_pw
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
     depends_on:
       postgres:
@@ -226,8 +226,8 @@ services:
       SPRING_CLOUD_CONFIG_URI: "http://config-server:8888"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://eureka-server:8761/eureka/"
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/report_db"
-      SPRING_DATASOURCE_USERNAME: cafe
-      SPRING_DATASOURCE_PASSWORD: cafe
+      SPRING_DATASOURCE_USERNAME: report_service
+      SPRING_DATASOURCE_PASSWORD: report_service_pw
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
     depends_on:
       postgres:
