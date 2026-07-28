@@ -3,6 +3,7 @@ package com.cafe.orderservice.config;
 import com.cafe.common.error.ApiError;
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
+import com.cafe.common.exception.ServiceUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +28,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BusinessRuleException.class)
     public ResponseEntity<ApiError> handleBusinessRule(BusinessRuleException e, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, e.getMessage(), request);
+    }
+
+    @ExceptionHandler(ServiceUnavailableException.class)
+    public ResponseEntity<ApiError> handleServiceUnavailable(ServiceUnavailableException e, HttpServletRequest request) {
+        log.warn("Downstream call unavailable handling {} {}: {}", request.getMethod(), request.getRequestURI(), e.getMessage());
+        return build(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage(), request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

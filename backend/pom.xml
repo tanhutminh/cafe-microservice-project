@@ -22,6 +22,7 @@
     <mapstruct.version>1.6.3</mapstruct.version>
     <jjwt.version>0.13.0</jjwt.version>
     <lombok.version>1.18.46</lombok.version>
+    <resilience4j.version>2.3.0</resilience4j.version>
   </properties>
 
   <modules>
@@ -75,6 +76,12 @@
         <artifactId>jjwt-jackson</artifactId>
         <version>${jjwt.version}</version>
         <scope>runtime</scope>
+      </dependency>
+
+      <dependency>
+        <groupId>io.github.resilience4j</groupId>
+        <artifactId>resilience4j-spring-boot3</artifactId>
+        <version>${resilience4j.version}</version>
       </dependency>
 
       <dependency>
