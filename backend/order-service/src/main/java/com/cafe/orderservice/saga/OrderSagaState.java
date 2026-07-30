@@ -51,6 +51,10 @@ public class OrderSagaState {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    /** How many times OrderSagaReconciliationJob has re-published the command for this saga. */
+    @Column(name = "retry_count", nullable = false)
+    private int retryCount;
+
     @PrePersist
     void onCreate() {
         Instant now = Instant.now();

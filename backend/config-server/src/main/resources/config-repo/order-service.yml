@@ -1,4 +1,15 @@
 # Served by config-server to the client named "order-service" (spring.application.name).
+app:
+  saga-reconciliation:
+    # How long a saga can sit at STOCK_RESERVATION_REQUESTED with no reply before the
+    # sweep treats it as stuck (inventory-service down, message lost, etc).
+    stuck-threshold: 60s
+    # After this many re-published attempts with still no reply, compensate the order
+    # back to OPEN instead of retrying forever.
+    max-retries: 3
+    # How often OrderSagaReconciliationJob runs its sweep.
+    sweep-interval: 30s
+
 resilience4j:
   circuitbreaker:
     instances:
