@@ -52,6 +52,30 @@ public class OrderSagaStateService {
         updateStep(orderId, SagaStep.COMPENSATED);
     }
 
+    /** Read fresh inside OrderCheckoutSaga.retryOrCompensate's transaction, to guard against a
+     *  reply arriving concurrently with the reconciliation sweep (see that method's Javadoc). */
+    @Transactional(readOnly = true)
+    public SagaStep getCurrentStep(Long orderId) {
+        return sagaStateRepository.findById(orderId)
+                .map(OrderSagaState::getStep)
+                .orElseThrow(() -> ResourceNotFoundException.of("OrderSagaState", orderId));
+    }
+
+    @Transactional(readOnly = true)
+    public int getRetryCount(Long orderId) {
+        return sagaStateRepository.findById(orderId)
+                .map(OrderSagaState::getRetryCount)
+                .orElseThrow(() -> ResourceNotFoundException.of("OrderSagaState", orderId));
+    }
+
+    @Transactional
+    public void incrementRetryCount(Long orderId) {
+        OrderSagaState state = sagaStateRepository.findById(orderId)
+                .orElseThrow(() -> ResourceNotFoundException.of("OrderSagaState", orderId));
+        state.setRetryCount(state.getRetryCount() + 1);
+        sagaStateRepository.save(state);
+    }
+
     /**
      * Guards against two distinct kinds of stale replies: Kafka redelivering a reply after the
      * saga already reached a terminal step, and a reply for an attempt that's no longer current
