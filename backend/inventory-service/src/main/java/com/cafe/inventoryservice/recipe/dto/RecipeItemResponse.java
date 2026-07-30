@@ -1,14 +1,15 @@
 package com.cafe.inventoryservice.recipe.dto;
 
 import com.cafe.inventoryservice.recipe.MenuItemIngredient;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.math.BigDecimal;
 
 public record RecipeItemResponse(
-        Long ingredientId,
-        String ingredientName,
-        String unit,
-        BigDecimal quantityRequired
+        @Schema(example = "7") Long ingredientId,
+        @Schema(example = "Milk") String ingredientName,
+        @Schema(example = "liter") String unit,
+        @Schema(example = "0.200") BigDecimal quantityRequired
 ) {
     public static RecipeItemResponse from(MenuItemIngredient recipeItem) {
         return new RecipeItemResponse(

@@ -1,7 +1,11 @@
 package com.cafe.orderservice.order.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 
-public record AddOrderItemRequest(@NotNull Long menuItemId, @Min(1) int quantity) {
+public record AddOrderItemRequest(
+        @NotNull @Schema(example = "12") Long menuItemId,
+        @Min(1) @Schema(example = "2") int quantity
+) {
 }

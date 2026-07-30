@@ -1,10 +1,11 @@
 package com.cafe.menuservice.category.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 
 public record CategoryRequest(
-        @NotBlank String name,
-        int displayOrder,
-        boolean active
+        @NotBlank @Schema(example = "Coffee") String name,
+        @Schema(example = "1", description = "Lower sorts first on the menu") int displayOrder,
+        @Schema(example = "true") boolean active
 ) {
 }
