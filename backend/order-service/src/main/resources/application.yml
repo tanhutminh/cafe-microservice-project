@@ -56,29 +56,3 @@ management:
   health:
     circuitbreakers:
       enabled: true
-
-resilience4j:
-  circuitbreaker:
-    instances:
-      menu-service:
-        sliding-window-size: 10
-        minimum-number-of-calls: 5
-        failure-rate-threshold: 50
-        wait-duration-in-open-state: 10s
-        permitted-number-of-calls-in-half-open-state: 3
-        # A 404 (item genuinely not found) is a valid business response, not a
-        # fault - it must not count against the breaker or trigger the fallback.
-        ignore-exceptions:
-          - com.cafe.common.exception.ResourceNotFoundException
-  retry:
-    instances:
-      menu-service:
-        max-attempts: 3
-        wait-duration: 200ms
-        enable-exponential-backoff: true
-        exponential-backoff-multiplier: 2
-        ignore-exceptions:
-          - com.cafe.common.exception.ResourceNotFoundException
-          # The breaker is already open - retrying would just fail fast again
-          # on every attempt for no benefit.
-          - io.github.resilience4j.circuitbreaker.CallNotPermittedException

@@ -12,3 +12,46 @@ app:
       T4NjghA7B49op/Rmqu3WPzJo1Ls5TjORcBkDSv7RKN2OEQDW3COhfWvmRG7EtZDi
       9QIDAQAB
       -----END PUBLIC KEY-----
+
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # Which frontend origin may call through the gateway - the textbook example of a
+          # value that differs per environment (a real deployment's frontend domain, not
+          # localhost) and needs changing without rebuilding the gateway image.
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOrigins: "http://localhost:4200"
+                allowedMethods: "*"
+                allowedHeaders: "*"
+                allowCredentials: true
+          # Path -> service routing table. Adding/moving a route is an operational/topology
+          # change, not a code change, so it belongs here rather than baked into the image.
+          routes:
+            - id: auth-service
+              uri: lb://AUTH-SERVICE
+              predicates:
+                - Path=/api/auth/**,/api/users/**
+            - id: inventory-recipe
+              uri: lb://INVENTORY-SERVICE
+              predicates:
+                - Path=/api/menu-items/*/recipe
+            - id: menu-service
+              uri: lb://MENU-SERVICE
+              predicates:
+                - Path=/api/categories/**,/api/menu-items/**
+            - id: order-service
+              uri: lb://ORDER-SERVICE
+              predicates:
+                - Path=/api/tables/**,/api/orders/**
+            - id: inventory-service
+              uri: lb://INVENTORY-SERVICE
+              predicates:
+                - Path=/api/ingredients/**
+            - id: report-service
+              uri: lb://REPORT-SERVICE
+              predicates:
+                - Path=/api/reports/**
