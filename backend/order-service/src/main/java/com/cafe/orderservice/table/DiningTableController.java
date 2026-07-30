@@ -3,6 +3,7 @@ package com.cafe.orderservice.table;
 import com.cafe.orderservice.table.dto.DiningTableRequest;
 import com.cafe.orderservice.table.dto.DiningTableResponse;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -36,13 +37,13 @@ public class DiningTableController {
 
     @PutMapping("/{id}")
     @Operation(summary = "Update a table's details (ADMIN only)")
-    public DiningTableResponse update(@PathVariable Long id, @Valid @RequestBody DiningTableRequest request) {
+    public DiningTableResponse update(@Parameter(description = "The table's id", example = "3") @PathVariable Long id, @Valid @RequestBody DiningTableRequest request) {
         return DiningTableResponse.from(diningTableService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "Soft-delete a table (ADMIN only)")
-    public void delete(@PathVariable Long id) {
+    public void delete(@Parameter(description = "The table's id", example = "3") @PathVariable Long id) {
         diningTableService.delete(id);
     }
 
@@ -53,7 +54,7 @@ public class DiningTableController {
                     + "order can be PAID while the guest is still seated, the table doesn't "
                     + "auto-release on payment. Blocked if the table still has an active (non-CANCELLED) order."
     )
-    public DiningTableResponse release(@PathVariable Long id) {
+    public DiningTableResponse release(@Parameter(description = "The table's id", example = "3") @PathVariable Long id) {
         diningTableService.release(id);
         return DiningTableResponse.from(diningTableService.findById(id));
     }

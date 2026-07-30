@@ -4,6 +4,7 @@ import com.cafe.common.error.ApiError;
 import com.cafe.menuservice.category.dto.CategoryRequest;
 import com.cafe.menuservice.category.dto.CategoryResponse;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -44,7 +45,7 @@ public class CategoryController {
     @Operation(summary = "Update a category (ADMIN only)")
     @ApiResponse(responseCode = "404", description = "No category with this id",
             content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE, schema = @Schema(implementation = ApiError.class)))
-    public CategoryResponse update(@PathVariable Long id, @Valid @RequestBody CategoryRequest request) {
+    public CategoryResponse update(@Parameter(description = "The category's id", example = "1") @PathVariable Long id, @Valid @RequestBody CategoryRequest request) {
         Category category = categoryService.update(id, request.name(), request.displayOrder(), request.active());
         return CategoryResponse.from(category);
     }
@@ -52,7 +53,7 @@ public class CategoryController {
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @Operation(summary = "Soft-delete a category (ADMIN only) - sets active=false, does not remove the row")
-    public void delete(@PathVariable Long id) {
+    public void delete(@Parameter(description = "The category's id", example = "1") @PathVariable Long id) {
         categoryService.delete(id);
     }
 }
