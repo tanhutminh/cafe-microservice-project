@@ -2,6 +2,8 @@ package com.cafe.orderservice.table;
 
 import com.cafe.orderservice.table.dto.DiningTableRequest;
 import com.cafe.orderservice.table.dto.DiningTableResponse;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
@@ -10,6 +12,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/tables")
+@Tag(name = "Tables", description = "Dining tables shown on the POS floor plan")
 public class DiningTableController {
 
     private final DiningTableService diningTableService;
@@ -19,28 +22,37 @@ public class DiningTableController {
     }
 
     @GetMapping
+    @Operation(summary = "List all active tables")
     public List<DiningTableResponse> findAll() {
         return diningTableService.findAll().stream().map(DiningTableResponse::from).toList();
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Add a table (ADMIN only)")
     public DiningTableResponse create(@Valid @RequestBody DiningTableRequest request) {
         return DiningTableResponse.from(diningTableService.create(request));
     }
 
     @PutMapping("/{id}")
+    @Operation(summary = "Update a table's details (ADMIN only)")
     public DiningTableResponse update(@PathVariable Long id, @Valid @RequestBody DiningTableRequest request) {
         return DiningTableResponse.from(diningTableService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
+    @Operation(summary = "Soft-delete a table (ADMIN only)")
     public void delete(@PathVariable Long id) {
         diningTableService.delete(id);
     }
 
-    /** Staff action: mark a table empty again — independent of order/payment status. */
     @PostMapping("/{id}/release")
+    @Operation(
+            summary = "Mark a table empty again",
+            description = "A manual staff action, independent of order/payment status - since an "
+                    + "order can be PAID while the guest is still seated, the table doesn't "
+                    + "auto-release on payment. Blocked if the table still has an active (non-CANCELLED) order."
+    )
     public DiningTableResponse release(@PathVariable Long id) {
         diningTableService.release(id);
         return DiningTableResponse.from(diningTableService.findById(id));

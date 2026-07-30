@@ -30,7 +30,7 @@ public class SecurityConfig {
                         // See menu-service's SecurityConfig for why /error must stay open: a denied
                         // request's internal forward to /error re-enters this same filter chain with
                         // a fresh anonymous context, which would otherwise clobber the real 403 into 401.
-                        .requestMatchers("/actuator/**", "/error").permitAll()
+                        .requestMatchers("/actuator/**", "/error", "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         .requestMatchers("/api/tables/**", "/api/orders/**").hasAnyRole(Roles.ADMIN, Roles.CASHIER)
                         .anyRequest().hasRole(Roles.ADMIN))
                 .exceptionHandling(ex -> ex

@@ -41,7 +41,7 @@ public class SecurityConfig {
                         // render the response body, and that forward re-enters this same filter chain
                         // with a fresh (anonymous) context — without this, a real 403 gets clobbered
                         // into a misleading 401 from anyRequest().authenticated() below.
-                        .requestMatchers("/actuator/**", "/error").permitAll()
+                        .requestMatchers("/actuator/**", "/error", "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         .requestMatchers("/api/users/**").hasRole(Roles.ADMIN)
                         .anyRequest().authenticated())
                 .exceptionHandling(ex -> ex

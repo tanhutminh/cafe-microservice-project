@@ -1,15 +1,16 @@
 package com.cafe.inventoryservice.ingredient.dto;
 
 import com.cafe.inventoryservice.ingredient.Ingredient;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.math.BigDecimal;
 
 public record IngredientResponse(
-        Long id,
-        String name,
-        String unit,
-        BigDecimal currentStock,
-        boolean active
+        @Schema(example = "7") Long id,
+        @Schema(example = "Milk") String name,
+        @Schema(example = "liter") String unit,
+        @Schema(example = "12.500") BigDecimal currentStock,
+        @Schema(example = "true") boolean active
 ) {
     public static IngredientResponse from(Ingredient ingredient) {
         return new IngredientResponse(
