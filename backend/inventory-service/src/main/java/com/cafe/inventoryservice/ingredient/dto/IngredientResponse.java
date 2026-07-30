@@ -10,6 +10,8 @@ public record IngredientResponse(
         @Schema(example = "Milk") String name,
         @Schema(example = "liter") String unit,
         @Schema(example = "12.500") BigDecimal currentStock,
+        @Schema(example = "2.000", description = "Low-stock alert threshold") BigDecimal minStock,
+        @Schema(example = "false", description = "true when currentStock < minStock") boolean lowStock,
         @Schema(example = "true") boolean active
 ) {
     public static IngredientResponse from(Ingredient ingredient) {
@@ -18,6 +20,8 @@ public record IngredientResponse(
                 ingredient.getName(),
                 ingredient.getUnit(),
                 ingredient.getCurrentStock(),
+                ingredient.getMinStock(),
+                ingredient.getCurrentStock().compareTo(ingredient.getMinStock()) < 0,
                 ingredient.isActive()
         );
     }

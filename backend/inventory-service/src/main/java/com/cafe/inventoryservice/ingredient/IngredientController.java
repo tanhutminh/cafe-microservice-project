@@ -2,7 +2,10 @@ package com.cafe.inventoryservice.ingredient;
 
 import com.cafe.inventoryservice.ingredient.dto.IngredientRequest;
 import com.cafe.inventoryservice.ingredient.dto.IngredientResponse;
+import com.cafe.inventoryservice.ingredient.dto.StockInRequest;
+import com.cafe.inventoryservice.ingredient.dto.StockMovementResponse;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -36,13 +39,25 @@ public class IngredientController {
 
     @PutMapping("/{id}")
     @Operation(summary = "Update an ingredient's details (ADMIN only) - cannot change currentStock directly, see stock-in")
-    public IngredientResponse update(@PathVariable Long id, @Valid @RequestBody IngredientRequest request) {
+    public IngredientResponse update(@Parameter(description = "The ingredient's id", example = "7") @PathVariable Long id, @Valid @RequestBody IngredientRequest request) {
         return IngredientResponse.from(ingredientService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "Soft-delete an ingredient (ADMIN only)")
-    public void delete(@PathVariable Long id) {
+    public void delete(@Parameter(description = "The ingredient's id", example = "7") @PathVariable Long id) {
         ingredientService.delete(id);
+    }
+
+    @PostMapping("/{id}/stock-in")
+    @Operation(summary = "Record incoming stock (ADMIN only) - the only way to increase currentStock")
+    public IngredientResponse stockIn(@Parameter(description = "The ingredient's id", example = "7") @PathVariable Long id, @Valid @RequestBody StockInRequest request) {
+        return IngredientResponse.from(ingredientService.stockIn(id, request.quantity()));
+    }
+
+    @GetMapping("/{id}/movements")
+    @Operation(summary = "List stock movements for an ingredient, newest first")
+    public List<StockMovementResponse> movements(@Parameter(description = "The ingredient's id", example = "7") @PathVariable Long id) {
+        return ingredientService.findMovements(id).stream().map(StockMovementResponse::from).toList();
     }
 }

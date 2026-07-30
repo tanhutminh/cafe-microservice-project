@@ -3,6 +3,7 @@ package com.cafe.inventoryservice.recipe;
 import com.cafe.inventoryservice.recipe.dto.RecipeItemRequest;
 import com.cafe.inventoryservice.recipe.dto.RecipeItemResponse;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
@@ -22,7 +23,7 @@ public class RecipeController {
 
     @GetMapping
     @Operation(summary = "Get a menu item's recipe (empty list if it has none - such items are always treated as in-stock)")
-    public List<RecipeItemResponse> findByMenuItemId(@PathVariable Long menuItemId) {
+    public List<RecipeItemResponse> findByMenuItemId(@Parameter(description = "The menu item's id (owned by menu-service - just an application-level reference here)", example = "12") @PathVariable Long menuItemId) {
         return recipeService.findByMenuItemId(menuItemId).stream().map(RecipeItemResponse::from).toList();
     }
 
@@ -34,7 +35,7 @@ public class RecipeController {
                     + "request body is deleted. Sending an empty list clears the recipe entirely, "
                     + "making the item always-in-stock again."
     )
-    public List<RecipeItemResponse> replace(@PathVariable Long menuItemId,
+    public List<RecipeItemResponse> replace(@Parameter(description = "The menu item's id (owned by menu-service - just an application-level reference here)", example = "12") @PathVariable Long menuItemId,
                                              @Valid @RequestBody List<@Valid RecipeItemRequest> lines) {
         return recipeService.replace(menuItemId, lines).stream().map(RecipeItemResponse::from).toList();
     }

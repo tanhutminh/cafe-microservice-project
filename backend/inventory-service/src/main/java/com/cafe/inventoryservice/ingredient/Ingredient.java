@@ -32,6 +32,9 @@ public class Ingredient {
     @Column(name = "current_stock", nullable = false, precision = 12, scale = 3)
     private BigDecimal currentStock;
 
+    @Column(name = "min_stock", nullable = false, precision = 12, scale = 3)
+    private BigDecimal minStock;
+
     @Column(nullable = false)
     private boolean active;
 }
