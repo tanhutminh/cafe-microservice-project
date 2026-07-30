@@ -28,13 +28,13 @@ public class OrderController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get an order by id - also how the POS polls checkout progress until it settles to PAID or back to OPEN")
-    public OrderResponse getOrder(@PathVariable Long id) {
+    public OrderResponse getOrder(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
         return OrderResponse.from(orderService.getOrder(id));
     }
 
     @GetMapping(params = "tableId")
     @Operation(summary = "Get the current order for a table (the one occupying it right now, excluding CANCELLED)")
-    public OrderResponse getCurrentOrderForTable(@Parameter(example = "3") @RequestParam Long tableId) {
+    public OrderResponse getCurrentOrderForTable(@Parameter(description = "The table's id", example = "3") @RequestParam Long tableId) {
         return OrderResponse.from(orderService.getCurrentOrderForTable(tableId));
     }
 
@@ -47,25 +47,26 @@ public class OrderController {
 
     @PostMapping("/{id}/items")
     @Operation(summary = "Add a line item - looks up the menu item's name/price via menu-service and snapshots it onto the order")
-    public OrderResponse addItem(@PathVariable Long id, @Valid @RequestBody AddOrderItemRequest request) {
+    public OrderResponse addItem(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody AddOrderItemRequest request) {
         return OrderResponse.from(orderService.addItem(id, request.menuItemId(), request.quantity()));
     }
 
     @DeleteMapping("/{id}/items/{itemId}")
     @Operation(summary = "Remove a line item from an OPEN order")
-    public OrderResponse removeItem(@PathVariable Long id, @PathVariable Long itemId) {
+    public OrderResponse removeItem(@Parameter(description = "The order's id", example = "101") @PathVariable Long id,
+                                     @Parameter(description = "The order line item's id (not the menu item's id)", example = "42") @PathVariable Long itemId) {
         return OrderResponse.from(orderService.removeItem(id, itemId));
     }
 
     @PostMapping("/{id}/cancel")
     @Operation(summary = "Cancel an order (frees the table)")
-    public OrderResponse cancel(@PathVariable Long id) {
+    public OrderResponse cancel(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
         return OrderResponse.from(orderService.cancel(id));
     }
 
     @PostMapping("/{id}/move")
     @Operation(summary = "Move an order to a different AVAILABLE table (blocked mid-checkout)")
-    public OrderResponse moveTable(@PathVariable Long id, @Valid @RequestBody MoveTableRequest request) {
+    public OrderResponse moveTable(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody MoveTableRequest request) {
         return OrderResponse.from(orderService.moveTable(id, request.tableId()));
     }
 
@@ -80,7 +81,7 @@ public class OrderController {
                     + "(stock reserved, done) or back to OPEN with failureReason set (e.g. an ingredient "
                     + "ran out - fix the order and try checkout again)."
     )
-    public OrderResponse checkout(@PathVariable Long id, @Valid @RequestBody CheckoutRequest request) {
+    public OrderResponse checkout(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody CheckoutRequest request) {
         Order order = orderCheckoutSaga.startCheckout(id, request.paymentMethod());
         orderCheckoutSaga.publishReservationCommand(order);
         return OrderResponse.from(order);
