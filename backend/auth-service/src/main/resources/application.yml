@@ -30,7 +30,15 @@ eureka:
     service-url:
       defaultZone: http://localhost:8761/eureka/
   instance:
-    prefer-ip-address: true
+    # See order-service's application.yml for the full rationale: advertising
+    # the auto-detected container/host IP breaks whichever caller sits on the
+    # other side of the Docker/bare-process boundary. host.docker.internal
+    # works uniformly here because Docker Desktop hairpins a container's own
+    # published port back through it, so both other containers (gateway) and
+    # bare-host processes (an IDE-run peer) can reach auth-service through
+    # the same advertised address - no docker-compose override needed.
+    hostname: host.docker.internal
+    prefer-ip-address: false
 
 management:
   endpoints:

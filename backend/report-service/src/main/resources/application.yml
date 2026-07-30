@@ -17,7 +17,10 @@ spring:
   flyway:
     enabled: true
   kafka:
-    bootstrap-servers: localhost:9092
+    # 9094 is the PLAINTEXT_HOST listener - reachable from a bare-host run (e.g. an IDE),
+    # unlike 9092 which only resolves inside the Docker network (see docker-compose.yml's
+    # kafka service comment). order-service/inventory-service already default to this.
+    bootstrap-servers: localhost:9094
     consumer:
       group-id: report-service
       auto-offset-reset: earliest
@@ -30,7 +33,15 @@ eureka:
     service-url:
       defaultZone: http://localhost:8761/eureka/
   instance:
-    prefer-ip-address: true
+    # See order-service's application.yml for the full rationale: advertising
+    # the auto-detected container/host IP breaks whichever caller sits on the
+    # other side of the Docker/bare-process boundary. host.docker.internal
+    # works uniformly here because Docker Desktop hairpins a container's own
+    # published port back through it, so both other containers (gateway) and
+    # bare-host processes (an IDE-run peer) can reach report-service through
+    # the same advertised address - no docker-compose override needed.
+    hostname: host.docker.internal
+    prefer-ip-address: false
 
 management:
   endpoints:
