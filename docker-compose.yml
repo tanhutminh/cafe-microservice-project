@@ -59,6 +59,8 @@ services:
     build:
       context: ./backend
       dockerfile: config-server/Dockerfile
+    volumes:
+      - ./backend/config-server/src/main/resources/config-repo:/config-repo:ro
     ports:
       - "8888:8888"
     healthcheck:
