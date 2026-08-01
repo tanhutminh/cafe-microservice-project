@@ -153,6 +153,7 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 - **Orchestrated Saga** — order-service's checkout flow drives a state machine (`OrderCheckoutSaga`) that requests stock reservation from inventory-service over Kafka and commits or compensates the order based on the reply; see [Business flow: checkout saga](#business-flow-checkout-saga)
 - **Idempotent Consumer** — inventory-service dedupes saga command messages it has already processed (`ProcessedSagaStep`)
 - **Reconciliation** — `OrderSagaReconciliationJob` sweeps sagas stuck waiting on a reply and retries or compensates them
+- **Dead Letter Queue** — inventory-service routes `inventory.reserve-stock.command` messages that fail for *technical* reasons (bad payload, bugs, DB errors — never a business "insufficient stock" outcome, which is a normal reply, not an exception) to `inventory.reserve-stock.command.dlq` after a short exponential-backoff retry, instead of blocking the consumer on a poison-pill message
 - **Database per Service** — separate Postgres database and role per service
 
 ## Structure
@@ -342,6 +343,7 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 - **Orchestrated Saga** — luồng checkout của order-service điều khiển một state machine (`OrderCheckoutSaga`), yêu cầu giữ chỗ tồn kho từ inventory-service qua Kafka, rồi commit hoặc compensate đơn hàng dựa theo reply nhận được; xem mục "Luồng nghiệp vụ: saga thanh toán" bên trên
 - **Idempotent Consumer** — inventory-service loại bỏ trùng lặp các saga command message đã xử lý rồi (`ProcessedSagaStep`)
 - **Reconciliation** — `OrderSagaReconciliationJob` quét các saga bị kẹt khi chờ reply, rồi retry hoặc compensate
+- **Dead Letter Queue** — inventory-service chuyển các message `inventory.reserve-stock.command` lỗi vì nguyên nhân *kỹ thuật* (payload sai định dạng, bug, lỗi DB — không bao giờ tính trường hợp nghiệp vụ "hết hàng", vì đó là 1 reply bình thường, không phải exception) sang `inventory.reserve-stock.command.dlq` sau vài lần retry theo exponential backoff, thay vì để nó chặn cứng consumer (poison-pill message)
 - **Database per Service** — mỗi service có 1 database Postgres và 1 role riêng
 
 ## Cấu trúc
