@@ -153,6 +153,7 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 - **Orchestrated Saga** — order-service's checkout flow drives a state machine (`OrderCheckoutSaga`) that requests stock reservation from inventory-service over Kafka and commits or compensates the order based on the reply; see [Business flow: checkout saga](#business-flow-checkout-saga)
 - **Idempotent Consumer, via Transactional Inbox** — `StockReservationService.reserve()` checks `ProcessedSagaStep` (the inbox table, keyed on `correlationId`) before doing anything, and writes the outcome to it in the *same* transaction as the stock deduction it guards. Because the inbox write and the business change commit atomically together, a redelivered command can never see one applied without the other — it just replays the stored result.
 - **Reconciliation** — `OrderSagaReconciliationJob` sweeps sagas stuck waiting on a reply and retries or compensates them
+- **Dead Letter Queue** — inventory-service routes `inventory.reserve-stock.command` messages that fail for *technical* reasons (bad payload, bugs, DB errors — never a business "insufficient stock" outcome, which is a normal reply, not an exception) to `inventory.reserve-stock.command.dlq` after a short exponential-backoff retry, instead of blocking the consumer on a poison-pill message
 - **Database per Service** — separate Postgres database and role per service
 
 ## Structure
@@ -343,6 +344,7 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 - **Orchestrated Saga** — luồng checkout của order-service điều khiển một state machine (`OrderCheckoutSaga`), yêu cầu giữ chỗ tồn kho từ inventory-service qua Kafka, rồi commit hoặc compensate đơn hàng dựa theo reply nhận được; xem mục "Luồng nghiệp vụ: saga thanh toán" bên trên
 - **Idempotent Consumer, qua Transactional Inbox** — `StockReservationService.reserve()` kiểm tra `ProcessedSagaStep` (bảng "inbox", khoá chính là `correlationId`) trước khi làm bất cứ gì, và ghi kết quả vào đó **trong cùng 1 transaction** với việc trừ kho mà nó bảo vệ. Vì việc ghi inbox và thay đổi nghiệp vụ commit cùng lúc, 1 message bị gửi lại không bao giờ rơi vào tình huống "chỉ có 1 trong 2 việc được thực hiện" — nó chỉ đơn giản trả lại kết quả đã lưu từ trước.
 - **Reconciliation** — `OrderSagaReconciliationJob` quét các saga bị kẹt khi chờ reply, rồi retry hoặc compensate
+- **Dead Letter Queue** — inventory-service chuyển các message `inventory.reserve-stock.command` lỗi vì nguyên nhân *kỹ thuật* (payload sai định dạng, bug, lỗi DB — không bao giờ tính trường hợp nghiệp vụ "hết hàng", vì đó là 1 reply bình thường, không phải exception) sang `inventory.reserve-stock.command.dlq` sau vài lần retry theo exponential backoff, thay vì để nó chặn cứng consumer (poison-pill message)
 - **Database per Service** — mỗi service có 1 database Postgres và 1 role riêng
 
 ## Cấu trúc
