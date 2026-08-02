@@ -151,7 +151,7 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 - **Trusted Header Authentication** — gateway validates the JWT once and forwards identity via `X-User-Id`/`X-Username`/`X-User-Role` headers; downstream services trust the gateway instead of re-validating (`common-lib`'s `TrustedHeaderAuth`)
 - **Circuit Breaker + Retry** — Resilience4j on order-service's calls to menu-service
 - **Orchestrated Saga** — order-service's checkout flow drives a state machine (`OrderCheckoutSaga`) that requests stock reservation from inventory-service over Kafka and commits or compensates the order based on the reply; see [Business flow: checkout saga](#business-flow-checkout-saga)
-- **Idempotent Consumer** — inventory-service dedupes saga command messages it has already processed (`ProcessedSagaStep`)
+- **Idempotent Consumer, via Transactional Inbox** — `StockReservationService.reserve()` checks `ProcessedSagaStep` (the inbox table, keyed on `correlationId`) before doing anything, and writes the outcome to it in the *same* transaction as the stock deduction it guards. Because the inbox write and the business change commit atomically together, a redelivered command can never see one applied without the other — it just replays the stored result.
 - **Reconciliation** — `OrderSagaReconciliationJob` sweeps sagas stuck waiting on a reply and retries or compensates them
 - **Database per Service** — separate Postgres database and role per service
 
@@ -341,7 +341,7 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 - **Trusted Header Authentication** — gateway xác thực JWT một lần duy nhất rồi chuyển tiếp danh tính qua header `X-User-Id`/`X-Username`/`X-User-Role`; các service phía sau tin tưởng gateway thay vì tự xác thực lại (`TrustedHeaderAuth` trong `common-lib`)
 - **Circuit Breaker + Retry** — Resilience4j cho lời gọi từ order-service sang menu-service
 - **Orchestrated Saga** — luồng checkout của order-service điều khiển một state machine (`OrderCheckoutSaga`), yêu cầu giữ chỗ tồn kho từ inventory-service qua Kafka, rồi commit hoặc compensate đơn hàng dựa theo reply nhận được; xem mục "Luồng nghiệp vụ: saga thanh toán" bên trên
-- **Idempotent Consumer** — inventory-service loại bỏ trùng lặp các saga command message đã xử lý rồi (`ProcessedSagaStep`)
+- **Idempotent Consumer, qua Transactional Inbox** — `StockReservationService.reserve()` kiểm tra `ProcessedSagaStep` (bảng "inbox", khoá chính là `correlationId`) trước khi làm bất cứ gì, và ghi kết quả vào đó **trong cùng 1 transaction** với việc trừ kho mà nó bảo vệ. Vì việc ghi inbox và thay đổi nghiệp vụ commit cùng lúc, 1 message bị gửi lại không bao giờ rơi vào tình huống "chỉ có 1 trong 2 việc được thực hiện" — nó chỉ đơn giản trả lại kết quả đã lưu từ trước.
 - **Reconciliation** — `OrderSagaReconciliationJob` quét các saga bị kẹt khi chờ reply, rồi retry hoặc compensate
 - **Database per Service** — mỗi service có 1 database Postgres và 1 role riêng
 
