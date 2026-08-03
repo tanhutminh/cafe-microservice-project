@@ -1,10 +1,10 @@
 package com.cafe.orderservice.order;
 
 import com.cafe.orderservice.order.dto.AddOrderItemRequest;
-import com.cafe.orderservice.order.dto.CheckoutRequest;
 import com.cafe.orderservice.order.dto.CreateOrderRequest;
 import com.cafe.orderservice.order.dto.MoveTableRequest;
 import com.cafe.orderservice.order.dto.OrderResponse;
+import com.cafe.orderservice.order.dto.PayRequest;
 import com.cafe.orderservice.saga.OrderCheckoutSaga;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -59,9 +59,19 @@ public class OrderController {
     }
 
     @PostMapping("/{id}/cancel")
-    @Operation(summary = "Cancel an order (frees the table)")
+    @Operation(
+            summary = "Cancel an order (frees the table)",
+            description = "Blocked while either saga leg is in flight (PENDING_CONFIRMATION / PAYMENT_PENDING). "
+                    + "Cancelling a CONFIRMED order releases its stock hold back to inventory-service."
+    )
     public OrderResponse cancel(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
-        return OrderResponse.from(orderService.cancel(id));
+        Order order = orderService.getOrder(id);
+        boolean wasConfirmed = order.getStatus() == OrderStatus.CONFIRMED;
+        Order cancelled = orderService.cancel(id);
+        if (wasConfirmed) {
+            orderCheckoutSaga.releaseReservedStock(cancelled);
+        }
+        return OrderResponse.from(cancelled);
     }
 
     @PostMapping("/{id}/move")
@@ -73,17 +83,34 @@ public class OrderController {
     @PostMapping("/{id}/checkout")
     @ResponseStatus(HttpStatus.ACCEPTED)
     @Operation(
-            summary = "Start the checkout saga (returns immediately - does NOT mean the order is paid yet)",
-            description = "Moves the order to PENDING_CONFIRMATION and asks inventory-service to reserve "
-                    + "stock over Kafka. The response you get back here still shows PENDING_CONFIRMATION, "
-                    + "not PAID: this call only starts the saga and returns 202 as soon as that first local "
-                    + "step commits. Poll GET /api/orders/{id} every ~1s until status settles to PAID "
-                    + "(stock reserved, done) or back to OPEN with failureReason set (e.g. an ingredient "
-                    + "ran out - fix the order and try checkout again)."
+            summary = "Verify: start the verify saga, soft-reserving stock (returns immediately - not paid yet)",
+            description = "Moves the order to PENDING_CONFIRMATION and asks inventory-service to hold "
+                    + "stock over Kafka (Ingredient.reservedQuantity, not yet deducted from currentStock). "
+                    + "The response you get back here still shows PENDING_CONFIRMATION: this call only "
+                    + "starts the saga and returns 202 as soon as that first local step commits. Poll "
+                    + "GET /api/orders/{id} every ~1s until status settles to CONFIRMED (stock held, ready "
+                    + "for payment) or back to OPEN with failureReason set (e.g. an ingredient ran out - "
+                    + "fix the order and try again)."
     )
-    public OrderResponse checkout(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody CheckoutRequest request) {
-        Order order = orderCheckoutSaga.startCheckout(id, request.paymentMethod());
+    public OrderResponse checkout(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
+        Order order = orderCheckoutSaga.startCheckout(id);
         orderCheckoutSaga.publishReservationCommand(order);
+        return OrderResponse.from(order);
+    }
+
+    @PostMapping("/{id}/pay")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    @Operation(
+            summary = "Pay: start the payment saga, committing the stock hold (returns immediately - not paid yet)",
+            description = "Only valid once CONFIRMED. Moves the order to PAYMENT_PENDING and asks "
+                    + "inventory-service to turn the earlier hold into a real currentStock deduction over "
+                    + "Kafka. Poll GET /api/orders/{id} every ~1s until status settles to PAID (order.paid "
+                    + "published) or back to CONFIRMED with failureReason set - the stock hold is untouched, "
+                    + "just retry payment."
+    )
+    public OrderResponse pay(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody PayRequest request) {
+        Order order = orderCheckoutSaga.startPayment(id, request.paymentMethod());
+        orderCheckoutSaga.publishCommitCommand(order);
         return OrderResponse.from(order);
     }
 }

@@ -39,6 +39,7 @@ public class IngredientService {
                 .unit(request.unit())
                 .currentStock(BigDecimal.ZERO)
                 .minStock(request.minStock())
+                .reservedQuantity(BigDecimal.ZERO)
                 .active(request.active())
                 .build();
         return ingredientRepository.save(ingredient);

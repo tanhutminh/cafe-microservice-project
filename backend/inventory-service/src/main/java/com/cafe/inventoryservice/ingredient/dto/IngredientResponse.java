@@ -11,6 +11,7 @@ public record IngredientResponse(
         @Schema(example = "liter") String unit,
         @Schema(example = "12.500") BigDecimal currentStock,
         @Schema(example = "2.000", description = "Low-stock alert threshold") BigDecimal minStock,
+        @Schema(example = "1.000", description = "Held for CONFIRMED orders awaiting payment - not yet deducted from currentStock") BigDecimal reservedQuantity,
         @Schema(example = "false", description = "true when currentStock < minStock") boolean lowStock,
         @Schema(example = "true") boolean active
 ) {
@@ -21,6 +22,7 @@ public record IngredientResponse(
                 ingredient.getUnit(),
                 ingredient.getCurrentStock(),
                 ingredient.getMinStock(),
+                ingredient.getReservedQuantity(),
                 ingredient.getCurrentStock().compareTo(ingredient.getMinStock()) < 0,
                 ingredient.isActive()
         );

@@ -145,13 +145,28 @@ export class Pos {
     });
   }
 
-  checkout(paymentMethod: string): void {
+  verify(): void {
     const order = this.currentOrder();
     if (!order) {
       return;
     }
     this.checkingOut.set(true);
-    this.orderApi.checkout(order.id, { paymentMethod }).subscribe({
+    this.orderApi.checkout(order.id).subscribe({
+      next: (updated) => {
+        this.currentOrder.set(updated);
+        this.pollUntilSettled(updated.id, 0);
+      },
+      error: () => this.checkingOut.set(false)
+    });
+  }
+
+  pay(paymentMethod: string): void {
+    const order = this.currentOrder();
+    if (!order) {
+      return;
+    }
+    this.checkingOut.set(true);
+    this.orderApi.pay(order.id, { paymentMethod }).subscribe({
       next: (updated) => {
         this.currentOrder.set(updated);
         this.pollUntilSettled(updated.id, 0);
@@ -168,7 +183,7 @@ export class Pos {
     setTimeout(() => {
       this.orderApi.getOrder(orderId).subscribe((order) => {
         this.currentOrder.set(order);
-        if (order.status === 'PENDING_CONFIRMATION') {
+        if (order.status === 'PENDING_CONFIRMATION' || order.status === 'PAYMENT_PENDING') {
           this.pollUntilSettled(orderId, attempt + 1);
         } else {
           this.checkingOut.set(false);

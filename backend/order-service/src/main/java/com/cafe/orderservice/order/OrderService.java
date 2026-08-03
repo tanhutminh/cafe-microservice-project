@@ -92,6 +92,9 @@ public class OrderService {
         if (order.getStatus() == OrderStatus.PAID) {
             throw new BusinessRuleException("Cannot cancel a paid order: " + orderId);
         }
+        if (order.getStatus() == OrderStatus.PENDING_CONFIRMATION || order.getStatus() == OrderStatus.PAYMENT_PENDING) {
+            throw new BusinessRuleException("Cannot cancel while a saga step is in progress: " + orderId);
+        }
         Long tableId = order.getTable().getId();
         order.setStatus(OrderStatus.CANCELLED);
         order.setClosedAt(Instant.now());
@@ -102,14 +105,15 @@ public class OrderService {
 
     /**
      * Moves an order to a different table (e.g. the party relocates but keeps the same tab).
-     * Not allowed mid-checkout (PENDING_CONFIRMATION) since the saga tracks the order, not the
-     * table, and a mid-flight move could race with the reservation reply.
+     * Not allowed while either saga leg is in flight (PENDING_CONFIRMATION / PAYMENT_PENDING)
+     * since the saga tracks the order, not the table, and a mid-flight move could race with
+     * the reply.
      */
     @Transactional
     public Order moveTable(Long orderId, Long newTableId) {
         Order order = getOrder(orderId);
-        if (order.getStatus() == OrderStatus.PENDING_CONFIRMATION) {
-            throw new BusinessRuleException("Cannot move table while checkout is in progress: " + orderId);
+        if (order.getStatus() == OrderStatus.PENDING_CONFIRMATION || order.getStatus() == OrderStatus.PAYMENT_PENDING) {
+            throw new BusinessRuleException("Cannot move table while a saga step is in progress: " + orderId);
         }
         if (order.getStatus() == OrderStatus.CANCELLED) {
             throw new BusinessRuleException("Cannot move a cancelled order: " + orderId);
@@ -126,23 +130,47 @@ public class OrderService {
         return order;
     }
 
-    /** Local half of checkout — see OrderCheckoutSaga for the saga state creation that joins this transaction. */
+    /** Verify leg, local half — see OrderCheckoutSaga for the saga state creation that joins this transaction. */
     @Transactional
-    public Order checkout(Long orderId, String paymentMethod) {
+    public Order checkout(Long orderId) {
         Order order = getOrder(orderId);
         requireOpen(order);
         if (order.getItems().isEmpty()) {
             throw new BusinessRuleException("Cannot checkout an empty order: " + orderId);
         }
         order.setStatus(OrderStatus.PENDING_CONFIRMATION);
+        order.setFailureReason(null);
+        return orderRepository.save(order);
+    }
+
+    /**
+     * Verify success path — called by OrderCheckoutSaga once inventory confirms the stock
+     * hold. Stock is reserved but no payment has been taken yet; the cashier still has to call
+     * startPayment separately via the /pay endpoint.
+     */
+    @Transactional
+    public Order markConfirmed(Long orderId) {
+        Order order = getOrder(orderId);
+        order.setStatus(OrderStatus.CONFIRMED);
+        return orderRepository.save(order);
+    }
+
+    /** Payment leg, local half — only valid once stock has been verified/reserved (CONFIRMED). */
+    @Transactional
+    public Order startPayment(Long orderId, String paymentMethod) {
+        Order order = getOrder(orderId);
+        if (order.getStatus() != OrderStatus.CONFIRMED) {
+            throw new BusinessRuleException("Order must be verified before payment: " + orderId);
+        }
+        order.setStatus(OrderStatus.PAYMENT_PENDING);
         order.setPaymentMethod(paymentMethod);
         order.setFailureReason(null);
         return orderRepository.save(order);
     }
 
     /**
-     * Saga success path — called by OrderCheckoutSaga once inventory confirms the stock
-     * reservation. Deliberately does NOT release the table: paying doesn't mean the party has
+     * Payment success path — called by OrderCheckoutSaga once inventory confirms the stock
+     * commit. Deliberately does NOT release the table: paying doesn't mean the party has
      * left (pay-first-then-dine is a valid flow here). Staff frees the table explicitly via
      * DiningTableService.release() once it's actually empty.
      */
@@ -154,11 +182,24 @@ public class OrderService {
         return orderRepository.save(order);
     }
 
-    /** Saga compensation path — order goes back to OPEN so the cashier can adjust it and retry. */
+    /** Verify compensation path — order goes back to OPEN so the cashier can adjust it and retry. */
     @Transactional
     public Order compensateToOpen(Long orderId, String reason) {
         Order order = getOrder(orderId);
         order.setStatus(OrderStatus.OPEN);
+        order.setFailureReason(reason);
+        return orderRepository.save(order);
+    }
+
+    /**
+     * Payment compensation path — the stock commit failed (or timed out), but the earlier
+     * reservation is still legitimately held, so this goes back to CONFIRMED (not OPEN) with a
+     * failureReason: the cashier can just retry payment, no need to re-verify stock.
+     */
+    @Transactional
+    public Order revertToConfirmed(Long orderId, String reason) {
+        Order order = getOrder(orderId);
+        order.setStatus(OrderStatus.CONFIRMED);
         order.setFailureReason(reason);
         return orderRepository.save(order);
     }

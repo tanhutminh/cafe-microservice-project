@@ -3,7 +3,7 @@ import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 import { environment } from '../../../environments/environment';
 import { DiningTable } from '../models/dining-table.model';
-import { AddOrderItemRequest, CheckoutRequest, CreateOrderRequest, MoveTableRequest, Order } from '../models/order.model';
+import { AddOrderItemRequest, CreateOrderRequest, MoveTableRequest, Order, PayRequest } from '../models/order.model';
 
 @Injectable({ providedIn: 'root' })
 export class OrderApiService {
@@ -38,8 +38,12 @@ export class OrderApiService {
     return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/cancel`, {});
   }
 
-  checkout(orderId: number, request: CheckoutRequest): Observable<Order> {
-    return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/checkout`, request);
+  checkout(orderId: number): Observable<Order> {
+    return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/checkout`, {});
+  }
+
+  pay(orderId: number, request: PayRequest): Observable<Order> {
+    return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/pay`, request);
   }
 
   moveTable(orderId: number, request: MoveTableRequest): Observable<Order> {

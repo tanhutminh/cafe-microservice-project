@@ -56,8 +56,11 @@ graph TB
 
     ORDER -->|"WebClient, sync, CircuitBreaker + Retry"| MENU
 
-    ORDER -->|"reserve-stock.command, via Kafka"| INV
-    INV -->|"stock-reservation.reply, via Kafka"| ORDER
+    ORDER -->|"1. reserve-stock.command, via Kafka"| INV
+    INV -->|"2. stock-reservation.reply, via Kafka"| ORDER
+    ORDER -->|"3. commit-stock.command, via Kafka"| INV
+    INV -->|"4. stock-commit.reply, via Kafka"| ORDER
+    ORDER -->|"release-stock.command, via Kafka (branch: only if cancelled after step 2)"| INV
 
     ORDER -.->|"order.paid, via Kafka (no consumer yet)"| KAFKA
 
@@ -70,15 +73,17 @@ graph TB
 
     linkStyle 0,1,2,3,4,5 stroke:#4C6EF5,color:#4C6EF5
     linkStyle 6 stroke:#F08C00,color:#F08C00
-    linkStyle 7,8,9 stroke:#9C36B5,color:#9C36B5
-    linkStyle 10,11,12,13,14,15 stroke:#868E96,color:#868E96
+    linkStyle 7,8,9,10,11,12 stroke:#9C36B5,color:#9C36B5
+    linkStyle 13,14,15,16,17,18 stroke:#868E96,color:#868E96
 ```
 
-Edge color marks the kind of communication: 🟦 blue for gateway HTTP routing, 🟧 orange for the direct synchronous service-to-service call, 🟪 purple for Kafka messaging, and ⬜ grey for service discovery/config lookups. Solid arrows carry actual request/business traffic; dashed arrows are infrastructure plumbing or paths that exist but have no consumer/handler yet. Note that `order-service → menu-service` is a direct service-to-service call resolved via Eureka — it bypasses the gateway, since the gateway is only the entry point for frontend traffic. Kafka topics (`reserve-stock.command`, `stock-reservation.reply`, `order.paid`) are drawn as a single edge between publisher and consumer labeled with the topic name, rather than as separate producer→Kafka and Kafka→consumer hops — Kafka is still the broker underneath, this just keeps the diagram from having to route every topic through the `Kafka` node explicitly.
+Edge color marks the kind of communication: 🟦 blue for gateway HTTP routing, 🟧 orange for the direct synchronous service-to-service call, 🟪 purple for Kafka messaging, and ⬜ grey for service discovery/config lookups. Solid arrows carry actual request/business traffic; dashed arrows are infrastructure plumbing or paths that exist but have no consumer/handler yet. Note that `order-service → menu-service` is a direct service-to-service call resolved via Eureka — it bypasses the gateway, since the gateway is only the entry point for frontend traffic. Kafka topics (`reserve-stock.command`, `stock-reservation.reply`, `commit-stock.command`, `stock-commit.reply`, `release-stock.command`, `order.paid`) are drawn as a single edge between publisher and consumer labeled with the topic name, rather than as separate producer→Kafka and Kafka→consumer hops — Kafka is still the broker underneath, this just keeps the diagram from having to route every topic through the `Kafka` node explicitly. The `1.`–`4.` prefixes on the order-service ↔ inventory-service edges are the order they fire in during a normal checkout-then-payment (this diagram is a static topology, not a timeline, so a plain edge can't otherwise convey that); `release-stock.command` is unnumbered since it's a separate branch, only published if a `CONFIRMED` order gets cancelled. For the full step-by-step, including every failure path, see [Business flow: checkout and payment saga](#business-flow-checkout-and-payment-saga) below.
 
-## Business flow: checkout saga
+## Business flow: checkout and payment saga
 
-The topology diagram above shows *who talks to whom*; this shows the *order* checkout happens in, including the failure path. `order-service` runs this as an orchestrated state machine (not choreography) since inventory reservation is the only step that can fail and needs compensation.
+The topology diagram above shows *who talks to whom*; this shows the *order* the steps happen in, including every failure path. `order-service` runs this as an orchestrated state machine (not choreography) since stock handling is the only part that can fail and needs compensation — and it's now two separate saga legs, not one.
+
+Stock is handled as a **soft reservation**, not a single deduction: verifying an order *holds* quantity (`Ingredient.reservedQuantity`) without touching `currentStock`; only paying actually deducts it. Availability for a new reservation is always `currentStock - reservedQuantity`, so two in-flight orders can never both claim the same physical stock.
 
 ```mermaid
 sequenceDiagram
@@ -88,18 +93,19 @@ sequenceDiagram
     participant IS as inventory-service
     participant Job as OrderSagaReconciliationJob
 
+    Note over OS,IS: Verify leg - soft-reserve stock
     Customer->>OS: POST /api/orders/{id}/checkout
     activate OS
     OS->>OS: Order -> PENDING_CONFIRMATION<br/>saga -> STARTED
     OS->>K: publish reserve-stock.command (correlationId)
-    OS-->>Customer: 200 OK (checkout accepted)
+    OS-->>Customer: 202 Accepted
     deactivate OS
 
     K->>IS: deliver reserve-stock.command
     activate IS
-    IS->>IS: idempotency check (ProcessedSagaStep by correlationId)
-    alt sufficient stock
-        IS->>IS: lock + deduct ingredients, record movement
+    IS->>IS: idempotency check (ProcessedSagaStep)
+    alt sufficient stock (currentStock - reservedQuantity)
+        IS->>IS: reservedQuantity += required (currentStock untouched)
         IS->>K: publish stock-reservation.reply (success)
     else insufficient stock
         IS->>K: publish stock-reservation.reply (failure, reason)
@@ -109,30 +115,67 @@ sequenceDiagram
     K->>OS: deliver stock-reservation.reply
     activate OS
     alt success
-        OS->>OS: Order -> PAID, saga -> COMPLETED
-        OS->>K: publish order.paid
+        OS->>OS: Order -> CONFIRMED<br/>saga -> CONFIRMED
     else failure
-        OS->>OS: compensate: Order -> OPEN, saga -> COMPENSATED
+        OS->>OS: compensate: Order -> OPEN<br/>saga -> COMPENSATED
     end
     deactivate OS
 
-    Note over Job: every sweep-interval (30s)
-    Job->>Job: find sagas stuck at STOCK_RESERVATION_REQUESTED<br/>longer than stuck-threshold (60s)
-    alt retry count < max-retries (3)
+    Note over OS,IS: Payment leg - commit the hold
+    Customer->>OS: POST /api/orders/{id}/pay
+    activate OS
+    OS->>OS: Order -> PAYMENT_PENDING<br/>saga -> PAYMENT_REQUESTED (fresh correlationId)
+    OS->>K: publish commit-stock.command
+    OS-->>Customer: 202 Accepted
+    deactivate OS
+
+    K->>IS: deliver commit-stock.command
+    activate IS
+    IS->>IS: idempotency check (ProcessedSagaStep)
+    IS->>IS: currentStock -= required<br/>reservedQuantity -= required<br/>record StockMovement
+    IS->>K: publish stock-commit.reply (success)
+    deactivate IS
+
+    K->>OS: deliver stock-commit.reply
+    activate OS
+    alt success
+        OS->>OS: Order -> PAID<br/>saga -> COMPLETED
+        OS->>K: publish order.paid
+    else failure (rare - the hold was already validated at reserve time)
+        OS->>OS: revert: Order -> CONFIRMED<br/>saga -> CONFIRMED
+    end
+    deactivate OS
+
+    Note over OS,Job: Reconciliation - either leg, every sweep-interval (30s)
+    Job->>Job: find sagas stuck at STOCK_RESERVATION_REQUESTED<br/>or PAYMENT_REQUESTED past stuck-threshold (60s)
+    alt verify leg, retries remain
         Job->>OS: retryOrCompensate(orderId)
         OS->>K: re-publish reserve-stock.command (same correlationId)
-    else retries exhausted
+    else verify leg, retries exhausted
         Job->>OS: retryOrCompensate(orderId)
-        OS->>OS: compensate: Order -> OPEN, saga -> COMPENSATED
+        OS->>OS: compensate: Order -> OPEN
+    else payment leg, retries remain
+        Job->>OS: retryOrCompensate(orderId)
+        OS->>K: re-publish commit-stock.command (same correlationId)
+    else payment leg, retries exhausted
+        Job->>OS: retryOrCompensate(orderId)
+        OS->>OS: revert: Order -> CONFIRMED (stock hold stays)
     end
+
+    Note over OS,IS: Cancelling a CONFIRMED order - release the hold
+    Customer->>OS: POST /api/orders/{id}/cancel
+    OS->>OS: Order -> CANCELLED
+    OS->>K: publish release-stock.command (fire-and-forget)
+    K->>IS: deliver release-stock.command
+    IS->>IS: reservedQuantity -= required (currentStock untouched)
 ```
 
-Two failure paths are handled differently:
+Both legs fail the same two ways:
 
-- **A reply arrives, but says "no stock"** — handled directly in `onStockReservationReply`: the order is compensated back to `OPEN` immediately.
-- **No reply ever arrives** (inventory-service was down, the message was lost) — nothing in the request/reply exchange can detect this, since there's no message to receive. This is what `OrderSagaReconciliationJob` exists for (the **Reconciliation** pattern): it sweeps for sagas stuck at `STOCK_RESERVATION_REQUESTED` past `stuck-threshold` and either retries or gives up and compensates.
+- **A reply arrives, but says no** — handled directly in the reply listener: `onStockReservationReply` compensates the verify leg back to `OPEN`; `onStockCommitReply` reverts the payment leg back to `CONFIRMED` (the stock hold is still legitimate — only the commit attempt failed, so there's nothing to re-verify, just retry payment).
+- **No reply ever arrives** (inventory-service was down, the message was lost) — nothing in the request/reply exchange can detect this on its own. `OrderSagaReconciliationJob` now sweeps both legs (`STOCK_RESERVATION_REQUESTED` and `PAYMENT_REQUESTED`) past `stuck-threshold`, and `retryOrCompensate` branches on which leg it finds: the verify leg gives up to `OPEN` (nothing was ever held), the payment leg gives up to `CONFIRMED` (the hold stays — same reasoning as the reply-arrives-but-fails case).
 
-Retrying is safe to repeat because it re-publishes with the *same* `correlationId`: Kafka keys the message by `orderId`, so every attempt lands in the same partition and is processed in order by inventory-service, whose `ProcessedSagaStep` table is keyed on `correlationId` — a redelivery just replays the stored outcome instead of deducting stock twice.
+Retrying either leg is safe to repeat because it re-publishes with the *same* `correlationId` for that leg (a fresh one is minted per leg via `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka keys the message by `orderId`, so every attempt lands in the same partition and is processed in order by inventory-service, whose `ProcessedSagaStep` table is keyed on `correlationId` — a redelivery just replays the stored outcome instead of applying the effect twice. Cancelling a `CONFIRMED` order's release is deliberately **not** covered by reconciliation — it's fire-and-forget with no reply to watch, an accepted gap for now.
 
 ## Auth flow
 
@@ -150,10 +193,11 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 - **Externalized Configuration** — Spring Cloud Config Server, native profile backed by a bind-mounted `config-repo` (see below)
 - **Trusted Header Authentication** — gateway validates the JWT once and forwards identity via `X-User-Id`/`X-Username`/`X-User-Role` headers; downstream services trust the gateway instead of re-validating (`common-lib`'s `TrustedHeaderAuth`)
 - **Circuit Breaker + Retry** — Resilience4j on order-service's calls to menu-service
-- **Orchestrated Saga** — order-service's checkout flow drives a state machine (`OrderCheckoutSaga`) that requests stock reservation from inventory-service over Kafka and commits or compensates the order based on the reply; see [Business flow: checkout saga](#business-flow-checkout-saga)
-- **Idempotent Consumer, via Transactional Inbox** — `StockReservationService.reserve()` checks `ProcessedSagaStep` (the inbox table, keyed on `correlationId`) before doing anything, and writes the outcome to it in the *same* transaction as the stock deduction it guards. Because the inbox write and the business change commit atomically together, a redelivered command can never see one applied without the other — it just replays the stored result.
-- **Reconciliation** — `OrderSagaReconciliationJob` sweeps sagas stuck waiting on a reply and retries or compensates them
-- **Dead Letter Queue** — inventory-service routes `inventory.reserve-stock.command` messages that fail for *technical* reasons (bad payload, bugs, DB errors — never a business "insufficient stock" outcome, which is a normal reply, not an exception) to `inventory.reserve-stock.command.dlq` after a short exponential-backoff retry, instead of blocking the consumer on a poison-pill message
+- **Orchestrated Saga** — order-service's checkout flow drives a state machine (`OrderCheckoutSaga`) with two legs: verify (soft-reserve stock, `OPEN`→`CONFIRMED`) and pay (commit the hold, `CONFIRMED`→`PAID`), each its own Kafka round trip that commits or compensates based on the reply; see [Business flow: checkout and payment saga](#business-flow-checkout-and-payment-saga)
+- **Try-Confirm/Cancel-style stock reservation** — inventory-service never deducts `currentStock` directly from a checkout attempt. Verifying *tries* a hold (`reservedQuantity`), paying *confirms* it into a real deduction, cancelling a `CONFIRMED` order *cancels* the hold — the same three-step shape as the classic TCC pattern, layered on top of the saga above rather than replacing it
+- **Idempotent Consumer, via Transactional Inbox** — `StockReservationService`'s `reserve`/`commit`/`release` all check `ProcessedSagaStep` (the inbox table, keyed on `correlationId`, with a `step` column distinguishing which one) before doing anything, and write the outcome to it in the *same* transaction as the stock change they guard. Because the inbox write and the business change commit atomically together, a redelivered command can never see one applied without the other — it just replays the stored result.
+- **Reconciliation** — `OrderSagaReconciliationJob` sweeps sagas stuck waiting on a reply on *either* saga leg, and retries or compensates them to the right target state per leg (see the business flow above)
+- **Dead Letter Queue** — inventory-service routes messages that fail for *technical* reasons (bad payload, bugs, DB errors — never a business "insufficient stock" outcome, which is a normal reply, not an exception) to a `.dlq` topic after a short exponential-backoff retry, instead of blocking the consumer on a poison-pill message. Applies uniformly to all three inventory command topics (`reserve-stock`, `commit-stock`, `release-stock`) via one shared error-handler bean, not configured per topic
 - **Database per Service** — separate Postgres database and role per service
 
 ## Structure
@@ -247,8 +291,11 @@ graph TB
 
     ORDER -->|"WebClient, sync, CircuitBreaker + Retry"| MENU
 
-    ORDER -->|"reserve-stock.command, via Kafka"| INV
-    INV -->|"stock-reservation.reply, via Kafka"| ORDER
+    ORDER -->|"1. reserve-stock.command, via Kafka"| INV
+    INV -->|"2. stock-reservation.reply, via Kafka"| ORDER
+    ORDER -->|"3. commit-stock.command, via Kafka"| INV
+    INV -->|"4. stock-commit.reply, via Kafka"| ORDER
+    ORDER -->|"release-stock.command, via Kafka (branch: only if cancelled after step 2)"| INV
 
     ORDER -.->|"order.paid, via Kafka (no consumer yet)"| KAFKA
 
@@ -261,15 +308,17 @@ graph TB
 
     linkStyle 0,1,2,3,4,5 stroke:#4C6EF5,color:#4C6EF5
     linkStyle 6 stroke:#F08C00,color:#F08C00
-    linkStyle 7,8,9 stroke:#9C36B5,color:#9C36B5
-    linkStyle 10,11,12,13,14,15 stroke:#868E96,color:#868E96
+    linkStyle 7,8,9,10,11,12 stroke:#9C36B5,color:#9C36B5
+    linkStyle 13,14,15,16,17,18 stroke:#868E96,color:#868E96
 ```
 
-Màu của đường nối thể hiện loại giao tiếp: 🟦 xanh dương là routing HTTP qua gateway, 🟧 cam là lời gọi đồng bộ trực tiếp giữa 2 service, 🟪 tím là giao tiếp qua Kafka, và ⬜ xám là tra cứu service discovery/config. Đường liền là traffic nghiệp vụ thật; đường đứt là hạ tầng nền (infra plumbing) hoặc đường đi tồn tại nhưng chưa có consumer/handler xử lý. Lưu ý `order-service → menu-service` là lời gọi trực tiếp giữa 2 service, được phân giải qua Eureka — không đi qua gateway, vì gateway chỉ là cổng vào cho traffic từ frontend. Các topic Kafka (`reserve-stock.command`, `stock-reservation.reply`, `order.paid`) được vẽ thành 1 đường nối duy nhất giữa publisher và consumer, ghi tên topic ngay trên đó, thay vì tách thành 2 chặng producer→Kafka và Kafka→consumer riêng biệt — Kafka vẫn là broker đứng bên dưới, cách vẽ này chỉ để khỏi phải dẫn mọi topic qua node `Kafka` một cách tường minh.
+Màu của đường nối thể hiện loại giao tiếp: 🟦 xanh dương là routing HTTP qua gateway, 🟧 cam là lời gọi đồng bộ trực tiếp giữa 2 service, 🟪 tím là giao tiếp qua Kafka, và ⬜ xám là tra cứu service discovery/config. Đường liền là traffic nghiệp vụ thật; đường đứt là hạ tầng nền (infra plumbing) hoặc đường đi tồn tại nhưng chưa có consumer/handler xử lý. Lưu ý `order-service → menu-service` là lời gọi trực tiếp giữa 2 service, được phân giải qua Eureka — không đi qua gateway, vì gateway chỉ là cổng vào cho traffic từ frontend. Các topic Kafka (`reserve-stock.command`, `stock-reservation.reply`, `commit-stock.command`, `stock-commit.reply`, `release-stock.command`, `order.paid`) được vẽ thành 1 đường nối duy nhất giữa publisher và consumer, ghi tên topic ngay trên đó, thay vì tách thành 2 chặng producer→Kafka và Kafka→consumer riêng biệt — Kafka vẫn là broker đứng bên dưới, cách vẽ này chỉ để khỏi phải dẫn mọi topic qua node `Kafka` một cách tường minh. Số thứ tự `1.`–`4.` trên các cạnh giữa order-service ↔ inventory-service thể hiện đúng trình tự chúng xảy ra trong 1 lượt checkout-rồi-thanh-toán bình thường (sơ đồ này là topology tĩnh, không phải timeline, nên 1 cạnh trơn không tự nói lên được điều đó); `release-stock.command` không đánh số vì nó là 1 nhánh riêng, chỉ publish khi đơn đang `CONFIRMED` bị hủy. Muốn xem đầy đủ từng bước, kể cả mọi nhánh lỗi, xem mục "Luồng nghiệp vụ: saga xác thực và thanh toán" bên dưới.
 
-## Luồng nghiệp vụ: saga thanh toán
+## Luồng nghiệp vụ: saga xác thực và thanh toán
 
-Biểu đồ topology ở trên cho biết *ai nói chuyện với ai*; còn biểu đồ này cho biết *thứ tự* các bước diễn ra khi checkout, kể cả đường đi khi thất bại. `order-service` chạy luồng này dưới dạng một state machine điều phối tập trung (orchestration, không phải choreography), vì việc giữ chỗ tồn kho là bước duy nhất có thể thất bại và cần compensate.
+Biểu đồ topology ở trên cho biết *ai nói chuyện với ai*; còn biểu đồ này cho biết *thứ tự* các bước diễn ra, kể cả mọi đường đi khi thất bại. `order-service` chạy luồng này dưới dạng một state machine điều phối tập trung (orchestration, không phải choreography), vì phần xử lý tồn kho là phần duy nhất có thể thất bại và cần compensate — và giờ nó là **2 chặng saga riêng biệt**, không còn gộp làm 1.
+
+Tồn kho được xử lý theo mô hình **giữ chỗ mềm (soft reservation)**, không trừ thẳng 1 lần: bước xác thực chỉ *giữ chỗ* số lượng (`Ingredient.reservedQuantity`), không đụng tới `currentStock`; chỉ khi thanh toán mới thực sự trừ. Số lượng khả dụng để giữ chỗ mới luôn là `currentStock - reservedQuantity`, nên 2 đơn đang xử lý cùng lúc không bao giờ giữ trùng cùng 1 phần tồn kho vật lý.
 
 ```mermaid
 sequenceDiagram
@@ -279,20 +328,21 @@ sequenceDiagram
     participant IS as inventory-service
     participant Job as OrderSagaReconciliationJob
 
+    Note over OS,IS: Chặng Xác thực - giữ chỗ tồn kho (mềm)
     Customer->>OS: POST /api/orders/{id}/checkout
     activate OS
     OS->>OS: Order -> PENDING_CONFIRMATION<br/>saga -> STARTED
     OS->>K: publish reserve-stock.command (correlationId)
-    OS-->>Customer: 200 OK (checkout accepted)
+    OS-->>Customer: 202 Accepted
     deactivate OS
 
     K->>IS: deliver reserve-stock.command
     activate IS
-    IS->>IS: idempotency check (ProcessedSagaStep by correlationId)
-    alt sufficient stock
-        IS->>IS: lock + deduct ingredients, record movement
+    IS->>IS: idempotency check (ProcessedSagaStep)
+    alt đủ hàng (currentStock - reservedQuantity)
+        IS->>IS: reservedQuantity += required (currentStock không đổi)
         IS->>K: publish stock-reservation.reply (success)
-    else insufficient stock
+    else thiếu hàng
         IS->>K: publish stock-reservation.reply (failure, reason)
     end
     deactivate IS
@@ -300,30 +350,67 @@ sequenceDiagram
     K->>OS: deliver stock-reservation.reply
     activate OS
     alt success
-        OS->>OS: Order -> PAID, saga -> COMPLETED
-        OS->>K: publish order.paid
+        OS->>OS: Order -> CONFIRMED<br/>saga -> CONFIRMED
     else failure
-        OS->>OS: compensate: Order -> OPEN, saga -> COMPENSATED
+        OS->>OS: compensate: Order -> OPEN<br/>saga -> COMPENSATED
     end
     deactivate OS
 
-    Note over Job: every sweep-interval (30s)
-    Job->>Job: find sagas stuck at STOCK_RESERVATION_REQUESTED<br/>longer than stuck-threshold (60s)
-    alt retry count < max-retries (3)
-        Job->>OS: retryOrCompensate(orderId)
-        OS->>K: re-publish reserve-stock.command (same correlationId)
-    else retries exhausted
-        Job->>OS: retryOrCompensate(orderId)
-        OS->>OS: compensate: Order -> OPEN, saga -> COMPENSATED
+    Note over OS,IS: Chặng Thanh toán - commit phần đã giữ chỗ
+    Customer->>OS: POST /api/orders/{id}/pay
+    activate OS
+    OS->>OS: Order -> PAYMENT_PENDING<br/>saga -> PAYMENT_REQUESTED (correlationId mới)
+    OS->>K: publish commit-stock.command
+    OS-->>Customer: 202 Accepted
+    deactivate OS
+
+    K->>IS: deliver commit-stock.command
+    activate IS
+    IS->>IS: idempotency check (ProcessedSagaStep)
+    IS->>IS: currentStock -= required<br/>reservedQuantity -= required<br/>ghi StockMovement
+    IS->>K: publish stock-commit.reply (success)
+    deactivate IS
+
+    K->>OS: deliver stock-commit.reply
+    activate OS
+    alt success
+        OS->>OS: Order -> PAID<br/>saga -> COMPLETED
+        OS->>K: publish order.paid
+    else failure (hiếm - đã validate từ lúc giữ chỗ)
+        OS->>OS: revert: Order -> CONFIRMED<br/>saga -> CONFIRMED
     end
+    deactivate OS
+
+    Note over OS,Job: Reconciliation - cả 2 chặng, mỗi sweep-interval (30s)
+    Job->>Job: tìm saga kẹt ở STOCK_RESERVATION_REQUESTED<br/>hoặc PAYMENT_REQUESTED quá stuck-threshold (60s)
+    alt chặng Xác thực, còn lượt retry
+        Job->>OS: retryOrCompensate(orderId)
+        OS->>K: gửi lại reserve-stock.command (cùng correlationId)
+    else chặng Xác thực, hết lượt retry
+        Job->>OS: retryOrCompensate(orderId)
+        OS->>OS: compensate: Order -> OPEN
+    else chặng Thanh toán, còn lượt retry
+        Job->>OS: retryOrCompensate(orderId)
+        OS->>K: gửi lại commit-stock.command (cùng correlationId)
+    else chặng Thanh toán, hết lượt retry
+        Job->>OS: retryOrCompensate(orderId)
+        OS->>OS: revert: Order -> CONFIRMED (vẫn giữ chỗ tồn kho)
+    end
+
+    Note over OS,IS: Hủy đơn đang CONFIRMED - trả lại chỗ đã giữ
+    Customer->>OS: POST /api/orders/{id}/cancel
+    OS->>OS: Order -> CANCELLED
+    OS->>K: publish release-stock.command (fire-and-forget)
+    K->>IS: deliver release-stock.command
+    IS->>IS: reservedQuantity -= required (currentStock không đổi)
 ```
 
-Hai đường lỗi được xử lý khác nhau:
+Cả 2 chặng đều xử lý 2 kiểu lỗi giống nhau:
 
-- **Có reply trả về, nhưng báo "hết hàng"** — được xử lý trực tiếp trong `onStockReservationReply`: đơn hàng được compensate về trạng thái `OPEN` ngay lập tức.
-- **Không có reply nào trả về** (inventory-service bị down, message bị mất) — bản thân cơ chế request/reply không thể phát hiện được trường hợp này, vì đơn giản là không có message nào để nhận. Đây chính là lý do tồn tại của `OrderSagaReconciliationJob` (pattern **Reconciliation**): job này quét các saga bị kẹt ở trạng thái `STOCK_RESERVATION_REQUESTED` quá `stuck-threshold`, rồi retry hoặc bỏ cuộc và compensate.
+- **Có reply trả về, nhưng báo thất bại** — xử lý trực tiếp trong listener nhận reply: `onStockReservationReply` compensate chặng Xác thực về `OPEN`; `onStockCommitReply` revert chặng Thanh toán về `CONFIRMED` (chỗ giữ tồn kho vẫn hợp lệ — chỉ có bước commit thất bại, nên không cần xác thực lại, chỉ cần thử thanh toán lại).
+- **Không có reply nào trả về** (inventory-service bị down, message bị mất) — bản thân cơ chế request/reply không thể tự phát hiện trường hợp này. `OrderSagaReconciliationJob` giờ quét cả 2 chặng (`STOCK_RESERVATION_REQUESTED` và `PAYMENT_REQUESTED`) quá `stuck-threshold`, và `retryOrCompensate` rẽ nhánh theo đúng chặng đang kẹt: chặng Xác thực bỏ cuộc về `OPEN` (chưa từng giữ chỗ gì), chặng Thanh toán bỏ cuộc về `CONFIRMED` (vẫn giữ nguyên chỗ đã giữ — cùng logic như trường hợp reply báo lỗi ở trên).
 
-Việc retry lặp lại nhiều lần vẫn an toàn, vì mỗi lần đều publish lại với *cùng* `correlationId`: Kafka key message theo `orderId`, nên mọi lần gửi đều rơi vào cùng 1 partition và được inventory-service xử lý tuần tự; bảng `ProcessedSagaStep` của inventory-service dùng `correlationId` làm khóa chính — nên khi message bị gửi lại, nó chỉ trả về đúng kết quả đã lưu từ trước, thay vì trừ kho thêm lần nữa.
+Retry lại ở chặng nào cũng an toàn vì mỗi lần đều publish lại với *cùng* `correlationId` của chặng đó (mỗi chặng có 1 correlationId mới riêng, sinh ra qua `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka key message theo `orderId`, nên mọi lần gửi đều rơi vào cùng 1 partition và được inventory-service xử lý tuần tự; bảng `ProcessedSagaStep` dùng `correlationId` làm khóa chính — nên khi message bị gửi lại, nó chỉ trả về đúng kết quả đã lưu từ trước, thay vì áp dụng hiệu ứng 2 lần. Việc trả chỗ giữ khi hủy đơn `CONFIRMED` **cố tình không** được Reconciliation theo dõi — đây là fire-and-forget, không có reply để chờ, một khoảng trống được chấp nhận cho hiện tại.
 
 ## Luồng xác thực
 
@@ -341,10 +428,11 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 - **Externalized Configuration** — Spring Cloud Config Server, profile native được backing bởi `config-repo` bind-mount (xem phần bên dưới)
 - **Trusted Header Authentication** — gateway xác thực JWT một lần duy nhất rồi chuyển tiếp danh tính qua header `X-User-Id`/`X-Username`/`X-User-Role`; các service phía sau tin tưởng gateway thay vì tự xác thực lại (`TrustedHeaderAuth` trong `common-lib`)
 - **Circuit Breaker + Retry** — Resilience4j cho lời gọi từ order-service sang menu-service
-- **Orchestrated Saga** — luồng checkout của order-service điều khiển một state machine (`OrderCheckoutSaga`), yêu cầu giữ chỗ tồn kho từ inventory-service qua Kafka, rồi commit hoặc compensate đơn hàng dựa theo reply nhận được; xem mục "Luồng nghiệp vụ: saga thanh toán" bên trên
-- **Idempotent Consumer, qua Transactional Inbox** — `StockReservationService.reserve()` kiểm tra `ProcessedSagaStep` (bảng "inbox", khoá chính là `correlationId`) trước khi làm bất cứ gì, và ghi kết quả vào đó **trong cùng 1 transaction** với việc trừ kho mà nó bảo vệ. Vì việc ghi inbox và thay đổi nghiệp vụ commit cùng lúc, 1 message bị gửi lại không bao giờ rơi vào tình huống "chỉ có 1 trong 2 việc được thực hiện" — nó chỉ đơn giản trả lại kết quả đã lưu từ trước.
-- **Reconciliation** — `OrderSagaReconciliationJob` quét các saga bị kẹt khi chờ reply, rồi retry hoặc compensate
-- **Dead Letter Queue** — inventory-service chuyển các message `inventory.reserve-stock.command` lỗi vì nguyên nhân *kỹ thuật* (payload sai định dạng, bug, lỗi DB — không bao giờ tính trường hợp nghiệp vụ "hết hàng", vì đó là 1 reply bình thường, không phải exception) sang `inventory.reserve-stock.command.dlq` sau vài lần retry theo exponential backoff, thay vì để nó chặn cứng consumer (poison-pill message)
+- **Orchestrated Saga** — luồng checkout của order-service điều khiển một state machine (`OrderCheckoutSaga`) gồm 2 chặng: Xác thực (giữ chỗ mềm tồn kho, `OPEN`→`CONFIRMED`) và Thanh toán (commit chỗ đã giữ, `CONFIRMED`→`PAID`), mỗi chặng là 1 vòng round-trip Kafka riêng, tự commit hoặc compensate dựa theo reply nhận được; xem mục "Luồng nghiệp vụ: saga xác thực và thanh toán" bên trên
+- **Giữ chỗ tồn kho kiểu Try-Confirm/Cancel (TCC)** — inventory-service không bao giờ trừ thẳng `currentStock` ngay khi checkout. Xác thực là bước *Try* (giữ chỗ vào `reservedQuantity`), thanh toán là bước *Confirm* (biến chỗ giữ thành trừ kho thật), hủy đơn `CONFIRMED` là bước *Cancel* (trả lại chỗ giữ) — đúng 3 bước kinh điển của pattern TCC, đặt chồng lên trên saga ở trên chứ không thay thế nó
+- **Idempotent Consumer, qua Transactional Inbox** — cả 3 hàm `reserve`/`commit`/`release` của `StockReservationService` đều kiểm tra `ProcessedSagaStep` (bảng "inbox", khoá chính là `correlationId`, có thêm cột `step` để phân biệt đang ở bước nào) trước khi làm bất cứ gì, và ghi kết quả vào đó **trong cùng 1 transaction** với thay đổi tồn kho mà nó bảo vệ. Vì việc ghi inbox và thay đổi nghiệp vụ commit cùng lúc, 1 message bị gửi lại không bao giờ rơi vào tình huống "chỉ có 1 trong 2 việc được thực hiện" — nó chỉ đơn giản trả lại kết quả đã lưu từ trước.
+- **Reconciliation** — `OrderSagaReconciliationJob` quét các saga bị kẹt khi chờ reply ở **cả 2 chặng**, rồi retry hoặc compensate về đúng trạng thái đích tương ứng từng chặng (xem luồng nghiệp vụ bên trên)
+- **Dead Letter Queue** — inventory-service chuyển các message lỗi vì nguyên nhân *kỹ thuật* (payload sai định dạng, bug, lỗi DB — không bao giờ tính trường hợp nghiệp vụ "hết hàng", vì đó là 1 reply bình thường, không phải exception) sang topic `.dlq` sau vài lần retry theo exponential backoff, thay vì để nó chặn cứng consumer (poison-pill message). Áp dụng đồng loạt cho cả 3 topic command của inventory (`reserve-stock`, `commit-stock`, `release-stock`) qua 1 bean xử lý lỗi dùng chung, không cấu hình riêng từng topic
 - **Database per Service** — mỗi service có 1 database Postgres và 1 role riêng
 
 ## Cấu trúc

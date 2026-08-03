@@ -7,18 +7,20 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Reconciliation pattern: a periodic sweep that repairs sagas an event-driven exchange alone
- * can't recover from - order-service published inventory.reserve-stock.command and is still
- * waiting on inventory.stock-reservation.reply, but the reply never came (inventory-service down
+ * can't recover from, on either saga leg - order-service published a command (reserve or commit)
+ * and is still waiting on the matching reply, but the reply never came (inventory-service down
  * for a while, the message got lost, etc). Without this, such an order would sit at
- * PENDING_CONFIRMATION forever; onStockReservationReply's shouldIgnoreReply guards only handle
- * stale/duplicate *replies that do arrive*, not a reply that never arrives at all.
+ * PENDING_CONFIRMATION or PAYMENT_PENDING forever; the reply handlers' shouldIgnoreReply guards
+ * only handle stale/duplicate *replies that do arrive*, not a reply that never arrives at all.
  *
  * Pure orchestration, no business logic of its own: finds candidates, delegates the actual
  * retry-or-compensate decision to OrderCheckoutSaga (the orchestrator that owns every other saga
- * transition too), and isolates one saga's failure from the rest of the sweep.
+ * transition too, and knows which leg a given stuck saga is on), and isolates one saga's failure
+ * from the rest of the sweep.
  */
 @Component
 public class OrderSagaReconciliationJob {
@@ -40,8 +42,8 @@ public class OrderSagaReconciliationJob {
     @Scheduled(fixedDelayString = "${app.saga-reconciliation.sweep-interval:30s}")
     public void sweep() {
         Instant threshold = Instant.now().minus(properties.stuckThreshold());
-        List<OrderSagaState> stuck = sagaStateRepository.findByStepAndUpdatedAtBefore(
-                SagaStep.STOCK_RESERVATION_REQUESTED, threshold);
+        List<OrderSagaState> stuck = sagaStateRepository.findByStepInAndUpdatedAtBefore(
+                Set.of(SagaStep.STOCK_RESERVATION_REQUESTED, SagaStep.PAYMENT_REQUESTED), threshold);
 
         if (stuck.isEmpty()) {
             return;

@@ -42,6 +42,34 @@ public class OrderSagaStateService {
         updateStep(orderId, SagaStep.STOCK_RESERVATION_REQUESTED);
     }
 
+    /** Verify success path — stock is held, awaiting payment. */
+    @Transactional
+    public void markConfirmed(Long orderId) {
+        updateStep(orderId, SagaStep.CONFIRMED);
+    }
+
+    /**
+     * Starts (or restarts) the payment leg on the *existing* saga row for this order — unlike
+     * start(), which inserts a new row, this order already has one from the checkout leg.
+     * Fresh correlationId (same reasoning as start()'s) and a reset retry count, since this is
+     * a new attempt distinct from the checkout leg's retries.
+     */
+    @Transactional
+    public String startPaymentAttempt(Long orderId) {
+        OrderSagaState state = sagaStateRepository.findById(orderId)
+                .orElseThrow(() -> ResourceNotFoundException.of("OrderSagaState", orderId));
+        String correlationId = UUID.randomUUID().toString();
+        state.setCorrelationId(correlationId);
+        state.setRetryCount(0);
+        sagaStateRepository.save(state);
+        return correlationId;
+    }
+
+    @Transactional
+    public void markPaymentRequested(Long orderId) {
+        updateStep(orderId, SagaStep.PAYMENT_REQUESTED);
+    }
+
     @Transactional
     public void markCompleted(Long orderId) {
         updateStep(orderId, SagaStep.COMPLETED);
