@@ -86,6 +86,19 @@ public class OrderService {
         return orderRepository.save(order);
     }
 
+    /** Sets a line's quantity directly (min 1 - use removeItem to take it down to 0 instead). */
+    @Transactional
+    public Order updateItemQuantity(Long orderId, Long orderItemId, int quantity) {
+        Order order = getOrder(orderId);
+        requireOpen(order);
+        OrderItem item = order.getItems().stream()
+                .filter(i -> i.getId().equals(orderItemId))
+                .findFirst()
+                .orElseThrow(() -> ResourceNotFoundException.of("OrderItem", orderItemId));
+        item.setQuantity(quantity);
+        return orderRepository.save(order);
+    }
+
     @Transactional
     public Order cancel(Long orderId) {
         Order order = getOrder(orderId);

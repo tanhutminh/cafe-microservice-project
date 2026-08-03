@@ -30,6 +30,10 @@ export interface AddOrderItemRequest {
   quantity: number;
 }
 
+export interface UpdateOrderItemQuantityRequest {
+  quantity: number;
+}
+
 export interface PayRequest {
   paymentMethod: string;
 }
