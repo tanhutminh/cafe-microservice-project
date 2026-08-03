@@ -1,4 +1,4 @@
-export type OrderStatus = 'OPEN' | 'PENDING_CONFIRMATION' | 'PAID' | 'CANCELLED';
+export type OrderStatus = 'OPEN' | 'PENDING_CONFIRMATION' | 'CONFIRMED' | 'PAYMENT_PENDING' | 'PAID' | 'CANCELLED';
 
 export interface OrderItem {
   id: number;
@@ -30,7 +30,7 @@ export interface AddOrderItemRequest {
   quantity: number;
 }
 
-export interface CheckoutRequest {
+export interface PayRequest {
   paymentMethod: string;
 }
 

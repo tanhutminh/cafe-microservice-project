@@ -1,5 +1,6 @@
 package com.cafe.inventoryservice.reservation;
 
+import com.cafe.common.event.InventoryStockCommitReply;
 import com.cafe.common.event.InventoryStockReservationReply;
 import com.cafe.common.event.OrderLineItem;
 import com.cafe.inventoryservice.ingredient.Ingredient;
@@ -17,14 +18,20 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * The inventory-side half of the checkout saga's stock-reservation step (plan section 4):
- * an all-or-nothing deduction across every ingredient touched by an order. Menu items with
- * no recipe rows are always treated as in stock (soft, per the plan's accepted MVP tradeoff).
+ * The inventory-side of the checkout saga's two stock steps (soft-reservation model):
+ * {@link #reserve} holds quantity (reservedQuantity) without touching currentStock, and
+ * {@link #commit} - the payment leg - turns that hold into a real deduction. {@link #release}
+ * undoes a hold on cancel, before it was ever committed. Available-to-reserve is always
+ * currentStock - reservedQuantity, not currentStock alone, so two orders can't both hold the
+ * same physical stock. Menu items with no recipe rows are always treated as in stock (soft,
+ * per the plan's accepted MVP tradeoff).
  */
 @Service
 public class StockReservationService {
 
     private static final String STEP_RESERVE_STOCK = "RESERVE_STOCK";
+    private static final String STEP_COMMIT_STOCK = "COMMIT_STOCK";
+    private static final String STEP_RELEASE_STOCK = "RELEASE_STOCK";
     private static final String MOVEMENT_REASON_CHECKOUT = "ORDER_CHECKOUT";
 
     private final IngredientRepository ingredientRepository;
@@ -42,6 +49,7 @@ public class StockReservationService {
         this.processedSagaStepRepository = processedSagaStepRepository;
     }
 
+    /** Verify leg: hold quantity against availability (currentStock - reservedQuantity). No StockMovement - nothing physically changed yet. */
     @Transactional
     public InventoryStockReservationReply reserve(Long orderId, String correlationId, List<OrderLineItem> items) {
         var alreadyProcessed = processedSagaStepRepository.findById(correlationId);
@@ -54,7 +62,7 @@ public class StockReservationService {
 
         Map<Long, BigDecimal> requiredByIngredientId = computeRequiredQuantities(items);
         if (requiredByIngredientId.isEmpty()) {
-            saveProcessedStep(orderId, correlationId, true, null);
+            saveProcessedStep(orderId, correlationId, STEP_RESERVE_STOCK, true, null);
             return InventoryStockReservationReply.success(orderId);
         }
 
@@ -63,16 +71,48 @@ public class StockReservationService {
 
         for (Ingredient ingredient : lockedIngredients) {
             BigDecimal required = requiredByIngredientId.get(ingredient.getId());
-            if (ingredient.getCurrentStock().compareTo(required) < 0) {
+            BigDecimal available = ingredient.getCurrentStock().subtract(ingredient.getReservedQuantity());
+            if (available.compareTo(required) < 0) {
                 String reason = "Insufficient stock: " + ingredient.getName();
-                saveProcessedStep(orderId, correlationId, false, reason);
+                saveProcessedStep(orderId, correlationId, STEP_RESERVE_STOCK, false, reason);
                 return InventoryStockReservationReply.failure(orderId, reason);
             }
         }
 
         for (Ingredient ingredient : lockedIngredients) {
             BigDecimal required = requiredByIngredientId.get(ingredient.getId());
+            ingredient.setReservedQuantity(ingredient.getReservedQuantity().add(required));
+            ingredientRepository.save(ingredient);
+        }
+
+        saveProcessedStep(orderId, correlationId, STEP_RESERVE_STOCK, true, null);
+        return InventoryStockReservationReply.success(orderId);
+    }
+
+    /** Payment leg: turn an existing hold into a real deduction. Does not re-check availability - already validated at reserve time. */
+    @Transactional
+    public InventoryStockCommitReply commit(Long orderId, String correlationId, List<OrderLineItem> items) {
+        var alreadyProcessed = processedSagaStepRepository.findById(correlationId);
+        if (alreadyProcessed.isPresent()) {
+            ProcessedSagaStep step = alreadyProcessed.get();
+            return step.isSuccess()
+                    ? InventoryStockCommitReply.success(orderId)
+                    : InventoryStockCommitReply.failure(orderId, step.getReason());
+        }
+
+        Map<Long, BigDecimal> requiredByIngredientId = computeRequiredQuantities(items);
+        if (requiredByIngredientId.isEmpty()) {
+            saveProcessedStep(orderId, correlationId, STEP_COMMIT_STOCK, true, null);
+            return InventoryStockCommitReply.success(orderId);
+        }
+
+        List<Ingredient> lockedIngredients =
+                ingredientRepository.findAllByIdForUpdate(new ArrayList<>(requiredByIngredientId.keySet()));
+
+        for (Ingredient ingredient : lockedIngredients) {
+            BigDecimal required = requiredByIngredientId.get(ingredient.getId());
             ingredient.setCurrentStock(ingredient.getCurrentStock().subtract(required));
+            ingredient.setReservedQuantity(ingredient.getReservedQuantity().subtract(required));
             ingredientRepository.save(ingredient);
             stockMovementRepository.save(StockMovement.builder()
                     .ingredient(ingredient)
@@ -82,8 +122,29 @@ public class StockReservationService {
                     .build());
         }
 
-        saveProcessedStep(orderId, correlationId, true, null);
-        return InventoryStockReservationReply.success(orderId);
+        saveProcessedStep(orderId, correlationId, STEP_COMMIT_STOCK, true, null);
+        return InventoryStockCommitReply.success(orderId);
+    }
+
+    /** Cancel-after-CONFIRMED compensation: release a hold that was never committed. No StockMovement - currentStock was never touched. Fire-and-forget, no reply. */
+    @Transactional
+    public void release(Long orderId, String correlationId, List<OrderLineItem> items) {
+        if (processedSagaStepRepository.findById(correlationId).isPresent()) {
+            return;
+        }
+
+        Map<Long, BigDecimal> requiredByIngredientId = computeRequiredQuantities(items);
+        if (!requiredByIngredientId.isEmpty()) {
+            List<Ingredient> lockedIngredients =
+                    ingredientRepository.findAllByIdForUpdate(new ArrayList<>(requiredByIngredientId.keySet()));
+            for (Ingredient ingredient : lockedIngredients) {
+                BigDecimal required = requiredByIngredientId.get(ingredient.getId());
+                ingredient.setReservedQuantity(ingredient.getReservedQuantity().subtract(required));
+                ingredientRepository.save(ingredient);
+            }
+        }
+
+        saveProcessedStep(orderId, correlationId, STEP_RELEASE_STOCK, true, null);
     }
 
     private Map<Long, BigDecimal> computeRequiredQuantities(List<OrderLineItem> items) {
@@ -102,11 +163,11 @@ public class StockReservationService {
         return required;
     }
 
-    private void saveProcessedStep(Long orderId, String correlationId, boolean success, String reason) {
+    private void saveProcessedStep(Long orderId, String correlationId, String step, boolean success, String reason) {
         processedSagaStepRepository.save(ProcessedSagaStep.builder()
                 .correlationId(correlationId)
                 .orderId(orderId)
-                .step(STEP_RESERVE_STOCK)
+                .step(step)
                 .success(success)
                 .reason(reason)
                 .build());

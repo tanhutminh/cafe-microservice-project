@@ -35,8 +35,10 @@
   @if (currentOrder(); as order) {
     <div class="menu-panel">
       <h3>{{ 'pos.menu' | transloco }}</h3>
-      @if (order.status === 'PENDING_CONFIRMATION') {
+      @if (order.status === 'PENDING_CONFIRMATION' || order.status === 'PAYMENT_PENDING') {
         <p class="hint">{{ 'pos.orderLocked' | transloco }}</p>
+      } @else if (order.status === 'CONFIRMED') {
+        <p class="hint">{{ 'pos.orderConfirmedHint' | transloco }}</p>
       } @else if (order.status === 'PAID') {
         <p class="hint">{{ 'pos.orderPaidHint' | transloco }}</p>
       } @else if (order.status === 'OPEN') {
@@ -104,10 +106,18 @@
         <div class="actions">
           <button mat-stroked-button (click)="cancelOrder()">{{ 'pos.cancelOrder' | transloco }}</button>
           <button mat-stroked-button (click)="startMoveTable()">{{ 'pos.moveTable' | transloco }}</button>
-          <button mat-flat-button color="primary" [disabled]="order.items.length === 0" (click)="checkout('CASH')">
+          <button mat-flat-button color="primary" [disabled]="order.items.length === 0" (click)="verify()">
+            {{ 'pos.verify' | transloco }}
+          </button>
+        </div>
+      } @else if (order.status === 'CONFIRMED') {
+        <div class="actions">
+          <button mat-stroked-button (click)="cancelOrder()">{{ 'pos.cancelOrder' | transloco }}</button>
+          <button mat-stroked-button (click)="startMoveTable()">{{ 'pos.moveTable' | transloco }}</button>
+          <button mat-flat-button color="primary" (click)="pay('CASH')">
             {{ 'pos.payCash' | transloco }}
           </button>
-          <button mat-flat-button color="accent" [disabled]="order.items.length === 0" (click)="checkout('CARD')">
+          <button mat-flat-button color="accent" (click)="pay('CARD')">
             {{ 'pos.payCard' | transloco }}
           </button>
         </div>

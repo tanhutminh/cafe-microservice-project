@@ -35,6 +35,14 @@ public class Ingredient {
     @Column(name = "min_stock", nullable = false, precision = 12, scale = 3)
     private BigDecimal minStock;
 
+    /**
+     * Soft-held quantity for CONFIRMED orders awaiting payment (verifying reserves here first;
+     * paying converts the hold into a real currentStock deduction). Available-to-reserve
+     * is currentStock - reservedQuantity, not currentStock alone.
+     */
+    @Column(name = "reserved_quantity", nullable = false, precision = 12, scale = 3)
+    private BigDecimal reservedQuantity;
+
     @Column(nullable = false)
     private boolean active;
 }
