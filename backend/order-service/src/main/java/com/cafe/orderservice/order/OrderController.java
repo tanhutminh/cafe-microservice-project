@@ -5,6 +5,7 @@ import com.cafe.orderservice.order.dto.CreateOrderRequest;
 import com.cafe.orderservice.order.dto.MoveTableRequest;
 import com.cafe.orderservice.order.dto.OrderResponse;
 import com.cafe.orderservice.order.dto.PayRequest;
+import com.cafe.orderservice.order.dto.UpdateOrderItemQuantityRequest;
 import com.cafe.orderservice.saga.OrderCheckoutSaga;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -56,6 +57,14 @@ public class OrderController {
     public OrderResponse removeItem(@Parameter(description = "The order's id", example = "101") @PathVariable Long id,
                                      @Parameter(description = "The order line item's id (not the menu item's id)", example = "42") @PathVariable Long itemId) {
         return OrderResponse.from(orderService.removeItem(id, itemId));
+    }
+
+    @PatchMapping("/{id}/items/{itemId}")
+    @Operation(summary = "Set a line item's quantity on an OPEN order (min 1 - use DELETE to remove it entirely)")
+    public OrderResponse updateItemQuantity(@Parameter(description = "The order's id", example = "101") @PathVariable Long id,
+                                             @Parameter(description = "The order line item's id (not the menu item's id)", example = "42") @PathVariable Long itemId,
+                                             @Valid @RequestBody UpdateOrderItemQuantityRequest request) {
+        return OrderResponse.from(orderService.updateItemQuantity(id, itemId, request.quantity()));
     }
 
     @PostMapping("/{id}/cancel")

@@ -9,7 +9,7 @@ import { MenuApiService } from '../../core/menu/menu-api.service';
 import { Category } from '../../core/models/category.model';
 import { DiningTable } from '../../core/models/dining-table.model';
 import { MenuItem } from '../../core/models/menu-item.model';
-import { Order } from '../../core/models/order.model';
+import { Order, OrderItem } from '../../core/models/order.model';
 import { OrderApiService } from '../../core/order/order-api.service';
 import { LanguageSwitcher } from '../../shared/language-switcher/language-switcher';
 
@@ -132,6 +132,27 @@ export class Pos {
       return;
     }
     this.orderApi.removeItem(order.id, orderItemId).subscribe((updated) => this.currentOrder.set(updated));
+  }
+
+  increaseQuantity(item: OrderItem): void {
+    const order = this.currentOrder();
+    if (!order) {
+      return;
+    }
+    this.orderApi.updateItemQuantity(order.id, item.id, { quantity: item.quantity + 1 }).subscribe((updated) => this.currentOrder.set(updated));
+  }
+
+  /** Decreasing past 1 removes the line entirely rather than allowing a 0 (or negative) quantity. */
+  decreaseQuantity(item: OrderItem): void {
+    const order = this.currentOrder();
+    if (!order) {
+      return;
+    }
+    if (item.quantity <= 1) {
+      this.removeItem(item.id);
+      return;
+    }
+    this.orderApi.updateItemQuantity(order.id, item.id, { quantity: item.quantity - 1 }).subscribe((updated) => this.currentOrder.set(updated));
   }
 
   cancelOrder(): void {

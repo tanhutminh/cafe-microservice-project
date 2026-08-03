@@ -3,7 +3,7 @@ import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 import { environment } from '../../../environments/environment';
 import { DiningTable } from '../models/dining-table.model';
-import { AddOrderItemRequest, CreateOrderRequest, MoveTableRequest, Order, PayRequest } from '../models/order.model';
+import { AddOrderItemRequest, CreateOrderRequest, MoveTableRequest, Order, PayRequest, UpdateOrderItemQuantityRequest } from '../models/order.model';
 
 @Injectable({ providedIn: 'root' })
 export class OrderApiService {
@@ -32,6 +32,10 @@ export class OrderApiService {
 
   removeItem(orderId: number, orderItemId: number): Observable<Order> {
     return this.http.delete<Order>(`${environment.apiBaseUrl}/orders/${orderId}/items/${orderItemId}`);
+  }
+
+  updateItemQuantity(orderId: number, orderItemId: number, request: UpdateOrderItemQuantityRequest): Observable<Order> {
+    return this.http.patch<Order>(`${environment.apiBaseUrl}/orders/${orderId}/items/${orderItemId}`, request);
   }
 
   cancelOrder(orderId: number): Observable<Order> {

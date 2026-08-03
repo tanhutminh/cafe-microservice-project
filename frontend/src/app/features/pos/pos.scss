@@ -118,6 +118,17 @@ h4 {
   }
 }
 
+.quantity-stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+
+  span {
+    min-width: 1.5em;
+    text-align: center;
+  }
+}
+
 .grand-total {
   font-weight: 600;
   margin: 8px 0;

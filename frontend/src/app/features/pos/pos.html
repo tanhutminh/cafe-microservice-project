@@ -77,7 +77,21 @@
           @for (item of order.items; track item.id) {
             <tr>
               <td>{{ item.name }}</td>
-              <td>x{{ item.quantity }}</td>
+              <td>
+                @if (order.status === 'OPEN') {
+                  <div class="quantity-stepper">
+                    <button mat-icon-button (click)="decreaseQuantity(item)">
+                      <mat-icon>remove</mat-icon>
+                    </button>
+                    <span>{{ item.quantity }}</span>
+                    <button mat-icon-button (click)="increaseQuantity(item)">
+                      <mat-icon>add</mat-icon>
+                    </button>
+                  </div>
+                } @else {
+                  x{{ item.quantity }}
+                }
+              </td>
               <td>{{ item.price * item.quantity }}</td>
               <td>
                 @if (order.status === 'OPEN') {
