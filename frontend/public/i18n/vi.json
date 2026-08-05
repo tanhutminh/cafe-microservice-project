@@ -16,7 +16,7 @@
   "home": {
     "welcome": "Xin chào, {{name}} ({{role}})",
     "loadingUser": "Đang tải thông tin người dùng...",
-    "comingSoon": "Quản lý kho và báo cáo sẽ được bổ sung ở các milestone tiếp theo."
+    "comingSoon": "Báo cáo sẽ được bổ sung ở các milestone tiếp theo."
   },
   "role": {
     "ADMIN": "Quản trị viên",
@@ -41,6 +41,43 @@
     "available": "Còn hàng",
     "filteredBy": "Danh mục: {{name}}",
     "noItems": "Danh mục này chưa có món nào."
+  },
+  "inventoryAdmin": {
+    "title": "Quản lý kho",
+    "ingredientsTab": "Nguyên liệu",
+    "recipesTab": "Công thức",
+    "newIngredient": "Thêm nguyên liệu",
+    "editIngredient": "Sửa nguyên liệu",
+    "ingredientName": "Tên",
+    "unit": "Đơn vị",
+    "currentStock": "Tồn kho",
+    "reservedQuantity": "Đã giữ chỗ",
+    "available": "Khả dụng",
+    "minStock": "Tồn tối thiểu",
+    "lowStock": "Sắp hết hàng",
+    "active": "Đang dùng",
+    "noIngredients": "Chưa có nguyên liệu nào.",
+    "stockInAction": "Nhập kho",
+    "stockIn": "Nhập kho: {{name}}",
+    "quantity": "Số lượng",
+    "viewMovements": "Xem lịch sử nhập/xuất",
+    "movementsTitle": "Lịch sử nhập/xuất: {{name}}",
+    "movementAmount": "Thay đổi",
+    "movementReason": "Lý do",
+    "movementReference": "Tham chiếu",
+    "movementDate": "Thời gian",
+    "noMovements": "Chưa có lịch sử nhập/xuất.",
+    "close": "Đóng",
+    "selectMenuItem": "Chọn một món",
+    "recipeFor": "Công thức: {{name}}",
+    "recipeIngredient": "Nguyên liệu",
+    "recipeQuantity": "Số lượng cần dùng",
+    "addLine": "Thêm dòng nguyên liệu",
+    "removeLine": "Xóa dòng",
+    "saveRecipe": "Lưu công thức",
+    "noIngredientsHint": "Hãy tạo ít nhất một nguyên liệu trước khi tạo công thức.",
+    "noRecipeSelectedHint": "Chọn một món ở trên để xem hoặc sửa công thức.",
+    "emptyRecipeHint": "Chưa có dòng công thức nào - món này sẽ luôn được coi là còn hàng cho đến khi bạn thêm."
   },
   "pos": {
     "title": "Bán hàng (POS)",

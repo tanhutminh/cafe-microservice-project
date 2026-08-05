@@ -18,6 +18,11 @@ export const routes: Routes = [
     canActivate: [roleGuard('ADMIN')]
   },
   {
+    path: 'inventory',
+    loadComponent: () => import('./features/inventory-admin/inventory-admin').then((m) => m.InventoryAdmin),
+    canActivate: [roleGuard('ADMIN')]
+  },
+  {
     path: 'pos',
     loadComponent: () => import('./features/pos/pos').then((m) => m.Pos),
     canActivate: [roleGuard('ADMIN', 'CASHIER')]

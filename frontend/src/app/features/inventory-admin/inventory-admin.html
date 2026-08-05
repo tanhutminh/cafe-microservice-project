@@ -1,0 +1,154 @@
+<mat-toolbar color="primary">
+  <a mat-icon-button routerLink="/">
+    <mat-icon>arrow_back</mat-icon>
+  </a>
+  <span>{{ 'inventoryAdmin.title' | transloco }}</span>
+  <span class="spacer"></span>
+  <app-language-switcher></app-language-switcher>
+</mat-toolbar>
+
+<mat-tab-group
+  class="content"
+  [selectedIndex]="selectedTabIndex()"
+  (selectedIndexChange)="selectedTabIndex.set($event)"
+>
+  <mat-tab [label]="'inventoryAdmin.ingredientsTab' | transloco">
+    <div class="tab-body">
+      <div class="toolbar-row">
+        <button mat-flat-button color="primary" (click)="openIngredientDialog(null)">
+          <mat-icon>add</mat-icon>
+          {{ 'inventoryAdmin.newIngredient' | transloco }}
+        </button>
+      </div>
+
+      <table mat-table [dataSource]="ingredients()">
+        <ng-container matColumnDef="name">
+          <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.ingredientName' | transloco }}</th>
+          <td mat-cell *matCellDef="let ingredient">{{ ingredient.name }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="unit">
+          <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.unit' | transloco }}</th>
+          <td mat-cell *matCellDef="let ingredient">{{ ingredient.unit }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="currentStock">
+          <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.currentStock' | transloco }}</th>
+          <td mat-cell *matCellDef="let ingredient">{{ ingredient.currentStock }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="reservedQuantity">
+          <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.reservedQuantity' | transloco }}</th>
+          <td mat-cell *matCellDef="let ingredient">{{ ingredient.reservedQuantity }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="available">
+          <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.available' | transloco }}</th>
+          <td mat-cell *matCellDef="let ingredient">{{ availableOf(ingredient) }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="minStock">
+          <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.minStock' | transloco }}</th>
+          <td mat-cell *matCellDef="let ingredient">{{ ingredient.minStock }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="lowStock">
+          <th mat-header-cell *matHeaderCellDef></th>
+          <td mat-cell *matCellDef="let ingredient">
+            @if (ingredient.lowStock) {
+              <mat-icon color="warn" [matTooltip]="'inventoryAdmin.lowStock' | transloco">warning</mat-icon>
+            }
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="active">
+          <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.active' | transloco }}</th>
+          <td mat-cell *matCellDef="let ingredient">{{ ingredient.active ? '✓' : '—' }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="actions">
+          <th mat-header-cell *matHeaderCellDef></th>
+          <td mat-cell *matCellDef="let ingredient">
+            <button mat-icon-button (click)="openIngredientDialog(ingredient)" [matTooltip]="'common.save' | transloco">
+              <mat-icon>edit</mat-icon>
+            </button>
+            <button mat-icon-button (click)="openStockInDialog(ingredient, $event)" [matTooltip]="'inventoryAdmin.stockInAction' | transloco">
+              <mat-icon>add_box</mat-icon>
+            </button>
+            <button mat-icon-button (click)="openMovementsDialog(ingredient, $event)" [matTooltip]="'inventoryAdmin.viewMovements' | transloco">
+              <mat-icon>history</mat-icon>
+            </button>
+            <button mat-icon-button (click)="deleteIngredient(ingredient, $event)">
+              <mat-icon>delete</mat-icon>
+            </button>
+          </td>
+        </ng-container>
+
+        <tr mat-header-row *matHeaderRowDef="ingredientColumns"></tr>
+        <tr mat-row *matRowDef="let row; columns: ingredientColumns"></tr>
+      </table>
+
+      @if (ingredients().length === 0) {
+        <p class="empty-hint">{{ 'inventoryAdmin.noIngredients' | transloco }}</p>
+      }
+    </div>
+  </mat-tab>
+
+  <mat-tab [label]="'inventoryAdmin.recipesTab' | transloco">
+    <div class="tab-body">
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>{{ 'inventoryAdmin.selectMenuItem' | transloco }}</mat-label>
+        <mat-select [value]="selectedMenuItem()" (selectionChange)="selectMenuItemForRecipe($event.value)">
+          @for (item of menuItems(); track item.id) {
+            <mat-option [value]="item">{{ item.name }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      @if (selectedMenuItem(); as item) {
+        <h4>{{ 'inventoryAdmin.recipeFor' | transloco: { name: item.name } }}</h4>
+
+        @if (ingredients().length === 0) {
+          <p class="empty-hint">{{ 'inventoryAdmin.noIngredientsHint' | transloco }}</p>
+        } @else {
+          @for (line of recipeLines(); track $index) {
+            <div class="recipe-line">
+              <mat-form-field appearance="outline">
+                <mat-label>{{ 'inventoryAdmin.recipeIngredient' | transloco }}</mat-label>
+                <mat-select [value]="line.ingredientId" (selectionChange)="onRecipeIngredientChange($index, $event.value)">
+                  @for (ingredient of ingredients(); track ingredient.id) {
+                    <mat-option [value]="ingredient.id">{{ ingredient.name }} ({{ ingredient.unit }})</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <mat-form-field appearance="outline">
+                <mat-label>{{ 'inventoryAdmin.recipeQuantity' | transloco }}</mat-label>
+                <input matInput type="number" [value]="line.quantityRequired" #qty (change)="onRecipeQuantityChange($index, qty.valueAsNumber)" />
+                <span matTextSuffix>{{ line.unit }}</span>
+              </mat-form-field>
+
+              <button mat-icon-button [matTooltip]="'inventoryAdmin.removeLine' | transloco" (click)="removeRecipeLine($index)">
+                <mat-icon>delete</mat-icon>
+              </button>
+            </div>
+          } @empty {
+            <p class="empty-hint">{{ 'inventoryAdmin.emptyRecipeHint' | transloco }}</p>
+          }
+
+          <div class="toolbar-row">
+            <button mat-stroked-button (click)="addRecipeLine()">
+              <mat-icon>add</mat-icon>
+              {{ 'inventoryAdmin.addLine' | transloco }}
+            </button>
+            <button mat-flat-button color="primary" (click)="saveRecipe()">
+              {{ 'inventoryAdmin.saveRecipe' | transloco }}
+            </button>
+          </div>
+        }
+      } @else {
+        <p class="empty-hint">{{ 'inventoryAdmin.noRecipeSelectedHint' | transloco }}</p>
+      }
+    </div>
+  </mat-tab>
+</mat-tab-group>

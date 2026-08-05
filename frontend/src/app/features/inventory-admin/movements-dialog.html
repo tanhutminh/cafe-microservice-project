@@ -1,0 +1,36 @@
+<h2 mat-dialog-title>{{ 'inventoryAdmin.movementsTitle' | transloco: { name: data.ingredientName } }}</h2>
+
+<mat-dialog-content>
+  <table mat-table [dataSource]="data.movements">
+    <ng-container matColumnDef="changeAmount">
+      <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.movementAmount' | transloco }}</th>
+      <td mat-cell *matCellDef="let movement">{{ movement.changeAmount > 0 ? '+' : '' }}{{ movement.changeAmount }}</td>
+    </ng-container>
+
+    <ng-container matColumnDef="reason">
+      <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.movementReason' | transloco }}</th>
+      <td mat-cell *matCellDef="let movement">{{ movement.reason }}</td>
+    </ng-container>
+
+    <ng-container matColumnDef="referenceId">
+      <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.movementReference' | transloco }}</th>
+      <td mat-cell *matCellDef="let movement">{{ movement.referenceId ?? '—' }}</td>
+    </ng-container>
+
+    <ng-container matColumnDef="createdAt">
+      <th mat-header-cell *matHeaderCellDef>{{ 'inventoryAdmin.movementDate' | transloco }}</th>
+      <td mat-cell *matCellDef="let movement">{{ movement.createdAt | date: 'medium' }}</td>
+    </ng-container>
+
+    <tr mat-header-row *matHeaderRowDef="movementColumns"></tr>
+    <tr mat-row *matRowDef="let row; columns: movementColumns"></tr>
+  </table>
+
+  @if (data.movements.length === 0) {
+    <p class="empty-hint">{{ 'inventoryAdmin.noMovements' | transloco }}</p>
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="close()">{{ 'inventoryAdmin.close' | transloco }}</button>
+</mat-dialog-actions>
