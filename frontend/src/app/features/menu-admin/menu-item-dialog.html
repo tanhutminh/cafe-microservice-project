@@ -35,6 +35,13 @@
 
     <mat-slide-toggle formControlName="available">{{ 'menu.available' | transloco }}</mat-slide-toggle>
     <mat-slide-toggle formControlName="active">{{ 'menu.active' | transloco }}</mat-slide-toggle>
+
+    @if (isEdit) {
+      <h4>{{ 'menu.recipeSectionTitle' | transloco }}</h4>
+      <app-recipe-editor [menuItemId]="data.item!.id" />
+    } @else {
+      <p class="hint">{{ 'menu.recipeAvailableAfterSave' | transloco }}</p>
+    }
   </mat-dialog-content>
 
   <mat-dialog-actions align="end">

@@ -9,6 +9,7 @@ import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { TranslocoModule } from '@jsverse/transloco';
 import { Category } from '../../core/models/category.model';
 import { MenuItem } from '../../core/models/menu-item.model';
+import { RecipeEditor } from '../../shared/recipe-editor/recipe-editor';
 
 export interface MenuItemDialogData {
   item: MenuItem | null;
@@ -26,9 +27,11 @@ export interface MenuItemDialogData {
     MatInputModule,
     MatSelectModule,
     MatSlideToggleModule,
-    TranslocoModule
+    TranslocoModule,
+    RecipeEditor
   ],
-  templateUrl: './menu-item-dialog.html'
+  templateUrl: './menu-item-dialog.html',
+  styleUrl: './menu-item-dialog.scss'
 })
 export class MenuItemDialog {
   private readonly fb = inject(FormBuilder);

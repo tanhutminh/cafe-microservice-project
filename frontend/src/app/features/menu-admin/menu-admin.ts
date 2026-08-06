@@ -102,7 +102,7 @@ export class MenuAdmin {
 
   openMenuItemDialog(item: MenuItem | null): void {
     const ref = this.dialog.open<MenuItemDialog, MenuItemDialogData, MenuItemRequest>(MenuItemDialog, {
-      width: '480px',
+      width: '560px',
       data: { item, categories: this.categories() }
     });
     ref.afterClosed().subscribe((result) => {

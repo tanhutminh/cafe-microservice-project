@@ -40,7 +40,9 @@
     "imageUrl": "URL hình ảnh",
     "available": "Còn hàng",
     "filteredBy": "Danh mục: {{name}}",
-    "noItems": "Danh mục này chưa có món nào."
+    "noItems": "Danh mục này chưa có món nào.",
+    "recipeSectionTitle": "Công thức",
+    "recipeAvailableAfterSave": "Hãy lưu món trước, sau đó mở lại để chỉnh sửa công thức."
   },
   "inventoryAdmin": {
     "title": "Quản lý kho",
@@ -70,13 +72,15 @@
     "close": "Đóng",
     "selectMenuItem": "Chọn một món",
     "recipeFor": "Công thức: {{name}}",
+    "noRecipeSelectedHint": "Chọn một món ở trên để xem hoặc sửa công thức."
+  },
+  "recipeEditor": {
     "recipeIngredient": "Nguyên liệu",
     "recipeQuantity": "Số lượng cần dùng",
     "addLine": "Thêm dòng nguyên liệu",
     "removeLine": "Xóa dòng",
     "saveRecipe": "Lưu công thức",
     "noIngredientsHint": "Hãy tạo ít nhất một nguyên liệu trước khi tạo công thức.",
-    "noRecipeSelectedHint": "Chọn một món ở trên để xem hoặc sửa công thức.",
     "emptyRecipeHint": "Chưa có dòng công thức nào - món này sẽ luôn được coi là còn hàng cho đến khi bạn thêm."
   },
   "pos": {

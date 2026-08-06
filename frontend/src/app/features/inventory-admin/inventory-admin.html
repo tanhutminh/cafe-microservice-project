@@ -107,45 +107,7 @@
 
       @if (selectedMenuItem(); as item) {
         <h4>{{ 'inventoryAdmin.recipeFor' | transloco: { name: item.name } }}</h4>
-
-        @if (ingredients().length === 0) {
-          <p class="empty-hint">{{ 'inventoryAdmin.noIngredientsHint' | transloco }}</p>
-        } @else {
-          @for (line of recipeLines(); track $index) {
-            <div class="recipe-line">
-              <mat-form-field appearance="outline">
-                <mat-label>{{ 'inventoryAdmin.recipeIngredient' | transloco }}</mat-label>
-                <mat-select [value]="line.ingredientId" (selectionChange)="onRecipeIngredientChange($index, $event.value)">
-                  @for (ingredient of ingredients(); track ingredient.id) {
-                    <mat-option [value]="ingredient.id">{{ ingredient.name }} ({{ ingredient.unit }})</mat-option>
-                  }
-                </mat-select>
-              </mat-form-field>
-
-              <mat-form-field appearance="outline">
-                <mat-label>{{ 'inventoryAdmin.recipeQuantity' | transloco }}</mat-label>
-                <input matInput type="number" [value]="line.quantityRequired" #qty (change)="onRecipeQuantityChange($index, qty.valueAsNumber)" />
-                <span matTextSuffix>{{ line.unit }}</span>
-              </mat-form-field>
-
-              <button mat-icon-button [matTooltip]="'inventoryAdmin.removeLine' | transloco" (click)="removeRecipeLine($index)">
-                <mat-icon>delete</mat-icon>
-              </button>
-            </div>
-          } @empty {
-            <p class="empty-hint">{{ 'inventoryAdmin.emptyRecipeHint' | transloco }}</p>
-          }
-
-          <div class="toolbar-row">
-            <button mat-stroked-button (click)="addRecipeLine()">
-              <mat-icon>add</mat-icon>
-              {{ 'inventoryAdmin.addLine' | transloco }}
-            </button>
-            <button mat-flat-button color="primary" (click)="saveRecipe()">
-              {{ 'inventoryAdmin.saveRecipe' | transloco }}
-            </button>
-          </div>
-        }
+        <app-recipe-editor [menuItemId]="item.id" />
       } @else {
         <p class="empty-hint">{{ 'inventoryAdmin.noRecipeSelectedHint' | transloco }}</p>
       }

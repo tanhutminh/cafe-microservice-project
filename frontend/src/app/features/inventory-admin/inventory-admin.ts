@@ -15,8 +15,8 @@ import { InventoryApiService } from '../../core/inventory/inventory-api.service'
 import { MenuApiService } from '../../core/menu/menu-api.service';
 import { Ingredient, IngredientRequest, StockInRequest } from '../../core/models/ingredient.model';
 import { MenuItem } from '../../core/models/menu-item.model';
-import { RecipeItem, RecipeItemRequest } from '../../core/models/recipe-item.model';
 import { LanguageSwitcher } from '../../shared/language-switcher/language-switcher';
+import { RecipeEditor } from '../../shared/recipe-editor/recipe-editor';
 import { IngredientDialog, IngredientDialogData } from './ingredient-dialog';
 import { MovementsDialog, MovementsDialogData } from './movements-dialog';
 import { StockInDialog, StockInDialogData } from './stock-in-dialog';
@@ -40,7 +40,8 @@ const RECIPES_TAB_INDEX = 1;
     MatTooltipModule,
     TranslocoModule,
     RouterLink,
-    LanguageSwitcher
+    LanguageSwitcher,
+    RecipeEditor
   ],
   templateUrl: './inventory-admin.html',
   styleUrl: './inventory-admin.scss'
@@ -54,7 +55,6 @@ export class InventoryAdmin {
   readonly menuItems = signal<MenuItem[]>([]);
   readonly selectedTabIndex = signal(INGREDIENTS_TAB_INDEX);
   readonly selectedMenuItem = signal<MenuItem | null>(null);
-  readonly recipeLines = signal<RecipeItem[]>([]);
 
   readonly ingredientColumns = [
     'name',
@@ -133,54 +133,5 @@ export class InventoryAdmin {
 
   selectMenuItemForRecipe(item: MenuItem): void {
     this.selectedMenuItem.set(item);
-    this.inventoryApi.getRecipe(item.id).subscribe((lines) => this.recipeLines.set(lines));
-  }
-
-  addRecipeLine(): void {
-    const firstIngredient = this.ingredients()[0];
-    if (!firstIngredient) {
-      return;
-    }
-    this.recipeLines.update((lines) => [
-      ...lines,
-      {
-        ingredientId: firstIngredient.id,
-        ingredientName: firstIngredient.name,
-        unit: firstIngredient.unit,
-        quantityRequired: 0
-      }
-    ]);
-  }
-
-  removeRecipeLine(index: number): void {
-    this.recipeLines.update((lines) => lines.filter((_, i) => i !== index));
-  }
-
-  onRecipeIngredientChange(index: number, ingredientId: number): void {
-    const ingredient = this.ingredients().find((i) => i.id === ingredientId);
-    if (!ingredient) {
-      return;
-    }
-    this.recipeLines.update((lines) =>
-      lines.map((line, i) =>
-        i === index ? { ...line, ingredientId, ingredientName: ingredient.name, unit: ingredient.unit } : line
-      )
-    );
-  }
-
-  onRecipeQuantityChange(index: number, quantityRequired: number): void {
-    this.recipeLines.update((lines) => lines.map((line, i) => (i === index ? { ...line, quantityRequired } : line)));
-  }
-
-  saveRecipe(): void {
-    const menuItem = this.selectedMenuItem();
-    if (!menuItem) {
-      return;
-    }
-    const lines: RecipeItemRequest[] = this.recipeLines().map((line) => ({
-      ingredientId: line.ingredientId,
-      quantityRequired: line.quantityRequired
-    }));
-    this.inventoryApi.replaceRecipe(menuItem.id, lines).subscribe((updated) => this.recipeLines.set(updated));
   }
 }
