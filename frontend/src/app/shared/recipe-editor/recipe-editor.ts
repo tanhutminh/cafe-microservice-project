@@ -10,6 +10,22 @@ import { InventoryApiService } from '../../core/inventory/inventory-api.service'
 import { Ingredient } from '../../core/models/ingredient.model';
 import { RecipeItem, RecipeItemRequest } from '../../core/models/recipe-item.model';
 
+function toRequestLines(lines: { ingredientId: number; quantityRequired: number }[]): RecipeItemRequest[] {
+  return lines.map((line) => ({ ingredientId: line.ingredientId, quantityRequired: line.quantityRequired }));
+}
+
+function linesEqual(a: RecipeItemRequest[], b: RecipeItemRequest[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const byIngredientId = (x: RecipeItemRequest, y: RecipeItemRequest) => x.ingredientId - y.ingredientId;
+  const sortedA = [...a].sort(byIngredientId);
+  const sortedB = [...b].sort(byIngredientId);
+  return sortedA.every(
+    (line, i) => line.ingredientId === sortedB[i].ingredientId && line.quantityRequired === sortedB[i].quantityRequired
+  );
+}
+
 @Component({
   selector: 'app-recipe-editor',
   standalone: true,
@@ -37,6 +53,9 @@ export class RecipeEditor {
   /** Guards saveRecipe() against firing before the initial GET resolves (e.g. an embedding parent's own Save button clicked right after opening) - would otherwise PUT an empty array and wipe the recipe. */
   private readonly recipeLoaded = signal(false);
 
+  /** Snapshot of the lines as last loaded/saved, to skip the PUT entirely when saveRecipe() is called but nothing actually changed. */
+  private originalLines: RecipeItemRequest[] = [];
+
   constructor() {
     this.inventoryApi.listIngredients().subscribe((ingredients) => this.ingredients.set(ingredients));
 
@@ -45,6 +64,7 @@ export class RecipeEditor {
       this.recipeLoaded.set(false);
       this.inventoryApi.getRecipe(id).subscribe((lines) => {
         this.recipeLines.set(lines);
+        this.originalLines = toRequestLines(lines);
         this.recipeLoaded.set(true);
       });
     });
@@ -90,10 +110,13 @@ export class RecipeEditor {
     if (!this.recipeLoaded()) {
       return;
     }
-    const lines: RecipeItemRequest[] = this.recipeLines().map((line) => ({
-      ingredientId: line.ingredientId,
-      quantityRequired: line.quantityRequired
-    }));
-    this.inventoryApi.replaceRecipe(this.menuItemId(), lines).subscribe((updated) => this.recipeLines.set(updated));
+    const lines = toRequestLines(this.recipeLines());
+    if (linesEqual(lines, this.originalLines)) {
+      return;
+    }
+    this.inventoryApi.replaceRecipe(this.menuItemId(), lines).subscribe((updated) => {
+      this.recipeLines.set(updated);
+      this.originalLines = toRequestLines(updated);
+    });
   }
 }

@@ -8,7 +8,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { TranslocoModule } from '@jsverse/transloco';
 import { Category } from '../../core/models/category.model';
-import { MenuItem } from '../../core/models/menu-item.model';
+import { MenuItem, MenuItemRequest } from '../../core/models/menu-item.model';
 import { RecipeEditor } from '../../shared/recipe-editor/recipe-editor';
 
 export interface MenuItemDialogData {
@@ -41,6 +41,19 @@ export class MenuItemDialog {
   readonly isEdit = this.data.item !== null;
   private readonly recipeEditor = viewChild(RecipeEditor);
 
+  /** Snapshot matching the form's own null-to-'' coalescing, so an untouched form compares equal to it. Null when creating (no baseline to compare against - always a genuine create). */
+  private readonly originalRequest: MenuItemRequest | null = this.data.item
+    ? {
+        categoryId: this.data.item.categoryId,
+        name: this.data.item.name,
+        description: this.data.item.description ?? '',
+        price: this.data.item.price,
+        imageUrl: this.data.item.imageUrl ?? '',
+        available: this.data.item.available,
+        active: this.data.item.active
+      }
+    : null;
+
   readonly form = this.fb.group({
     categoryId: [this.data.item?.categoryId ?? this.data.categories[0]?.id ?? null, Validators.required],
     name: [this.data.item?.name ?? '', Validators.required],
@@ -56,10 +69,24 @@ export class MenuItemDialog {
       return;
     }
     this.recipeEditor()?.saveRecipe();
-    this.dialogRef.close(this.form.getRawValue());
+    const current = this.form.getRawValue() as MenuItemRequest;
+    const itemChanged = !this.originalRequest || !this.itemEquals(this.originalRequest, current);
+    this.dialogRef.close(itemChanged ? current : undefined);
   }
 
   cancel(): void {
     this.dialogRef.close();
+  }
+
+  private itemEquals(a: MenuItemRequest, b: MenuItemRequest): boolean {
+    return (
+      a.categoryId === b.categoryId &&
+      a.name === b.name &&
+      a.description === b.description &&
+      a.price === b.price &&
+      a.imageUrl === b.imageUrl &&
+      a.available === b.available &&
+      a.active === b.active
+    );
   }
 }
