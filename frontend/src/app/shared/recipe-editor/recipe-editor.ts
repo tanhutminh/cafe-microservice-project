@@ -29,16 +29,24 @@ export class RecipeEditor {
   private readonly inventoryApi = inject(InventoryApiService);
 
   readonly menuItemId = input.required<number>();
+  readonly hideSaveButton = input(false);
 
   readonly ingredients = signal<Ingredient[]>([]);
   readonly recipeLines = signal<RecipeItem[]>([]);
+
+  /** Guards saveRecipe() against firing before the initial GET resolves (e.g. an embedding parent's own Save button clicked right after opening) - would otherwise PUT an empty array and wipe the recipe. */
+  private readonly recipeLoaded = signal(false);
 
   constructor() {
     this.inventoryApi.listIngredients().subscribe((ingredients) => this.ingredients.set(ingredients));
 
     effect(() => {
       const id = this.menuItemId();
-      this.inventoryApi.getRecipe(id).subscribe((lines) => this.recipeLines.set(lines));
+      this.recipeLoaded.set(false);
+      this.inventoryApi.getRecipe(id).subscribe((lines) => {
+        this.recipeLines.set(lines);
+        this.recipeLoaded.set(true);
+      });
     });
   }
 
@@ -79,6 +87,9 @@ export class RecipeEditor {
   }
 
   saveRecipe(): void {
+    if (!this.recipeLoaded()) {
+      return;
+    }
     const lines: RecipeItemRequest[] = this.recipeLines().map((line) => ({
       ingredientId: line.ingredientId,
       quantityRequired: line.quantityRequired

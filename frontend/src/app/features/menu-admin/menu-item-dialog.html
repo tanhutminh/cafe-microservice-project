@@ -38,7 +38,7 @@
 
     @if (isEdit) {
       <h4>{{ 'menu.recipeSectionTitle' | transloco }}</h4>
-      <app-recipe-editor [menuItemId]="data.item!.id" />
+      <app-recipe-editor [menuItemId]="data.item!.id" [hideSaveButton]="true" />
     } @else {
       <p class="hint">{{ 'menu.recipeAvailableAfterSave' | transloco }}</p>
     }

@@ -1,4 +1,4 @@
-import { Component, inject } from '@angular/core';
+import { Component, inject, viewChild } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MAT_DIALOG_DATA, MatDialogModule, MatDialogRef } from '@angular/material/dialog';
@@ -39,6 +39,7 @@ export class MenuItemDialog {
   readonly data = inject<MenuItemDialogData>(MAT_DIALOG_DATA);
 
   readonly isEdit = this.data.item !== null;
+  private readonly recipeEditor = viewChild(RecipeEditor);
 
   readonly form = this.fb.group({
     categoryId: [this.data.item?.categoryId ?? this.data.categories[0]?.id ?? null, Validators.required],
@@ -54,6 +55,7 @@ export class MenuItemDialog {
     if (this.form.invalid) {
       return;
     }
+    this.recipeEditor()?.saveRecipe();
     this.dialogRef.close(this.form.getRawValue());
   }
 

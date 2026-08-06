@@ -31,8 +31,10 @@
       <mat-icon>add</mat-icon>
       {{ 'recipeEditor.addLine' | transloco }}
     </button>
-    <button type="button" mat-flat-button color="primary" (click)="saveRecipe()">
-      {{ 'recipeEditor.saveRecipe' | transloco }}
-    </button>
+    @if (!hideSaveButton()) {
+      <button type="button" mat-flat-button color="primary" (click)="saveRecipe()">
+        {{ 'recipeEditor.saveRecipe' | transloco }}
+      </button>
+    }
   </div>
 }
