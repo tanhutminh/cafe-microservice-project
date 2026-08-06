@@ -6,7 +6,8 @@
     "start": "ng serve",
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
-    "test": "ng test"
+    "test": "ng test",
+    "test:coverage": "ng test --watch=false --coverage --coverage-reporters=html --coverage-reporters=text-summary"
   },
   "private": true,
   "packageManager": "npm@11.11.0",
