@@ -6,7 +6,8 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { TranslocoModule } from '@jsverse/transloco';
-import { Ingredient } from '../../core/models/ingredient.model';
+import { Ingredient, IngredientRequest } from '../../core/models/ingredient.model';
+import { closeIfChanged } from '../../shared/dialog-utils';
 
 export interface IngredientDialogData {
   ingredient: Ingredient | null;
@@ -33,6 +34,15 @@ export class IngredientDialog {
 
   readonly isEdit = this.data.ingredient !== null;
 
+  private readonly originalRequest: IngredientRequest | null = this.data.ingredient
+    ? {
+        name: this.data.ingredient.name,
+        unit: this.data.ingredient.unit,
+        minStock: this.data.ingredient.minStock,
+        active: this.data.ingredient.active
+      }
+    : null;
+
   readonly form = this.fb.group({
     name: [this.data.ingredient?.name ?? '', Validators.required],
     unit: [this.data.ingredient?.unit ?? '', Validators.required],
@@ -44,7 +54,7 @@ export class IngredientDialog {
     if (this.form.invalid) {
       return;
     }
-    this.dialogRef.close(this.form.getRawValue());
+    closeIfChanged(this.dialogRef, this.originalRequest, this.form.getRawValue() as IngredientRequest);
   }
 
   cancel(): void {

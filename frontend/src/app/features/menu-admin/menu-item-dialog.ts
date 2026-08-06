@@ -9,6 +9,7 @@ import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { TranslocoModule } from '@jsverse/transloco';
 import { Category } from '../../core/models/category.model';
 import { MenuItem, MenuItemRequest } from '../../core/models/menu-item.model';
+import { closeIfChanged } from '../../shared/dialog-utils';
 import { RecipeEditor } from '../../shared/recipe-editor/recipe-editor';
 
 export interface MenuItemDialogData {
@@ -69,24 +70,10 @@ export class MenuItemDialog {
       return;
     }
     this.recipeEditor()?.saveRecipe();
-    const current = this.form.getRawValue() as MenuItemRequest;
-    const itemChanged = !this.originalRequest || !this.itemEquals(this.originalRequest, current);
-    this.dialogRef.close(itemChanged ? current : undefined);
+    closeIfChanged(this.dialogRef, this.originalRequest, this.form.getRawValue() as MenuItemRequest);
   }
 
   cancel(): void {
     this.dialogRef.close();
-  }
-
-  private itemEquals(a: MenuItemRequest, b: MenuItemRequest): boolean {
-    return (
-      a.categoryId === b.categoryId &&
-      a.name === b.name &&
-      a.description === b.description &&
-      a.price === b.price &&
-      a.imageUrl === b.imageUrl &&
-      a.available === b.available &&
-      a.active === b.active
-    );
   }
 }

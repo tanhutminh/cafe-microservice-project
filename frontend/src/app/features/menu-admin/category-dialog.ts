@@ -6,7 +6,8 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { TranslocoModule } from '@jsverse/transloco';
-import { Category } from '../../core/models/category.model';
+import { Category, CategoryRequest } from '../../core/models/category.model';
+import { closeIfChanged } from '../../shared/dialog-utils';
 
 export interface CategoryDialogData {
   category: Category | null;
@@ -33,6 +34,14 @@ export class CategoryDialog {
 
   readonly isEdit = this.data.category !== null;
 
+  private readonly originalRequest: CategoryRequest | null = this.data.category
+    ? {
+        name: this.data.category.name,
+        displayOrder: this.data.category.displayOrder,
+        active: this.data.category.active
+      }
+    : null;
+
   readonly form = this.fb.group({
     name: [this.data.category?.name ?? '', Validators.required],
     displayOrder: [this.data.category?.displayOrder ?? 0, Validators.required],
@@ -43,7 +52,7 @@ export class CategoryDialog {
     if (this.form.invalid) {
       return;
     }
-    this.dialogRef.close(this.form.getRawValue());
+    closeIfChanged(this.dialogRef, this.originalRequest, this.form.getRawValue() as CategoryRequest);
   }
 
   cancel(): void {
