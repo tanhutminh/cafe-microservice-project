@@ -10,6 +10,7 @@ import { TranslocoModule } from '@jsverse/transloco';
 import { Category } from '../../core/models/category.model';
 import { MenuItem, MenuItemRequest } from '../../core/models/menu-item.model';
 import { closeIfChanged } from '../../shared/dialog-utils';
+import { trimFields } from '../../shared/form-utils';
 import { RecipeEditor } from '../../shared/recipe-editor/recipe-editor';
 
 export interface MenuItemDialogData {
@@ -70,7 +71,8 @@ export class MenuItemDialog {
       return;
     }
     this.recipeEditor()?.saveRecipe();
-    closeIfChanged(this.dialogRef, this.originalRequest, this.form.getRawValue() as MenuItemRequest);
+    const current = trimFields(this.form.getRawValue() as MenuItemRequest, ['name', 'description', 'imageUrl']);
+    closeIfChanged(this.dialogRef, this.originalRequest, current);
   }
 
   cancel(): void {

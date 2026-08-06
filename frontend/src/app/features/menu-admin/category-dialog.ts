@@ -8,6 +8,7 @@ import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { TranslocoModule } from '@jsverse/transloco';
 import { Category, CategoryRequest } from '../../core/models/category.model';
 import { closeIfChanged } from '../../shared/dialog-utils';
+import { trimFields } from '../../shared/form-utils';
 
 export interface CategoryDialogData {
   category: Category | null;
@@ -52,7 +53,8 @@ export class CategoryDialog {
     if (this.form.invalid) {
       return;
     }
-    closeIfChanged(this.dialogRef, this.originalRequest, this.form.getRawValue() as CategoryRequest);
+    const current = trimFields(this.form.getRawValue() as CategoryRequest, ['name']);
+    closeIfChanged(this.dialogRef, this.originalRequest, current);
   }
 
   cancel(): void {
