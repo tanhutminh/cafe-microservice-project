@@ -229,6 +229,20 @@ Kafka UI: http://localhost:8090
 
 There's no self-registration flow — staff accounts are provisioned by an ADMIN. On first boot, auth-service auto-seeds a default admin account (`admin` / `admin123`) if the `users` table is empty, so you have something to log in with. It's dev-only; a real deployment should seed its first admin out-of-band instead. Roles are `ADMIN` and `CASHIER`.
 
+## Testing
+
+Frontend unit tests run on Angular's Vitest-based test builder:
+
+```bash
+cd frontend
+npm test               # watch mode
+npm run test:coverage  # single run, with an HTML coverage report
+```
+
+`test:coverage` writes a drill-down report to `frontend/coverage/frontend/index.html` — open it in a browser to see coverage per folder, then per file, then per line (folders/files are clickable, uncovered lines are highlighted red). Project convention: every new or modified component gets unit tests reaching at least 70% coverage before the work is considered done.
+
+Backend services have no unit tests yet (queued work, tracked separately from this README).
+
 ## Troubleshooting
 
 - **Gateway returns 503 right after restarting a service** — Spring Cloud Gateway's load balancer keeps a short-lived cache of service instances resolved via Eureka; it can go stale for a few seconds after a restart. Retry after ~5s before assuming something's actually broken.
@@ -463,6 +477,20 @@ Eureka dashboard: http://localhost:8761
 Kafka UI: http://localhost:8090
 
 Không có flow tự đăng ký — tài khoản nhân viên chỉ được tạo bởi ADMIN. Ở lần khởi động đầu tiên, auth-service tự động seed 1 tài khoản admin mặc định (`admin` / `admin123`) nếu bảng `users` đang rỗng, để có tài khoản đăng nhập ban đầu. Tài khoản này chỉ dùng cho dev; khi triển khai thật cần seed tài khoản admin đầu tiên theo cách khác (out-of-band). Có 2 role: `ADMIN` và `CASHIER`.
+
+## Kiểm thử (Testing)
+
+Unit test frontend chạy trên bộ test builder của Angular (nền tảng Vitest):
+
+```bash
+cd frontend
+npm test               # chế độ watch
+npm run test:coverage  # chạy 1 lần, kèm báo cáo coverage dạng HTML
+```
+
+`test:coverage` ghi ra báo cáo drill-down tại `frontend/coverage/frontend/index.html` — mở bằng trình duyệt để xem coverage theo từng thư mục, rồi từng file, rồi từng dòng code (thư mục/file có thể bấm vào, dòng chưa được test sẽ tô đỏ). Quy ước của dự án: mọi component có code mới hoặc sửa đổi đều cần unit test đạt tối thiểu 70% coverage trước khi coi là hoàn thành.
+
+Các backend service hiện chưa có unit test (việc này đang được lên kế hoạch riêng, không theo dõi trong README).
 
 ## Xử lý sự cố thường gặp
 

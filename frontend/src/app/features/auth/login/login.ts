@@ -9,6 +9,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { TranslocoModule } from '@jsverse/transloco';
 import { AuthService } from '../../../core/auth/auth.service';
 import { LanguageSwitcher } from '../../../shared/language-switcher/language-switcher';
+import { trimFields } from '../../../shared/form-utils';
 
 @Component({
   selector: 'app-login',
@@ -46,7 +47,8 @@ export class Login {
     this.loading.set(true);
     this.loginFailed.set(false);
 
-    const { username, password } = this.form.getRawValue();
+    // Password is intentionally left as-typed - trimming could silently alter a credential the user entered on purpose.
+    const { username, password } = trimFields(this.form.getRawValue(), ['username']);
     this.authService.login(username!, password!).subscribe({
       next: () => {
         this.loading.set(false);

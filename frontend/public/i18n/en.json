@@ -16,7 +16,7 @@
   "home": {
     "welcome": "Hello, {{name}} ({{role}})",
     "loadingUser": "Loading user info...",
-    "comingSoon": "Inventory management and reports will be added in upcoming milestones."
+    "comingSoon": "Reports will be added in upcoming milestones."
   },
   "role": {
     "ADMIN": "Administrator",
@@ -40,7 +40,48 @@
     "imageUrl": "Image URL",
     "available": "Available",
     "filteredBy": "Category: {{name}}",
-    "noItems": "No items in this category yet."
+    "noItems": "No items in this category yet.",
+    "recipeSectionTitle": "Recipe",
+    "recipeAvailableAfterSave": "Save the item first, then reopen it to edit its recipe."
+  },
+  "inventoryAdmin": {
+    "title": "Manage Inventory",
+    "ingredientsTab": "Ingredients",
+    "recipesTab": "Recipes",
+    "newIngredient": "New Ingredient",
+    "editIngredient": "Edit Ingredient",
+    "ingredientName": "Name",
+    "unit": "Unit",
+    "currentStock": "Current Stock",
+    "reservedQuantity": "Reserved",
+    "available": "Available",
+    "minStock": "Min Stock",
+    "lowStock": "Low stock",
+    "active": "Active",
+    "noIngredients": "No ingredients yet.",
+    "stockInAction": "Stock in",
+    "stockIn": "Stock in: {{name}}",
+    "quantity": "Quantity",
+    "viewMovements": "View movements",
+    "movementsTitle": "Stock movements: {{name}}",
+    "movementAmount": "Change",
+    "movementReason": "Reason",
+    "movementReference": "Reference",
+    "movementDate": "Date",
+    "noMovements": "No stock movements yet.",
+    "close": "Close",
+    "selectMenuItem": "Select a menu item",
+    "recipeFor": "Recipe: {{name}}",
+    "noRecipeSelectedHint": "Pick a menu item above to view or edit its recipe."
+  },
+  "recipeEditor": {
+    "recipeIngredient": "Ingredient",
+    "recipeQuantity": "Quantity required",
+    "addLine": "Add ingredient line",
+    "removeLine": "Remove line",
+    "saveRecipe": "Save recipe",
+    "noIngredientsHint": "Create at least one ingredient before building a recipe.",
+    "emptyRecipeHint": "No recipe lines yet - this item will always be treated as in-stock until you add one."
   },
   "pos": {
     "title": "POS",

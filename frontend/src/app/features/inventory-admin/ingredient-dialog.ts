@@ -6,16 +6,16 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { TranslocoModule } from '@jsverse/transloco';
-import { Category, CategoryRequest } from '../../core/models/category.model';
+import { Ingredient, IngredientRequest } from '../../core/models/ingredient.model';
 import { closeIfChanged } from '../../shared/dialog-utils';
 import { trimFields } from '../../shared/form-utils';
 
-export interface CategoryDialogData {
-  category: Category | null;
+export interface IngredientDialogData {
+  ingredient: Ingredient | null;
 }
 
 @Component({
-  selector: 'app-category-dialog',
+  selector: 'app-ingredient-dialog',
   standalone: true,
   imports: [
     ReactiveFormsModule,
@@ -26,34 +26,36 @@ export interface CategoryDialogData {
     MatSlideToggleModule,
     TranslocoModule
   ],
-  templateUrl: './category-dialog.html'
+  templateUrl: './ingredient-dialog.html'
 })
-export class CategoryDialog {
+export class IngredientDialog {
   private readonly fb = inject(FormBuilder);
-  private readonly dialogRef = inject(MatDialogRef<CategoryDialog>);
-  readonly data = inject<CategoryDialogData>(MAT_DIALOG_DATA);
+  private readonly dialogRef = inject(MatDialogRef<IngredientDialog>);
+  readonly data = inject<IngredientDialogData>(MAT_DIALOG_DATA);
 
-  readonly isEdit = this.data.category !== null;
+  readonly isEdit = this.data.ingredient !== null;
 
-  private readonly originalRequest: CategoryRequest | null = this.data.category
+  private readonly originalRequest: IngredientRequest | null = this.data.ingredient
     ? {
-        name: this.data.category.name,
-        displayOrder: this.data.category.displayOrder,
-        active: this.data.category.active
+        name: this.data.ingredient.name,
+        unit: this.data.ingredient.unit,
+        minStock: this.data.ingredient.minStock,
+        active: this.data.ingredient.active
       }
     : null;
 
   readonly form = this.fb.group({
-    name: [this.data.category?.name ?? '', Validators.required],
-    displayOrder: [this.data.category?.displayOrder ?? 0, Validators.required],
-    active: [this.data.category?.active ?? true]
+    name: [this.data.ingredient?.name ?? '', Validators.required],
+    unit: [this.data.ingredient?.unit ?? '', Validators.required],
+    minStock: [this.data.ingredient?.minStock ?? 0, [Validators.required, Validators.min(0)]],
+    active: [this.data.ingredient?.active ?? true]
   });
 
   save(): void {
     if (this.form.invalid) {
       return;
     }
-    const current = trimFields(this.form.getRawValue() as CategoryRequest, ['name']);
+    const current = trimFields(this.form.getRawValue() as IngredientRequest, ['name', 'unit']);
     closeIfChanged(this.dialogRef, this.originalRequest, current);
   }
 

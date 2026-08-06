@@ -1,0 +1,31 @@
+<h2 mat-dialog-title>
+  {{ (isEdit ? 'inventoryAdmin.editIngredient' : 'inventoryAdmin.newIngredient') | transloco }}
+</h2>
+
+<form [formGroup]="form" (ngSubmit)="save()">
+  <mat-dialog-content>
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>{{ 'inventoryAdmin.ingredientName' | transloco }}</mat-label>
+      <input matInput formControlName="name" />
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>{{ 'inventoryAdmin.unit' | transloco }}</mat-label>
+      <input matInput formControlName="unit" />
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>{{ 'inventoryAdmin.minStock' | transloco }}</mat-label>
+      <input matInput type="number" formControlName="minStock" />
+    </mat-form-field>
+
+    <mat-slide-toggle formControlName="active">{{ 'inventoryAdmin.active' | transloco }}</mat-slide-toggle>
+  </mat-dialog-content>
+
+  <mat-dialog-actions align="end">
+    <button mat-button type="button" (click)="cancel()">{{ 'common.cancel' | transloco }}</button>
+    <button mat-flat-button color="primary" type="submit" [disabled]="form.invalid">
+      {{ 'common.save' | transloco }}
+    </button>
+  </mat-dialog-actions>
+</form>
