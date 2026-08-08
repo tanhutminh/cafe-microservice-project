@@ -182,11 +182,13 @@ public class OrderCheckoutSaga {
      * in that case this is a no-op. Retrying re-publishes with the *same* correlationId (not a
      * new one): same Kafka key (orderId) as the original means Kafka guarantees both land in the
      * same partition and get processed in order by a single consumer thread, so
-     * inventory-service's idempotent receiver (ProcessedSagaStep, PK'd on correlationId) simply
-     * replays its stored outcome for the redelivery instead of double-applying the effect - and
-     * even in the pathological case of genuinely concurrent processing (a consumer rebalance
-     * mid-flight), the primary key constraint rejects the second INSERT and rolls back that
-     * whole transaction.
+     * inventory-service's Transactional Inbox (InboxMessage, PK'd on correlationId) treats the
+     * redelivery as a duplicate at receipt time instead of double-applying the effect - if the
+     * original attempt already finished (PROCESSED), it resends the stored reply without
+     * re-running business logic; otherwise (still queued/processing) it's simply dropped, since
+     * the original attempt already owns answering it. Even in the pathological case of genuinely
+     * concurrent processing (a consumer rebalance mid-flight), the primary key constraint on
+     * correlation_id rejects the second INSERT and rolls back that whole transaction.
      *
      * The two legs compensate to different targets: a stuck reservation gives up back to OPEN
      * (nothing was ever held), but a stuck commit gives up back to CONFIRMED, not OPEN - the

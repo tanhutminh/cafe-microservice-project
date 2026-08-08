@@ -90,7 +90,8 @@ sequenceDiagram
     actor Customer
     participant OS as order-service
     participant K as Kafka
-    participant IS as inventory-service
+    participant IS as inventory-service (listener)
+    participant Poller as InboxPoller
     participant Job as OrderSagaReconciliationJob
 
     Note over OS,IS: Verify leg - soft-reserve stock
@@ -103,14 +104,22 @@ sequenceDiagram
 
     K->>IS: deliver reserve-stock.command
     activate IS
-    IS->>IS: idempotency check (ProcessedSagaStep)
-    alt sufficient stock (currentStock - reservedQuantity)
-        IS->>IS: reservedQuantity += required (currentStock untouched)
-        IS->>K: publish stock-reservation.reply (success)
-    else insufficient stock
-        IS->>K: publish stock-reservation.reply (failure, reason)
-    end
+    IS->>IS: enqueue InboxMessage (PENDING, correlationId)
+    IS-->>K: ack
     deactivate IS
+
+    loop InboxPoller sweep (poll-interval)
+        Poller->>Poller: claim next PENDING batch<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate Poller
+        alt sufficient stock (currentStock - reservedQuantity)
+            Poller->>Poller: reservedQuantity += required (currentStock untouched)
+            Poller->>K: publish stock-reservation.reply (success)
+        else insufficient stock
+            Poller->>K: publish stock-reservation.reply (failure, reason)
+        end
+        Poller->>Poller: mark InboxMessage PROCESSED (result stored)
+        deactivate Poller
+    end
 
     K->>OS: deliver stock-reservation.reply
     activate OS
@@ -131,10 +140,18 @@ sequenceDiagram
 
     K->>IS: deliver commit-stock.command
     activate IS
-    IS->>IS: idempotency check (ProcessedSagaStep)
-    IS->>IS: currentStock -= required<br/>reservedQuantity -= required<br/>record StockMovement
-    IS->>K: publish stock-commit.reply (success)
+    IS->>IS: enqueue InboxMessage (PENDING, correlationId)
+    IS-->>K: ack
     deactivate IS
+
+    loop InboxPoller sweep (poll-interval)
+        Poller->>Poller: claim next PENDING batch<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate Poller
+        Poller->>Poller: currentStock -= required<br/>reservedQuantity -= required<br/>record StockMovement
+        Poller->>K: publish stock-commit.reply (success)
+        Poller->>Poller: mark InboxMessage PROCESSED (result stored)
+        deactivate Poller
+    end
 
     K->>OS: deliver stock-commit.reply
     activate OS
@@ -167,7 +184,9 @@ sequenceDiagram
     OS->>OS: Order -> CANCELLED
     OS->>K: publish release-stock.command (fire-and-forget)
     K->>IS: deliver release-stock.command
-    IS->>IS: reservedQuantity -= required (currentStock untouched)
+    IS->>IS: enqueue InboxMessage (PENDING, correlationId)
+    IS-->>K: ack
+    Poller->>Poller: claim, then reservedQuantity -= required<br/>(currentStock untouched), mark PROCESSED
 ```
 
 Both legs fail the same two ways:
@@ -175,7 +194,7 @@ Both legs fail the same two ways:
 - **A reply arrives, but says no** — handled directly in the reply listener: `onStockReservationReply` compensates the verify leg back to `OPEN`; `onStockCommitReply` reverts the payment leg back to `CONFIRMED` (the stock hold is still legitimate — only the commit attempt failed, so there's nothing to re-verify, just retry payment).
 - **No reply ever arrives** (inventory-service was down, the message was lost) — nothing in the request/reply exchange can detect this on its own. `OrderSagaReconciliationJob` now sweeps both legs (`STOCK_RESERVATION_REQUESTED` and `PAYMENT_REQUESTED`) past `stuck-threshold`, and `retryOrCompensate` branches on which leg it finds: the verify leg gives up to `OPEN` (nothing was ever held), the payment leg gives up to `CONFIRMED` (the hold stays — same reasoning as the reply-arrives-but-fails case).
 
-Retrying either leg is safe to repeat because it re-publishes with the *same* `correlationId` for that leg (a fresh one is minted per leg via `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka keys the message by `orderId`, so every attempt lands in the same partition and is processed in order by inventory-service, whose `ProcessedSagaStep` table is keyed on `correlationId` — a redelivery just replays the stored outcome instead of applying the effect twice. Cancelling a `CONFIRMED` order's release is deliberately **not** covered by reconciliation — it's fire-and-forget with no reply to watch, an accepted gap for now.
+Retrying either leg is safe to repeat because it re-publishes with the *same* `correlationId` for that leg (a fresh one is minted per leg via `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka keys the message by `orderId`, so every attempt lands in the same partition and is processed in order by inventory-service, whose `inbox_messages` table is keyed on `correlationId` (the Transactional Inbox above) — a redelivery of an already-`PROCESSED` correlationId just gets the stored reply resent instead of the effect being applied twice. Cancelling a `CONFIRMED` order's release is deliberately **not** covered by reconciliation — it's fire-and-forget with no reply to watch, an accepted gap for now.
 
 ## Auth flow
 
@@ -195,9 +214,9 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 - **Circuit Breaker + Retry** — Resilience4j on order-service's calls to menu-service
 - **Orchestrated Saga** — order-service's checkout flow drives a state machine (`OrderCheckoutSaga`) with two legs: verify (soft-reserve stock, `OPEN`→`CONFIRMED`) and pay (commit the hold, `CONFIRMED`→`PAID`), each its own Kafka round trip that commits or compensates based on the reply; see [Business flow: checkout and payment saga](#business-flow-checkout-and-payment-saga)
 - **Try-Confirm/Cancel-style stock reservation** — inventory-service never deducts `currentStock` directly from a checkout attempt. Verifying *tries* a hold (`reservedQuantity`), paying *confirms* it into a real deduction, cancelling a `CONFIRMED` order *cancels* the hold — the same three-step shape as the classic TCC pattern, layered on top of the saga above rather than replacing it
-- **Idempotent Consumer** — `StockReservationService`'s `reserve`/`commit`/`release` all check `ProcessedSagaStep` (a dedup table keyed on `correlationId`, with a `step` column distinguishing which one) before doing anything, and write the outcome to it in the *same* transaction as the stock change they guard. Because the dedup write and the business change commit atomically together, a redelivered command can never see one applied without the other — it just replays the stored result. This is the *synchronous* variant: the dedup check, the business logic, and the dedup write all run inline in the Kafka listener thread before it acknowledges the message — not the (stricter) Transactional Inbox pattern, which would additionally decouple message receipt/ack from processing via a separate asynchronous worker reading the dedup table, the mirror image of Transactional Outbox's relay
+- **Transactional Inbox** — `StockReservationListener`'s three `@KafkaListener` methods no longer run business logic inline: each one only persists the incoming command into `inbox_messages` (status `PENDING`, keyed on `correlationId`) and acks. A separate scheduled worker, `InboxPoller`, claims a batch of `PENDING` rows (`SELECT ... FOR UPDATE SKIP LOCKED`, safe under concurrent pollers) and hands each to `InboxMessageProcessor`, which runs the actual `reserve`/`commit`/`release` step and marks the row `PROCESSED` atomically in one transaction, then publishes the reply (reserve/commit only — release has none). This is the asynchronous variant the project's earlier Idempotent Consumer explicitly wasn't yet — the mirror image of Transactional Outbox's relay, decoupling message receipt/ack from processing. `correlationId` stays the idempotency key: a redelivered command with an already-`PROCESSED` row gets the stored reply resent without re-running business logic (needed so `OrderSagaReconciliationJob`'s retry-with-same-`correlationId` still gets answered); one still `PENDING`/`PROCESSING`/`FAILED` is simply dropped, since it's already queued or was never a valid outcome to resend. A technical failure rolls that attempt's transaction back; in a separate transaction, the row either goes back to `PENDING` for another pass (up to `app.inbox.max-attempts`) or, once exhausted, `FAILED` permanently — silently, by design: `OrderSagaReconciliationJob`'s own stuck-saga sweep is the intended safety net for "no reply ever arrives," on either saga leg, regardless of cause
 - **Reconciliation** — `OrderSagaReconciliationJob` sweeps sagas stuck waiting on a reply on *either* saga leg, and retries or compensates them to the right target state per leg (see the business flow above)
-- **Dead Letter Queue** — inventory-service routes messages that fail for *technical* reasons (bad payload, bugs, DB errors — never a business "insufficient stock" outcome, which is a normal reply, not an exception) to a `.dlq` topic after a short exponential-backoff retry, instead of blocking the consumer on a poison-pill message. Applies uniformly to all three inventory command topics (`reserve-stock`, `commit-stock`, `release-stock`) via one shared error-handler bean, not configured per topic
+- **Dead Letter Queue** — inventory-service routes messages that fail for *technical* reasons at the Kafka-receipt layer (bad payload, bugs, DB errors — never a business "insufficient stock" outcome, which is a normal reply, not an exception) to a `.dlq` topic after a short exponential-backoff retry, instead of blocking the consumer on a poison-pill message. Applies uniformly to all three inventory command topics (`reserve-stock`, `commit-stock`, `release-stock`) via one shared error-handler bean, not configured per topic
 - **Database per Service** — separate Postgres database and role per service
 
 ## Structure
@@ -241,7 +260,14 @@ npm run test:coverage  # single run, with an HTML coverage report
 
 `test:coverage` writes a drill-down report to `frontend/coverage/frontend/index.html` — open it in a browser to see coverage per folder, then per file, then per line (folders/files are clickable, uncovered lines are highlighted red). Project convention: every new or modified component gets unit tests reaching at least 70% coverage before the work is considered done.
 
-Backend services have no unit tests yet (queued work, tracked separately from this README).
+Backend unit tests run per-module with Maven (JUnit 5 + Mockito):
+
+```bash
+cd backend
+mvn -pl inventory-service -am test
+```
+
+Modules that opt into the `jacoco-maven-plugin` (declared once in the parent `pom.xml`'s `pluginManagement`; so far only `inventory-service` activates it) write a drill-down HTML coverage report on every `mvn test` run, at `<module>/target/site/jacoco/index.html` — e.g. `backend/inventory-service/target/site/jacoco/index.html`. It's a plain static file, not served by anything: open it as a `file://` URL, e.g. `file:///<path-to-repo>/backend/inventory-service/target/site/jacoco/index.html` (substitute your own absolute repo path), or just double-click the file. You'll see coverage per package, then per class, then per line (same drill-down shape as the frontend's report; uncovered lines are highlighted red). To check a different module once it opts in, swap the `-pl` module name and the path accordingly. Backend test coverage is being built out module by module rather than all at once; check the codebase for current status instead of treating this README as the tracker.
 
 ## Troubleshooting
 
@@ -339,7 +365,8 @@ sequenceDiagram
     actor Customer
     participant OS as order-service
     participant K as Kafka
-    participant IS as inventory-service
+    participant IS as inventory-service (listener)
+    participant Poller as InboxPoller
     participant Job as OrderSagaReconciliationJob
 
     Note over OS,IS: Chặng Xác thực - giữ chỗ tồn kho (mềm)
@@ -352,14 +379,22 @@ sequenceDiagram
 
     K->>IS: deliver reserve-stock.command
     activate IS
-    IS->>IS: idempotency check (ProcessedSagaStep)
-    alt đủ hàng (currentStock - reservedQuantity)
-        IS->>IS: reservedQuantity += required (currentStock không đổi)
-        IS->>K: publish stock-reservation.reply (success)
-    else thiếu hàng
-        IS->>K: publish stock-reservation.reply (failure, reason)
-    end
+    IS->>IS: enqueue InboxMessage (PENDING, correlationId)
+    IS-->>K: ack
     deactivate IS
+
+    loop InboxPoller quét theo poll-interval
+        Poller->>Poller: nhặt batch PENDING kế tiếp<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate Poller
+        alt đủ hàng (currentStock - reservedQuantity)
+            Poller->>Poller: reservedQuantity += required (currentStock không đổi)
+            Poller->>K: publish stock-reservation.reply (success)
+        else thiếu hàng
+            Poller->>K: publish stock-reservation.reply (failure, reason)
+        end
+        Poller->>Poller: đánh dấu InboxMessage PROCESSED (lưu kết quả)
+        deactivate Poller
+    end
 
     K->>OS: deliver stock-reservation.reply
     activate OS
@@ -380,10 +415,18 @@ sequenceDiagram
 
     K->>IS: deliver commit-stock.command
     activate IS
-    IS->>IS: idempotency check (ProcessedSagaStep)
-    IS->>IS: currentStock -= required<br/>reservedQuantity -= required<br/>ghi StockMovement
-    IS->>K: publish stock-commit.reply (success)
+    IS->>IS: enqueue InboxMessage (PENDING, correlationId)
+    IS-->>K: ack
     deactivate IS
+
+    loop InboxPoller quét theo poll-interval
+        Poller->>Poller: nhặt batch PENDING kế tiếp<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate Poller
+        Poller->>Poller: currentStock -= required<br/>reservedQuantity -= required<br/>ghi StockMovement
+        Poller->>K: publish stock-commit.reply (success)
+        Poller->>Poller: đánh dấu InboxMessage PROCESSED (lưu kết quả)
+        deactivate Poller
+    end
 
     K->>OS: deliver stock-commit.reply
     activate OS
@@ -416,7 +459,9 @@ sequenceDiagram
     OS->>OS: Order -> CANCELLED
     OS->>K: publish release-stock.command (fire-and-forget)
     K->>IS: deliver release-stock.command
-    IS->>IS: reservedQuantity -= required (currentStock không đổi)
+    IS->>IS: enqueue InboxMessage (PENDING, correlationId)
+    IS-->>K: ack
+    Poller->>Poller: nhặt, rồi reservedQuantity -= required<br/>(currentStock không đổi), đánh dấu PROCESSED
 ```
 
 Cả 2 chặng đều xử lý 2 kiểu lỗi giống nhau:
@@ -424,7 +469,7 @@ Cả 2 chặng đều xử lý 2 kiểu lỗi giống nhau:
 - **Có reply trả về, nhưng báo thất bại** — xử lý trực tiếp trong listener nhận reply: `onStockReservationReply` compensate chặng Xác thực về `OPEN`; `onStockCommitReply` revert chặng Thanh toán về `CONFIRMED` (chỗ giữ tồn kho vẫn hợp lệ — chỉ có bước commit thất bại, nên không cần xác thực lại, chỉ cần thử thanh toán lại).
 - **Không có reply nào trả về** (inventory-service bị down, message bị mất) — bản thân cơ chế request/reply không thể tự phát hiện trường hợp này. `OrderSagaReconciliationJob` giờ quét cả 2 chặng (`STOCK_RESERVATION_REQUESTED` và `PAYMENT_REQUESTED`) quá `stuck-threshold`, và `retryOrCompensate` rẽ nhánh theo đúng chặng đang kẹt: chặng Xác thực bỏ cuộc về `OPEN` (chưa từng giữ chỗ gì), chặng Thanh toán bỏ cuộc về `CONFIRMED` (vẫn giữ nguyên chỗ đã giữ — cùng logic như trường hợp reply báo lỗi ở trên).
 
-Retry lại ở chặng nào cũng an toàn vì mỗi lần đều publish lại với *cùng* `correlationId` của chặng đó (mỗi chặng có 1 correlationId mới riêng, sinh ra qua `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka key message theo `orderId`, nên mọi lần gửi đều rơi vào cùng 1 partition và được inventory-service xử lý tuần tự; bảng `ProcessedSagaStep` dùng `correlationId` làm khóa chính — nên khi message bị gửi lại, nó chỉ trả về đúng kết quả đã lưu từ trước, thay vì áp dụng hiệu ứng 2 lần. Việc trả chỗ giữ khi hủy đơn `CONFIRMED` **cố tình không** được Reconciliation theo dõi — đây là fire-and-forget, không có reply để chờ, một khoảng trống được chấp nhận cho hiện tại.
+Retry lại ở chặng nào cũng an toàn vì mỗi lần đều publish lại với *cùng* `correlationId` của chặng đó (mỗi chặng có 1 correlationId mới riêng, sinh ra qua `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka key message theo `orderId`, nên mọi lần gửi đều rơi vào cùng 1 partition và được inventory-service xử lý tuần tự; bảng `inbox_messages` dùng `correlationId` làm khóa chính (chính là Transactional Inbox ở trên) — nên khi 1 correlationId đã `PROCESSED` bị gửi lại, nó chỉ nhận lại đúng reply đã lưu, thay vì hiệu ứng bị áp dụng 2 lần. Việc trả chỗ giữ khi hủy đơn `CONFIRMED` **cố tình không** được Reconciliation theo dõi — đây là fire-and-forget, không có reply để chờ, một khoảng trống được chấp nhận cho hiện tại.
 
 ## Luồng xác thực
 
@@ -444,15 +489,15 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 - **Circuit Breaker + Retry** — Resilience4j cho lời gọi từ order-service sang menu-service
 - **Orchestrated Saga** — luồng checkout của order-service điều khiển một state machine (`OrderCheckoutSaga`) gồm 2 chặng: Xác thực (giữ chỗ mềm tồn kho, `OPEN`→`CONFIRMED`) và Thanh toán (commit chỗ đã giữ, `CONFIRMED`→`PAID`), mỗi chặng là 1 vòng round-trip Kafka riêng, tự commit hoặc compensate dựa theo reply nhận được; xem mục "Luồng nghiệp vụ: saga xác thực và thanh toán" bên trên
 - **Giữ chỗ tồn kho kiểu Try-Confirm/Cancel (TCC)** — inventory-service không bao giờ trừ thẳng `currentStock` ngay khi checkout. Xác thực là bước *Try* (giữ chỗ vào `reservedQuantity`), thanh toán là bước *Confirm* (biến chỗ giữ thành trừ kho thật), hủy đơn `CONFIRMED` là bước *Cancel* (trả lại chỗ giữ) — đúng 3 bước kinh điển của pattern TCC, đặt chồng lên trên saga ở trên chứ không thay thế nó
-- **Idempotent Consumer** — cả 3 hàm `reserve`/`commit`/`release` của `StockReservationService` đều kiểm tra `ProcessedSagaStep` (bảng khử trùng lặp, khoá chính là `correlationId`, có thêm cột `step` để phân biệt đang ở bước nào) trước khi làm bất cứ gì, và ghi kết quả vào đó **trong cùng 1 transaction** với thay đổi tồn kho mà nó bảo vệ. Vì việc ghi bảng khử trùng lặp và thay đổi nghiệp vụ commit cùng lúc, 1 message bị gửi lại không bao giờ rơi vào tình huống "chỉ có 1 trong 2 việc được thực hiện" — nó chỉ đơn giản trả lại kết quả đã lưu từ trước. Đây là biến thể *đồng bộ* (synchronous): việc kiểm tra trùng lặp, chạy business logic, và ghi kết quả đều nằm chung trong listener thread của Kafka, trước khi thread đó ACK message — chứ chưa phải Transactional Inbox pattern (khắt khe hơn), vốn đòi hỏi tách rời việc nhận/ACK message khỏi việc xử lý, thông qua một worker bất đồng bộ riêng đọc bảng đó — đối xứng ngược lại với relay của Transactional Outbox
+- **Transactional Inbox** — 3 method `@KafkaListener` của `StockReservationListener` không còn chạy business logic ngay bên trong nữa: mỗi method chỉ lưu command nhận được vào bảng `inbox_messages` (status `PENDING`, khoá là `correlationId`) rồi ACK. Một worker chạy theo lịch riêng, `InboxPoller`, sẽ nhặt 1 batch dòng `PENDING` (`SELECT ... FOR UPDATE SKIP LOCKED`, an toàn khi có nhiều poller chạy đồng thời) và giao từng dòng cho `InboxMessageProcessor` — nơi thực sự chạy bước `reserve`/`commit`/`release` và đánh dấu dòng `PROCESSED` cùng lúc trong 1 transaction, rồi mới publish reply (chỉ reserve/commit — release thì không có reply). Đây chính là biến thể bất đồng bộ mà Idempotent Consumer trước đây của dự án còn thiếu — đối xứng ngược lại với relay của Transactional Outbox, tách rời việc nhận/ACK message khỏi việc xử lý. `correlationId` vẫn là khoá khử trùng lặp: 1 command bị gửi lại mà dòng tương ứng đã `PROCESSED` sẽ được gửi lại đúng reply đã lưu mà không chạy lại business logic (cần thiết để retry cùng `correlationId` của `OrderSagaReconciliationJob` vẫn được trả lời); còn dòng vẫn `PENDING`/`PROCESSING`/`FAILED` thì bị bỏ qua, vì đã đang được xếp hàng xử lý hoặc chưa từng có kết quả hợp lệ để gửi lại. Lỗi kỹ thuật khiến transaction của lần thử đó rollback; ở 1 transaction riêng, dòng được đưa lại `PENDING` để thử tiếp (tới `app.inbox.max-attempts` lần), hoặc khi hết lượt thì chuyển `FAILED` vĩnh viễn — im lặng, có chủ đích: sweep saga bị kẹt của `OrderSagaReconciliationJob` chính là lưới an toàn dành cho tình huống "không có reply nào tới", ở cả 2 chặng saga, bất kể nguyên nhân
 - **Reconciliation** — `OrderSagaReconciliationJob` quét các saga bị kẹt khi chờ reply ở **cả 2 chặng**, rồi retry hoặc compensate về đúng trạng thái đích tương ứng từng chặng (xem luồng nghiệp vụ bên trên)
-- **Dead Letter Queue** — inventory-service chuyển các message lỗi vì nguyên nhân *kỹ thuật* (payload sai định dạng, bug, lỗi DB — không bao giờ tính trường hợp nghiệp vụ "hết hàng", vì đó là 1 reply bình thường, không phải exception) sang topic `.dlq` sau vài lần retry theo exponential backoff, thay vì để nó chặn cứng consumer (poison-pill message). Áp dụng đồng loạt cho cả 3 topic command của inventory (`reserve-stock`, `commit-stock`, `release-stock`) qua 1 bean xử lý lỗi dùng chung, không cấu hình riêng từng topic
+- **Dead Letter Queue** — inventory-service chuyển các message lỗi vì nguyên nhân *kỹ thuật* ở tầng nhận message từ Kafka (payload sai định dạng, bug, lỗi DB — không bao giờ tính trường hợp nghiệp vụ "hết hàng", vì đó là 1 reply bình thường, không phải exception) sang topic `.dlq` sau vài lần retry theo exponential backoff, thay vì để nó chặn cứng consumer (poison-pill message). Áp dụng đồng loạt cho cả 3 topic command của inventory (`reserve-stock`, `commit-stock`, `release-stock`) qua 1 bean xử lý lỗi dùng chung, không cấu hình riêng từng topic
 - **Database per Service** — mỗi service có 1 database Postgres và 1 role riêng
 
 ## Cấu trúc
 
 ```
-backend/    Maven multi-module reactor: 5 domain service + gateway + eureka-server + config-server + common-lib
+backend/    Maven multi-module reactor: 5 domain services + gateway + eureka-server + config-server + common-lib
 frontend/   Angular (standalone components)
 docker/     Script khởi tạo Postgres
 ```
@@ -490,7 +535,14 @@ npm run test:coverage  # chạy 1 lần, kèm báo cáo coverage dạng HTML
 
 `test:coverage` ghi ra báo cáo drill-down tại `frontend/coverage/frontend/index.html` — mở bằng trình duyệt để xem coverage theo từng thư mục, rồi từng file, rồi từng dòng code (thư mục/file có thể bấm vào, dòng chưa được test sẽ tô đỏ). Quy ước của dự án: mọi component có code mới hoặc sửa đổi đều cần unit test đạt tối thiểu 70% coverage trước khi coi là hoàn thành.
 
-Các backend service hiện chưa có unit test (việc này đang được lên kế hoạch riêng, không theo dõi trong README).
+Unit test backend chạy theo từng module bằng Maven (JUnit 5 + Mockito):
+
+```bash
+cd backend
+mvn -pl inventory-service -am test
+```
+
+Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement` của `pom.xml` gốc; hiện chỉ `inventory-service` kích hoạt) sẽ ghi ra báo cáo coverage dạng HTML drill-down sau mỗi lần `mvn test`, tại `<module>/target/site/jacoco/index.html` — ví dụ `backend/inventory-service/target/site/jacoco/index.html`. Đây chỉ là file tĩnh, không có server nào phục vụ cả: mở dạng URL `file://`, ví dụ `file:///<đường-dẫn-repo>/backend/inventory-service/target/site/jacoco/index.html` (thay bằng đường dẫn tuyệt đối repo của bạn), hoặc double-click file đó cũng được. Bạn sẽ thấy coverage theo từng package, rồi từng class, rồi từng dòng code (cùng kiểu drill-down như báo cáo bên frontend; dòng chưa được test sẽ tô đỏ). Muốn xem module khác khi module đó bật jacoco, chỉ cần đổi tên module ở `-pl` và đường dẫn tương ứng. Coverage backend đang được xây dần từng module một chứ chưa phủ hết cùng lúc; xem trực tiếp codebase để biết tình trạng hiện tại thay vì coi README này là nơi theo dõi.
 
 ## Xử lý sự cố thường gặp
 
