@@ -1,0 +1,10 @@
+# Served by config-server to the client named "inventory-service" (spring.application.name).
+app:
+  inbox:
+    # How often InboxPoller sweeps for PENDING messages to claim and process.
+    poll-interval: 500ms
+    # Max PENDING messages claimed per sweep.
+    batch-size: 20
+    # After this many failed processing attempts, a message is marked FAILED
+    # permanently instead of going back to PENDING for another try.
+    max-attempts: 5
