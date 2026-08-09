@@ -108,12 +108,23 @@ public class OrderSagaStateService {
      * Guards against two distinct kinds of stale replies: Kafka redelivering a reply after the
      * saga already reached a terminal step, and a reply for an attempt that's no longer current
      * (the order was checked out again — e.g. after a prior failure — before this one arrived).
+     *
+     * CONFIRMED counts as terminal here too, alongside COMPLETED/COMPENSATED, even though it
+     * isn't terminal for the *saga overall* (payment is still to come). It's reachable exactly
+     * two ways - a successful verify leg, or a failed/reverted payment leg - and in both cases
+     * it's purely an idle "waiting for the next user action" state: the only command that could
+     * produce a fresh reply while sitting at CONFIRMED would be commit-stock.command, and that's
+     * never published until startPayment has already moved step to PAYMENT_REQUESTED first. So
+     * no legitimate reply is ever expected while step == CONFIRMED - anything that arrives in
+     * that state must be a redelivery of one already consumed. If a future change adds a path
+     * that legitimately expects a reply while CONFIRMED, this guard needs revisiting.
      */
     @Transactional(readOnly = true)
     public boolean shouldIgnoreReply(Long orderId, String correlationId) {
         return sagaStateRepository.findById(orderId)
                 .map(state -> state.getStep() == SagaStep.COMPLETED
                         || state.getStep() == SagaStep.COMPENSATED
+                        || state.getStep() == SagaStep.CONFIRMED
                         || !state.getCorrelationId().equals(correlationId))
                 .orElse(true);
     }
