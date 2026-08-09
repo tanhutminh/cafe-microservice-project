@@ -11,8 +11,8 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * The Transactional Inbox pattern's durable envelope for one inbound saga command (plan
- * section 4 / M4). {@code correlationId} (the Kafka Correlation Identifier header) is both the
+ * The Transactional Inbox pattern's durable envelope for one inbound saga command.
+ * {@code correlationId} (the Kafka Correlation Identifier header) is both the
  * primary key and the idempotency key: {@link com.cafe.inventoryservice.event.StockReservationListener}
  * inserts a row here and acks, without running any business logic; {@link InboxMessageProcessor}
  * - a separate, asynchronous worker - later claims PENDING rows and does the actual

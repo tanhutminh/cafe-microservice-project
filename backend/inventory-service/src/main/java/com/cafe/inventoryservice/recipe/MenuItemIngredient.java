@@ -13,7 +13,7 @@ import java.math.BigDecimal;
 
 /**
  * One recipe line: how much of an ingredient a menu item consumes per unit sold.
- * menuItemId is a loose reference into menu-service's own database (plan section 8) —
+ * menuItemId is a loose reference into menu-service's own database —
  * there is no real FK across service boundaries, only ingredientId is a true FK here.
  */
 @Entity

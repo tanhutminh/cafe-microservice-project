@@ -23,15 +23,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The Transactional Inbox pattern's receive side (M4) - replaces the old synchronous Idempotent
- * Consumer. Each listener method only persists the command into {@code inbox_messages} (status
- * PENDING) and acks; it never runs business logic inline. {@link InboxMessageProcessor}, a
- * separate asynchronous worker polled by InboxPoller, does the actual reserve/commit/release
- * step later. correlationId is the inbox's primary key, so a redelivered command is naturally
- * idempotent at receipt: if it's already queued or being processed, this is a no-op; if it was
- * already PROCESSED, the stored reply is resent here so a lost-reply retry (see
- * OrderCheckoutSaga.retryOrCompensate, which redelivers with the same correlationId) still gets
- * answered without re-running business logic.
+ * The Transactional Inbox pattern's receive side. Each listener method only persists the
+ * command into {@code inbox_messages} (status PENDING) and acks; it never runs business logic
+ * inline. {@link InboxMessageProcessor}, a separate asynchronous worker polled by InboxPoller,
+ * does the actual reserve/commit/release step later. correlationId is the inbox's primary key,
+ * so a redelivered command is naturally idempotent at receipt: if it's already queued or being
+ * processed, this is a no-op; if it was already PROCESSED, the stored reply is resent here so a
+ * lost-reply retry (see OrderCheckoutSaga.retryOrCompensate, which redelivers with the same
+ * correlationId) still gets answered without re-running business logic.
  */
 @Component
 public class StockReservationListener {

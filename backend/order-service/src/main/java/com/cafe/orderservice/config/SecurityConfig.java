@@ -14,7 +14,7 @@ import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 /**
- * order-service is the POS surface (plan section 5/8): CASHIER's whole job lives here
+ * order-service is the POS surface: CASHIER's whole job lives here
  * (tables + orders), so unlike menu-service there's no read/write split by role — both
  * ADMIN and CASHIER get full access to /api/tables/** and /api/orders/**.
  */

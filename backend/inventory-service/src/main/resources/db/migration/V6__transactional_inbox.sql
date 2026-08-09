@@ -1,4 +1,4 @@
--- Transactional Inbox pattern (M4): the async mirror of Transactional Outbox on the consumer
+-- Transactional Inbox pattern: the async mirror of Transactional Outbox on the consumer
 -- side. Replaces processed_saga_steps' synchronous Idempotent Consumer: the Kafka listener
 -- now only persists the incoming saga command here (status PENDING) and acks - it never runs
 -- business logic inline. A separate poller later claims PENDING rows

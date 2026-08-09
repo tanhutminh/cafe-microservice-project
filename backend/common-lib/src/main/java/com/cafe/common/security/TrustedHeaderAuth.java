@@ -11,8 +11,8 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Documents the gateway's trusted-identity headers (plan section 5) as OpenAPI "apiKey"
- * security schemes, so Swagger UI's Authorize dialog can attach them to "Try it out" calls.
+ * Documents the gateway's trusted-identity headers as OpenAPI "apiKey" security schemes,
+ * so Swagger UI's Authorize dialog can attach them to "Try it out" calls.
  * These headers are read directly off the raw request by HeaderAuthenticationFilter, not
  * bound as Spring MVC method parameters, so springdoc can't otherwise discover them - and
  * there is no JWT/Bearer token to enter here at all, since only the gateway ever verifies

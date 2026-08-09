@@ -26,8 +26,8 @@ import java.util.UUID;
 
 /**
  * Saga orchestrator for order checkout, living inside order-service since it already owns the
- * Order aggregate and its status lifecycle. Choreography was rejected in favor of this single
- * state machine because there is exactly one step that can fail and needs compensation per leg
+ * Order aggregate and its status lifecycle. Runs as a single orchestrated state machine, not
+ * choreography, since there is exactly one step that can fail and needs compensation per leg
  * — report-service is a plain event subscriber, not a saga participant.
  *
  * Two legs, both real Kafka round trips: Verify (reserve stock as a soft hold, OPEN ->

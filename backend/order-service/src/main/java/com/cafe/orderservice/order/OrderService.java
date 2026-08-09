@@ -183,7 +183,7 @@ public class OrderService {
 
     /**
      * Payment success path — called by OrderCheckoutSaga once inventory confirms the stock
-     * commit. Deliberately does NOT release the table: paying doesn't mean the party has
+     * commit. Does not release the table: paying doesn't mean the party has
      * left (pay-first-then-dine is a valid flow here). Staff frees the table explicitly via
      * DiningTableService.release() once it's actually empty.
      */

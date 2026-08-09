@@ -10,8 +10,8 @@ import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 
 /**
- * Parses PKCS8 private / X.509 public PEM text (as distributed via config-server,
- * see plan section 5) into java.security key objects for RS256 JWT signing/verification.
+ * Parses PKCS8 private / X.509 public PEM text (as distributed via config-server) into
+ * java.security key objects for RS256 JWT signing/verification.
  */
 public final class PemKeyUtils {
 

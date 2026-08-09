@@ -17,7 +17,7 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
                 title = "Menu Service API",
                 version = "v1",
                 description = "Categories and menu items. This service trusts the X-User-Id/X-Username/"
-                        + "X-User-Role headers the gateway sets after verifying a JWT (plan section 5) - it "
+                        + "X-User-Role headers the gateway sets after verifying a JWT - it "
                         + "never sees the token itself. When calling directly (bypassing the gateway) via "
                         + "this Swagger UI, click Authorize (top right) and fill in the three header "
                         + "values, e.g. X-User-Id: 1, X-Username: admin, X-User-Role: ADMIN."
