@@ -13,8 +13,7 @@ import java.util.Date;
 
 /**
  * Signs access tokens with the auth-service-owned RS256 private key (distributed via
- * config-server — see plan section 5). Only the matching public key ever leaves this
- * service, via gateway.yml.
+ * config-server). Only the matching public key ever leaves this service, via gateway.yml.
  */
 @Service
 public class JwtService {

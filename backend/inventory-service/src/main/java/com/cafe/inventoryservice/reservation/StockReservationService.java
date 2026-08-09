@@ -23,13 +23,13 @@ import java.util.stream.Collectors;
  * {@link #commit} - the payment leg - turns that hold into a real deduction. {@link #release}
  * undoes a hold on cancel, before it was ever committed. Available-to-reserve is always
  * currentStock - reservedQuantity, not currentStock alone, so two orders can't both hold the
- * same physical stock. Menu items with no recipe rows are always treated as in stock (soft,
- * per the plan's accepted MVP tradeoff).
+ * same physical stock. Menu items with no recipe rows are always treated as in stock - an
+ * accepted MVP simplification, since there's nothing to check against without a recipe.
  *
- * Pure business logic only - idempotency/dedup for redelivered saga commands is the
- * Transactional Inbox's job now (see com.cafe.inventoryservice.inbox), not this class's: by the
- * time InboxMessageProcessor calls one of these methods, the Inbox has already guaranteed it's
- * the first and only attempt for that correlationId.
+ * Pure business logic only - idempotency/dedup for redelivered saga commands belongs to the
+ * Transactional Inbox (see com.cafe.inventoryservice.inbox), not this class: by the time
+ * InboxMessageProcessor calls one of these methods, the Inbox has already guaranteed it's the
+ * first and only attempt for that correlationId.
  */
 @Service
 public class StockReservationService {

@@ -14,7 +14,7 @@ import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 /**
- * Inventory management is back-office, ADMIN-only (plan section 5/8) — CASHIER's entire
+ * Inventory management is back-office, ADMIN-only — CASHIER's entire
  * surface is order-service (POS + tables). inventory-service never sees a raw JWT either;
  * it trusts the same gateway-issued identity headers as every other domain service.
  */

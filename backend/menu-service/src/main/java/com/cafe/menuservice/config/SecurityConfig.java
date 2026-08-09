@@ -16,7 +16,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 
 /**
  * menu-service never sees a JWT — it trusts the X-User-* headers the gateway
- * sets after verifying the token (plan section 5). Reads are open to any
+ * sets after verifying the token. Reads are open to any
  * authenticated staff (ADMIN or CASHIER, e.g. for a future POS screen);
  * writes are ADMIN-only except the availability toggle, which CASHIER also
  * needs to 86 an item from the counter.

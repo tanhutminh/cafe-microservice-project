@@ -23,13 +23,13 @@ import java.util.NoSuchElementException;
 import java.util.stream.Collectors;
 
 /**
- * The Transactional Inbox's asynchronous worker half (M4), driven on a schedule by
+ * The Transactional Inbox's asynchronous worker half, driven on a schedule by
  * {@link InboxPoller}. {@link #claimBatch()} locks and flips a PENDING batch to PROCESSING in
  * one short transaction (see {@link InboxMessageRepository#lockNextByStatus} for the SKIP
  * LOCKED claim); {@link #processOne} then runs a single message's business logic and status
  * transition atomically in its own transaction, so the poller can isolate one message's failure
  * from the rest of the batch. A row that stays PROCESSING because the process crashes
- * mid-message (rather than throwing) is not reclaimed - out of scope for this pass, and a small
+ * mid-message (rather than throwing) is not reclaimed - a known limitation, with a small
  * exposure window since claim-then-process happens within the same poll cycle.
  */
 @Service

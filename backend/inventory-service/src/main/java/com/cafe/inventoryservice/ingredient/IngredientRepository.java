@@ -15,7 +15,7 @@ public interface IngredientRepository extends JpaRepository<Ingredient, Long> {
     /**
      * Row-locks the given ingredients for the duration of the transaction so a concurrent
      * checkout can't read a stale current_stock between this reservation's sufficiency
-     * check and its deduction (plan section 4's "all-or-nothing" guarantee under concurrency).
+     * check and its deduction - the "all-or-nothing" guarantee under concurrency.
      */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT i FROM Ingredient i WHERE i.id IN :ids")

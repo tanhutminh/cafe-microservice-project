@@ -13,9 +13,9 @@ import java.util.Base64;
 import java.util.HexFormat;
 
 /**
- * Refresh tokens are opaque, server-side, revocable (plan section 3): only a
- * SHA-256 hash is ever persisted, and every refresh call rotates (revokes the old,
- * issues a new) rather than reusing the same token indefinitely.
+ * Refresh tokens are opaque, server-side, and revocable: only a SHA-256 hash is ever
+ * persisted, and every refresh call rotates (revokes the old, issues a new) rather than
+ * reusing the same token indefinitely.
  */
 @Service
 public class RefreshTokenService {

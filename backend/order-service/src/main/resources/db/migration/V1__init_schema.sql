@@ -30,7 +30,7 @@ CREATE TABLE order_items (
 
 CREATE INDEX idx_order_items_order_id ON order_items (order_id);
 
--- Saga orchestration bookkeeping for checkout (plan section 4). Not exposed via API;
+-- Saga orchestration bookkeeping for checkout. Not exposed via API;
 -- the order's own status/failure_reason columns are what the POS UI polls.
 CREATE TABLE order_saga_state (
     order_id     BIGINT      PRIMARY KEY REFERENCES orders (id),

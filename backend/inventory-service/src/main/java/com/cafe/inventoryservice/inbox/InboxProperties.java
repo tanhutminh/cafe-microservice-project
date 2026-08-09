@@ -6,9 +6,11 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 import java.time.Duration;
 
 /**
- * Same tunable-operational-parameter shape as order-service's SagaReconciliationProperties.
- * inventory-service has no config-repo entry today, so these defaults are the only source -
- * they're not just a config-server-unreachable fallback here.
+ * Values are served by config-server (config-repo/inventory-service.yml), not this service's
+ * own application.yml - same tunable-operational-parameter category as order-service's
+ * SagaReconciliationProperties. The @DefaultValue fallbacks only matter because
+ * inventory-service's config import is "optional:configserver:" - if config-server is
+ * unreachable, the poller should still run with sane defaults rather than bind batchSize to 0.
  */
 @ConfigurationProperties(prefix = "app.inbox")
 public record InboxProperties(

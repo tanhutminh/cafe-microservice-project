@@ -54,8 +54,9 @@ public class RecipeSeeder implements ApplicationRunner {
         return new SeedLine(ingredientName, BigDecimal.valueOf(quantityRequired));
     }
 
-    // Cà phê hạt / Sữa tươi / Đường trắng may already exist from earlier manual testing -
-    // seeded here too (additively) so a fresh database ends up with the same full set.
+    // Cà phê hạt / Sữa tươi / Đường trắng might already exist if this runs against a database
+    // that already has some ingredients - seeded here too (additively) so a fresh database
+    // ends up with the same full set either way.
     private static final List<SeedIngredient> INGREDIENTS = List.of(
             new SeedIngredient("Cà phê hạt", "g", BigDecimal.valueOf(2000), BigDecimal.valueOf(300)),
             new SeedIngredient("Sữa tươi", "ml", BigDecimal.valueOf(5000), BigDecimal.valueOf(1000)),

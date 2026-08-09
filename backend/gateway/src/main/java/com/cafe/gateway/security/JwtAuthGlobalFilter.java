@@ -25,7 +25,7 @@ import java.util.List;
  * Verifies the JWT's RS256 signature at the edge and, on success, replaces any
  * client-supplied X-User-* headers with trusted values derived from the token's
  * claims before forwarding downstream. Domain services never see the JWT itself
- * (plan section 5) — only these headers, via {@code com.cafe.common.security.HeaderAuthenticationFilter}.
+ * — only these headers, via {@code com.cafe.common.security.HeaderAuthenticationFilter}.
  */
 @Component
 public class JwtAuthGlobalFilter implements WebFilter, Ordered {

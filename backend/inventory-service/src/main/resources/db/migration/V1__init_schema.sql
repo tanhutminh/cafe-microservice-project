@@ -7,7 +7,7 @@ CREATE TABLE ingredients (
 );
 
 -- menu_item_id is a loose application-level reference to menu-service's MenuItem — no real FK
--- is possible across service databases (plan section 8).
+-- is possible across service databases.
 CREATE TABLE menu_item_ingredients (
     id                BIGSERIAL PRIMARY KEY,
     menu_item_id      BIGINT        NOT NULL,
@@ -29,7 +29,7 @@ CREATE TABLE stock_movements (
 
 CREATE INDEX idx_stock_movements_ingredient_id ON stock_movements (ingredient_id);
 
--- Idempotency for the reserve-stock saga command (plan section 4): Kafka is at-least-once,
+-- Idempotency for the reserve-stock saga command: Kafka is at-least-once,
 -- so a redelivered command must not double-deduct stock. Stores the outcome so a duplicate
 -- command can be answered with the same reply instead of recomputing.
 CREATE TABLE processed_saga_steps (

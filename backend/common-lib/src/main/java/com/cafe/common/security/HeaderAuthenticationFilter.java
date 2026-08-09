@@ -16,8 +16,12 @@ import java.util.List;
 /**
  * Trusts identity headers (X-User-Id, X-Username, X-User-Role) set by the API Gateway
  * after it verified the JWT's RS256 signature. Domain services never see the raw token
- * or either signing key — see plan section 5 for the accepted network-isolation tradeoff
- * this depends on (only the gateway is publicly reachable).
+ * or either signing key. This is a deliberately accepted tradeoff, not something this
+ * filter itself enforces: it assumes domain services are only reachable through the
+ * gateway, so nothing else can forge these headers - true in a real deployment, but this
+ * dev setup exposes each service's port directly too (e.g. for its own Swagger UI), which
+ * would let a caller set them itself if it went straight to the service instead of through
+ * the gateway.
  */
 public class HeaderAuthenticationFilter extends OncePerRequestFilter {
 

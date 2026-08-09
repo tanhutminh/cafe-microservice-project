@@ -19,8 +19,8 @@ import reactor.netty.http.client.HttpClient;
 import java.time.Duration;
 
 /**
- * Synchronous call to menu-service (via Eureka, plan section 3 — service-to-service
- * traffic bypasses the gateway). Forwards the same trusted identity headers the gateway
+ * Synchronous call to menu-service (via Eureka — service-to-service traffic bypasses
+ * the gateway). Forwards the same trusted identity headers the gateway
  * set on the inbound request, since menu-service's security never sees a raw JWT either.
  *
  * Wrapped in the Circuit Breaker pattern (Resilience4j, config under

@@ -11,7 +11,7 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * Checkout saga orchestration bookkeeping (plan section 4) — one row per order that has
+ * Checkout saga orchestration bookkeeping — one row per order that has
  * ever started checkout. Not exposed via API; the order's own status/failureReason are
  * what clients poll. sagaId == orderId (order-service is the orchestrator for its own
  * aggregate, so no separate saga identity is needed).
