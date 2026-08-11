@@ -3,16 +3,17 @@ package com.cafe.inventoryservice.inbox;
 import com.cafe.common.event.InventoryStockCommitReply;
 import com.cafe.common.event.InventoryStockReservationReply;
 import com.cafe.common.event.OrderLineItem;
+import com.cafe.inventoryservice.outbox.OutboxMessage;
+import com.cafe.inventoryservice.outbox.OutboxMessageRepository;
+import com.cafe.inventoryservice.outbox.OutboxMessageType;
+import com.cafe.inventoryservice.outbox.OutboxStatus;
 import com.cafe.inventoryservice.reservation.StockReservationService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.support.KafkaHeaders;
-import org.springframework.messaging.Message;
-import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,30 +32,37 @@ import java.util.stream.Collectors;
  * from the rest of the batch. A row that stays PROCESSING because the process crashes
  * mid-message (rather than throwing) is not reclaimed - a known limitation, with a small
  * exposure window since claim-then-process happens within the same poll cycle.
+ *
+ * Replies are queued through the Transactional Outbox (see the outbox package) rather than sent
+ * live: {@link #publishReply} writes an {@link OutboxMessage} row in the same transaction as the
+ * stock mutation + status transition above, instead of calling KafkaTemplate directly, closing
+ * the dual-write gap where a crash after commit but before the send would silently lose a reply
+ * order-service is waiting on.
  */
 @Service
 public class InboxMessageProcessor {
 
     private static final Logger log = LoggerFactory.getLogger(InboxMessageProcessor.class);
 
-    /** Also used by StockReservationListener to resend a stored reply on a duplicate command. */
+    /** Also used by StockReservationListener to resend a stored reply on a duplicate command,
+     *  and by OutboxMessagePublisher to map a queued reply's type back to its topic. */
     public static final String RESERVATION_REPLY_TOPIC = "inventory.stock-reservation.reply";
     public static final String COMMIT_REPLY_TOPIC = "inventory.stock-commit.reply";
 
     private final InboxMessageRepository inboxMessageRepository;
     private final StockReservationService stockReservationService;
-    private final KafkaTemplate<Object, Object> kafkaTemplate;
+    private final OutboxMessageRepository outboxMessageRepository;
     private final ObjectMapper objectMapper;
     private final InboxProperties properties;
 
     public InboxMessageProcessor(InboxMessageRepository inboxMessageRepository,
                                   StockReservationService stockReservationService,
-                                  KafkaTemplate<Object, Object> kafkaTemplate,
+                                  OutboxMessageRepository outboxMessageRepository,
                                   ObjectMapper objectMapper,
                                   InboxProperties properties) {
         this.inboxMessageRepository = inboxMessageRepository;
         this.stockReservationService = stockReservationService;
-        this.kafkaTemplate = kafkaTemplate;
+        this.outboxMessageRepository = outboxMessageRepository;
         this.objectMapper = objectMapper;
         this.properties = properties;
     }
@@ -80,13 +88,13 @@ public class InboxMessageProcessor {
                 InventoryStockReservationReply reply =
                         stockReservationService.reserve(message.getOrderId(), items);
                 markProcessed(message, reply.success(), reply.reason());
-                publishReply(RESERVATION_REPLY_TOPIC, message.getOrderId(), correlationId, reply);
+                publishReply(OutboxMessageType.RESERVATION_REPLY, message.getOrderId(), correlationId, reply);
             }
             case COMMIT_STOCK -> {
                 InventoryStockCommitReply reply =
                         stockReservationService.commit(message.getOrderId(), items);
                 markProcessed(message, reply.success(), reply.reason());
-                publishReply(COMMIT_REPLY_TOPIC, message.getOrderId(), correlationId, reply);
+                publishReply(OutboxMessageType.COMMIT_REPLY, message.getOrderId(), correlationId, reply);
             }
             case RELEASE_STOCK -> {
                 stockReservationService.release(message.getOrderId(), items);
@@ -122,13 +130,24 @@ public class InboxMessageProcessor {
         message.setProcessedAt(Instant.now());
     }
 
-    private void publishReply(String topic, Long orderId, String correlationId, Object reply) {
-        Message<Object> message = MessageBuilder.withPayload(reply)
-                .setHeader(KafkaHeaders.TOPIC, topic)
-                .setHeader(KafkaHeaders.KEY, String.valueOf(orderId))
-                .setHeader(KafkaHeaders.CORRELATION_ID, correlationId)
+    private void publishReply(OutboxMessageType type, Long orderId, String correlationId, Object reply) {
+        OutboxMessage outboxMessage = OutboxMessage.builder()
+                .orderId(orderId)
+                .messageType(type)
+                .correlationId(correlationId)
+                .payload(serialize(reply))
+                .status(OutboxStatus.PENDING)
+                .attemptCount(0)
                 .build();
-        kafkaTemplate.send(message);
+        outboxMessageRepository.save(outboxMessage);
+    }
+
+    private String serialize(Object reply) {
+        try {
+            return objectMapper.writeValueAsString(reply);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize outbox payload", e);
+        }
     }
 
     private List<OrderLineItem> deserializeItems(String payload) {

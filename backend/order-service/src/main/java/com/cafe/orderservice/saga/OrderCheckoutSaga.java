@@ -9,14 +9,18 @@ import com.cafe.common.event.OrderLineItem;
 import com.cafe.common.event.OrderPaidEvent;
 import com.cafe.orderservice.order.Order;
 import com.cafe.orderservice.order.OrderService;
+import com.cafe.orderservice.order.OrderStatus;
+import com.cafe.orderservice.outbox.OutboxMessage;
+import com.cafe.orderservice.outbox.OutboxMessageRepository;
+import com.cafe.orderservice.outbox.OutboxMessageType;
+import com.cafe.orderservice.outbox.OutboxStatus;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.KafkaHeaders;
-import org.springframework.messaging.Message;
 import org.springframework.messaging.handler.annotation.Header;
-import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,6 +38,14 @@ import java.util.UUID;
  * PENDING_CONFIRMATION -> CONFIRMED or back to OPEN) and Payment (commit the hold into a real
  * deduction, CONFIRMED -> PAYMENT_PENDING -> PAID or back to CONFIRMED). Cancelling a CONFIRMED
  * order releases the hold via a third, fire-and-forget command with no reply leg.
+ *
+ * Every outbound command/event goes through the Transactional Outbox pattern (see the outbox
+ * package): each publish method below writes a durable {@link OutboxMessage} row in the same
+ * transaction as the local state change it accompanies, instead of calling KafkaTemplate
+ * directly. A separate OutboxPoller/OutboxMessagePublisher relays queued rows to Kafka
+ * afterward. This closes what used to be a dual-write gap — a crash between the local commit
+ * and a live Kafka send could leave a saga stuck with no command ever sent, invisible to
+ * OrderSagaReconciliationJob (which only scans for steps a *sent* command produces).
  */
 @Component
 public class OrderCheckoutSaga {
@@ -49,41 +61,45 @@ public class OrderCheckoutSaga {
 
     private final OrderService orderService;
     private final OrderSagaStateService sagaStateService;
-    private final KafkaTemplate<Object, Object> kafkaTemplate;
+    private final OutboxMessageRepository outboxMessageRepository;
+    private final ObjectMapper objectMapper;
     private final SagaReconciliationProperties reconciliationProperties;
 
     public OrderCheckoutSaga(OrderService orderService, OrderSagaStateService sagaStateService,
-                              KafkaTemplate<Object, Object> kafkaTemplate,
+                              OutboxMessageRepository outboxMessageRepository, ObjectMapper objectMapper,
                               SagaReconciliationProperties reconciliationProperties) {
         this.orderService = orderService;
         this.sagaStateService = sagaStateService;
-        this.kafkaTemplate = kafkaTemplate;
+        this.outboxMessageRepository = outboxMessageRepository;
+        this.objectMapper = objectMapper;
         this.reconciliationProperties = reconciliationProperties;
     }
 
     // ---- Verify leg ----
 
-    /** Verify step 1: local commit — order to PENDING_CONFIRMATION + saga row STARTED, atomically. */
+    /**
+     * Verify steps 1+2, one atomic transaction: order to PENDING_CONFIRMATION, saga row STARTED,
+     * then immediately queue the reservation command and advance the saga step to
+     * STOCK_RESERVATION_REQUESTED — all-or-nothing, so there's no window where the order/saga
+     * commit lands without a durable record of the command that must eventually follow it.
+     */
     @Transactional
     public Order startCheckout(Long orderId) {
         Order order = orderService.checkout(orderId);
         sagaStateService.start(orderId);
+        publishReservationCommand(order);
         return order;
     }
 
-    /** Verify step 2: publish the reservation command after the step-1 transaction has committed. */
+    /** Queues the reservation command in the outbox and advances the saga step. Not itself
+     *  transactional — always called from within an ambient @Transactional (startCheckout or
+     *  retryOrCompensate), whose commit is what actually makes the queued row durable. */
     public void publishReservationCommand(Order order) {
         String correlationId = sagaStateService.getCurrentCorrelationId(order.getId());
-        Message<InventoryReserveStockCommand> message = MessageBuilder
-                .withPayload(new InventoryReserveStockCommand(order.getId(), toLineItems(order)))
-                .setHeader(KafkaHeaders.TOPIC, RESERVE_STOCK_TOPIC)
-                .setHeader(KafkaHeaders.KEY, String.valueOf(order.getId()))
-                .setHeader(KafkaHeaders.CORRELATION_ID, correlationId)
-                .build();
-        kafkaTemplate.send(message);
-
+        enqueue(OutboxMessageType.RESERVE_STOCK, order, correlationId,
+                new InventoryReserveStockCommand(order.getId(), toLineItems(order)));
         sagaStateService.markStockReservationRequested(order.getId());
-        log.info("Checkout saga: requested stock reservation for order {} (correlation {})", order.getId(), correlationId);
+        log.info("Checkout saga: queued stock reservation for order {} (correlation {})", order.getId(), correlationId);
     }
 
     /** Verify step 3: apply inventory-service's reply — CONFIRMED (stock held) or compensate (back to OPEN). */
@@ -109,27 +125,23 @@ public class OrderCheckoutSaga {
 
     // ---- Payment leg ----
 
-    /** Payment step 1: local commit — order to PAYMENT_PENDING, and a fresh saga attempt on the same row. */
+    /** Payment steps 1+2, one atomic transaction — same fold as startCheckout, for the same reason. */
     @Transactional
     public Order startPayment(Long orderId, String paymentMethod) {
         Order order = orderService.startPayment(orderId, paymentMethod);
         sagaStateService.startPaymentAttempt(orderId);
+        publishCommitCommand(order);
         return order;
     }
 
-    /** Payment step 2: publish the commit command after the step-1 transaction has committed. */
+    /** Queues the commit command in the outbox and advances the saga step — same shape as
+     *  publishReservationCommand, see its Javadoc for the transactional-boundary reasoning. */
     public void publishCommitCommand(Order order) {
         String correlationId = sagaStateService.getCurrentCorrelationId(order.getId());
-        Message<InventoryCommitStockCommand> message = MessageBuilder
-                .withPayload(new InventoryCommitStockCommand(order.getId(), toLineItems(order)))
-                .setHeader(KafkaHeaders.TOPIC, COMMIT_STOCK_TOPIC)
-                .setHeader(KafkaHeaders.KEY, String.valueOf(order.getId()))
-                .setHeader(KafkaHeaders.CORRELATION_ID, correlationId)
-                .build();
-        kafkaTemplate.send(message);
-
+        enqueue(OutboxMessageType.COMMIT_STOCK, order, correlationId,
+                new InventoryCommitStockCommand(order.getId(), toLineItems(order)));
         sagaStateService.markPaymentRequested(order.getId());
-        log.info("Checkout saga: requested stock commit for order {} (correlation {})", order.getId(), correlationId);
+        log.info("Checkout saga: queued stock commit for order {} (correlation {})", order.getId(), correlationId);
     }
 
     /** Payment step 3: apply inventory-service's reply — PAID or compensate (back to CONFIRMED, stock stays held). */
@@ -156,17 +168,31 @@ public class OrderCheckoutSaga {
 
     // ---- Cancel-after-CONFIRMED compensation ----
 
-    /** Fire-and-forget: releases a stock hold that was never committed. No reply, no saga state change (order is already CANCELLED). */
+    /**
+     * One atomic transaction: cancel the order, and — only if it was CONFIRMED, meaning a stock
+     * hold actually exists — queue the release of that hold in the same commit. Replaces what
+     * used to be two separate calls from OrderController (cancel, then a live release send),
+     * the same dual-write shape the checkout/payment legs had.
+     */
+    @Transactional
+    public Order cancelOrder(Long orderId) {
+        Order order = orderService.getOrder(orderId);
+        boolean wasConfirmed = order.getStatus() == OrderStatus.CONFIRMED;
+        Order cancelled = orderService.cancel(orderId);
+        if (wasConfirmed) {
+            releaseReservedStock(cancelled);
+        }
+        return cancelled;
+    }
+
+    /** Fire-and-forget: queues release of a stock hold that was never committed. No reply, no
+     *  saga state change (order is already CANCELLED). Always called from within an ambient
+     *  @Transactional (cancelOrder). */
     public void releaseReservedStock(Order order) {
         String correlationId = UUID.randomUUID().toString();
-        Message<InventoryReleaseStockCommand> message = MessageBuilder
-                .withPayload(new InventoryReleaseStockCommand(order.getId(), toLineItems(order)))
-                .setHeader(KafkaHeaders.TOPIC, RELEASE_STOCK_TOPIC)
-                .setHeader(KafkaHeaders.KEY, String.valueOf(order.getId()))
-                .setHeader(KafkaHeaders.CORRELATION_ID, correlationId)
-                .build();
-        kafkaTemplate.send(message);
-        log.info("Checkout saga: released stock hold for cancelled order {} (correlation {})", order.getId(), correlationId);
+        enqueue(OutboxMessageType.RELEASE_STOCK, order, correlationId,
+                new InventoryReleaseStockCommand(order.getId(), toLineItems(order)));
+        log.info("Checkout saga: queued stock hold release for cancelled order {} (correlation {})", order.getId(), correlationId);
     }
 
     // ---- Reconciliation ----
@@ -179,9 +205,9 @@ public class OrderCheckoutSaga {
      *
      * Re-checks the step fresh inside this transaction first: the sweep's query and this call
      * aren't atomic, so a real reply may have arrived and already settled the saga in between -
-     * in that case this is a no-op. Retrying re-publishes with the *same* correlationId (not a
-     * new one): same Kafka key (orderId) as the original means Kafka guarantees both land in the
-     * same partition and get processed in order by a single consumer thread, so
+     * in that case this is a no-op. Retrying re-queues the same *correlationId* (not a
+     * new one) into the outbox: same Kafka key (orderId) as the original means Kafka guarantees
+     * both land in the same partition and get processed in order by a single consumer thread, so
      * inventory-service's Transactional Inbox (InboxMessage, PK'd on correlationId) treats the
      * redelivery as a duplicate at receipt time instead of double-applying the effect - if the
      * original attempt already finished (PROCESSED), it resends the stored reply without
@@ -210,7 +236,7 @@ public class OrderCheckoutSaga {
             } else {
                 publishCommitCommand(order);
             }
-            log.info("Checkout saga: reconciliation re-published {} for order {} (attempt {})",
+            log.info("Checkout saga: reconciliation re-queued {} for order {} (attempt {})",
                     step, orderId, sagaStateService.getRetryCount(orderId));
         } else if (step == SagaStep.STOCK_RESERVATION_REQUESTED) {
             String reason = "Inventory reservation timed out after " + reconciliationProperties.maxRetries() + " retries";
@@ -231,14 +257,27 @@ public class OrderCheckoutSaga {
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
         OrderPaidEvent event = new OrderPaidEvent(
                 order.getId(), order.getTable().getId(), order.getClosedAt(), toLineItems(order), grandTotal, order.getPaymentMethod());
+        enqueue(OutboxMessageType.ORDER_PAID, order, correlationId, event);
+    }
 
-        Message<OrderPaidEvent> message = MessageBuilder
-                .withPayload(event)
-                .setHeader(KafkaHeaders.TOPIC, ORDER_PAID_TOPIC)
-                .setHeader(KafkaHeaders.KEY, String.valueOf(order.getId()))
-                .setHeader(KafkaHeaders.CORRELATION_ID, correlationId)
+    private void enqueue(OutboxMessageType type, Order order, String correlationId, Object payload) {
+        OutboxMessage message = OutboxMessage.builder()
+                .orderId(order.getId())
+                .messageType(type)
+                .correlationId(correlationId)
+                .payload(serialize(payload))
+                .status(OutboxStatus.PENDING)
+                .attemptCount(0)
                 .build();
-        kafkaTemplate.send(message);
+        outboxMessageRepository.save(message);
+    }
+
+    private String serialize(Object payload) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize outbox payload", e);
+        }
     }
 
     private List<OrderLineItem> toLineItems(Order order) {
