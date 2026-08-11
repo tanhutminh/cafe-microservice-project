@@ -13,7 +13,7 @@ COPY report-service/pom.xml report-service/pom.xml
 RUN mvn -q -N install
 COPY common-lib common-lib
 COPY gateway gateway
-RUN mvn -q -pl gateway -am -DskipTests package
+RUN mvn -q -pl gateway -am package
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app

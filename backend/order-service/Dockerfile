@@ -13,7 +13,7 @@ COPY report-service/pom.xml report-service/pom.xml
 RUN mvn -q -N install
 COPY common-lib common-lib
 COPY order-service order-service
-RUN mvn -q -pl order-service -am -DskipTests package
+RUN mvn -q -pl order-service -am package
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
