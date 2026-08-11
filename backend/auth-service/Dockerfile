@@ -13,7 +13,7 @@ COPY report-service/pom.xml report-service/pom.xml
 RUN mvn -q -N install
 COPY common-lib common-lib
 COPY auth-service auth-service
-RUN mvn -q -pl auth-service -am -DskipTests package
+RUN mvn -q -pl auth-service -am package
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app

@@ -13,7 +13,7 @@ COPY report-service/pom.xml report-service/pom.xml
 RUN mvn -q -N install
 COPY common-lib common-lib
 COPY eureka-server eureka-server
-RUN mvn -q -pl eureka-server -am -DskipTests package
+RUN mvn -q -pl eureka-server -am package
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
