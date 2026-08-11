@@ -9,6 +9,17 @@ app:
     max-retries: 3
     # How often OrderSagaReconciliationJob runs its sweep.
     sweep-interval: 30s
+  outbox:
+    # How often OutboxPoller sweeps for PENDING messages to claim and publish.
+    poll-interval: 500ms
+    # Max PENDING messages claimed per sweep.
+    batch-size: 20
+    # After this many failed publish attempts, a message is marked FAILED
+    # permanently instead of going back to PENDING for another try.
+    max-attempts: 5
+    # How long OutboxMessagePublisher blocks on the Kafka send future before
+    # treating an attempt as failed.
+    publish-timeout: 5s
 
 resilience4j:
   circuitbreaker:

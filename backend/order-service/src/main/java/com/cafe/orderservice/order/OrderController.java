@@ -74,13 +74,7 @@ public class OrderController {
                     + "Cancelling a CONFIRMED order releases its stock hold back to inventory-service."
     )
     public OrderResponse cancel(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
-        Order order = orderService.getOrder(id);
-        boolean wasConfirmed = order.getStatus() == OrderStatus.CONFIRMED;
-        Order cancelled = orderService.cancel(id);
-        if (wasConfirmed) {
-            orderCheckoutSaga.releaseReservedStock(cancelled);
-        }
-        return OrderResponse.from(cancelled);
+        return OrderResponse.from(orderCheckoutSaga.cancelOrder(id));
     }
 
     @PostMapping("/{id}/move")
@@ -102,9 +96,7 @@ public class OrderController {
                     + "fix the order and try again)."
     )
     public OrderResponse checkout(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
-        Order order = orderCheckoutSaga.startCheckout(id);
-        orderCheckoutSaga.publishReservationCommand(order);
-        return OrderResponse.from(order);
+        return OrderResponse.from(orderCheckoutSaga.startCheckout(id));
     }
 
     @PostMapping("/{id}/pay")
@@ -118,8 +110,6 @@ public class OrderController {
                     + "just retry payment."
     )
     public OrderResponse pay(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody PayRequest request) {
-        Order order = orderCheckoutSaga.startPayment(id, request.paymentMethod());
-        orderCheckoutSaga.publishCommitCommand(order);
-        return OrderResponse.from(order);
+        return OrderResponse.from(orderCheckoutSaga.startPayment(id, request.paymentMethod()));
     }
 }

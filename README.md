@@ -91,16 +91,24 @@ sequenceDiagram
     participant OS as order-service
     participant K as Kafka
     participant IS as inventory-service (listener)
+    participant OP as OutboxPoller (order-service)
     participant Poller as InboxPoller
     participant Job as OrderSagaReconciliationJob
 
     Note over OS,IS: Verify leg - soft-reserve stock
     Customer->>OS: POST /api/orders/{id}/checkout
     activate OS
-    OS->>OS: Order -> PENDING_CONFIRMATION<br/>saga -> STARTED
-    OS->>K: publish reserve-stock.command (correlationId)
+    OS->>OS: Order -> PENDING_CONFIRMATION<br/>saga -> STARTED -> STOCK_RESERVATION_REQUESTED<br/>enqueue OutboxMessage (PENDING) - one transaction
     OS-->>Customer: 202 Accepted
     deactivate OS
+
+    loop OutboxPoller sweep (poll-interval)
+        OP->>OP: claim next PENDING batch<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate OP
+        OP->>K: publish reserve-stock.command (correlationId)
+        OP->>OP: mark OutboxMessage PUBLISHED (broker ack received)
+        deactivate OP
+    end
 
     K->>IS: deliver reserve-stock.command
     activate IS
@@ -133,10 +141,17 @@ sequenceDiagram
     Note over OS,IS: Payment leg - commit the hold
     Customer->>OS: POST /api/orders/{id}/pay
     activate OS
-    OS->>OS: Order -> PAYMENT_PENDING<br/>saga -> PAYMENT_REQUESTED (fresh correlationId)
-    OS->>K: publish commit-stock.command
+    OS->>OS: Order -> PAYMENT_PENDING<br/>saga -> PAYMENT_REQUESTED (fresh correlationId)<br/>enqueue OutboxMessage (PENDING) - one transaction
     OS-->>Customer: 202 Accepted
     deactivate OS
+
+    loop OutboxPoller sweep (poll-interval)
+        OP->>OP: claim next PENDING batch<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate OP
+        OP->>K: publish commit-stock.command (correlationId)
+        OP->>OP: mark OutboxMessage PUBLISHED (broker ack received)
+        deactivate OP
+    end
 
     K->>IS: deliver commit-stock.command
     activate IS
@@ -156,8 +171,8 @@ sequenceDiagram
     K->>OS: deliver stock-commit.reply
     activate OS
     alt success
-        OS->>OS: Order -> PAID<br/>saga -> COMPLETED
-        OS->>K: publish order.paid
+        OS->>OS: Order -> PAID<br/>saga -> COMPLETED<br/>enqueue OutboxMessage (order.paid) - same transaction
+        OP->>K: (async, same OutboxPoller loop as above) publish order.paid
     else failure (rare - the hold was already validated at reserve time)
         OS->>OS: revert: Order -> CONFIRMED<br/>saga -> CONFIRMED
     end
@@ -167,13 +182,13 @@ sequenceDiagram
     Job->>Job: find sagas stuck at STOCK_RESERVATION_REQUESTED<br/>or PAYMENT_REQUESTED past stuck-threshold (60s)
     alt verify leg, retries remain
         Job->>OS: retryOrCompensate(orderId)
-        OS->>K: re-publish reserve-stock.command (same correlationId)
+        OS->>OS: enqueue OutboxMessage (reserve-stock, same correlationId)
     else verify leg, retries exhausted
         Job->>OS: retryOrCompensate(orderId)
         OS->>OS: compensate: Order -> OPEN
     else payment leg, retries remain
         Job->>OS: retryOrCompensate(orderId)
-        OS->>K: re-publish commit-stock.command (same correlationId)
+        OS->>OS: enqueue OutboxMessage (commit-stock, same correlationId)
     else payment leg, retries exhausted
         Job->>OS: retryOrCompensate(orderId)
         OS->>OS: revert: Order -> CONFIRMED (stock hold stays)
@@ -181,8 +196,8 @@ sequenceDiagram
 
     Note over OS,IS: Cancelling a CONFIRMED order - release the hold
     Customer->>OS: POST /api/orders/{id}/cancel
-    OS->>OS: Order -> CANCELLED
-    OS->>K: publish release-stock.command (fire-and-forget)
+    OS->>OS: Order -> CANCELLED<br/>enqueue OutboxMessage (release-stock) - same transaction
+    OP->>K: (async, same OutboxPoller loop as above) publish release-stock.command
     K->>IS: deliver release-stock.command
     IS->>IS: enqueue InboxMessage (PENDING, correlationId)
     IS-->>K: ack
@@ -194,7 +209,26 @@ Both legs fail the same two ways:
 - **A reply arrives, but says no** — handled directly in the reply listener: `onStockReservationReply` compensates the verify leg back to `OPEN`; `onStockCommitReply` reverts the payment leg back to `CONFIRMED` (the stock hold is still legitimate — only the commit attempt failed, so there's nothing to re-verify, just retry payment).
 - **No reply ever arrives** (inventory-service was down, the message was lost) — nothing in the request/reply exchange can detect this on its own. `OrderSagaReconciliationJob` now sweeps both legs (`STOCK_RESERVATION_REQUESTED` and `PAYMENT_REQUESTED`) past `stuck-threshold`, and `retryOrCompensate` branches on which leg it finds: the verify leg gives up to `OPEN` (nothing was ever held), the payment leg gives up to `CONFIRMED` (the hold stays — same reasoning as the reply-arrives-but-fails case).
 
-Retrying either leg is safe to repeat because it re-publishes with the *same* `correlationId` for that leg (a fresh one is minted per leg via `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka keys the message by `orderId`, so every attempt lands in the same partition and is processed in order by inventory-service, whose `inbox_messages` table is keyed on `correlationId` (the Transactional Inbox above) — a redelivery of an already-`PROCESSED` correlationId just gets the stored reply resent instead of the effect being applied twice. Cancelling a `CONFIRMED` order's release is deliberately **not** covered by reconciliation — it's fire-and-forget with no reply to watch, an accepted gap for now.
+Retrying either leg is safe to repeat because it re-queues the *same* `correlationId` for that leg into the outbox (a fresh one is minted per leg via `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka keys the message by `orderId`, so every attempt lands in the same partition and is processed in order by inventory-service, whose `inbox_messages` table is keyed on `correlationId` (the Transactional Inbox above) — a redelivery of an already-`PROCESSED` correlationId just gets the stored reply resent instead of the effect being applied twice. Cancelling a `CONFIRMED` order's release is still deliberately **not** covered by reconciliation — it's fire-and-forget with no reply to watch. Transactional Outbox below closes the narrower gap of "the release command was never sent because the process crashed before the live Kafka call" (it's now durably queued in the same transaction as the cancellation), but it doesn't add a reply/compensation leg to release — if inventory-service is down long enough that its own retry budget (`app.outbox.max-attempts`) is exhausted, that release is marked `FAILED` and nothing retries it further.
+
+### Order status × saga step
+
+The two state machines above move together but aren't the same thing: `Order.status` is what the POS UI polls and displays; `OrderSagaState.step` is orchestration bookkeeping the API never exposes directly. This table is every reachable combination and what triggers each transition:
+
+| Consumed message (causes this row) | Order status | Saga step | Published message (queued once marked) | Trigger |
+|---|---|---|---|---|
+| — | `OPEN` | *(no saga row yet)* | — | Order created |
+| — | `PENDING_CONFIRMATION` | `STARTED` → `STOCK_RESERVATION_REQUESTED` | `reserve-stock.command` | `POST /checkout` → `OrderCheckoutSaga.startCheckout`: one transaction moves the order to `PENDING_CONFIRMATION`, creates the saga row (fresh `correlationId`), and queues the `RESERVE_STOCK` outbox message |
+| `stock-reservation.reply` (success) | `CONFIRMED` | `CONFIRMED` | — | inventory-service replies success → `onStockReservationReply` → `markConfirmed` (order + saga together) |
+| `stock-reservation.reply` (failure) — or none, on reconciliation timeout | `OPEN` (`failureReason` set) | `COMPENSATED` | — | inventory-service replies failure, **or** `OrderSagaReconciliationJob` exhausts `max-retries` with no reply → `compensateToOpen` + `markCompensated` |
+| — | `PAYMENT_PENDING` | `PAYMENT_REQUESTED` | `commit-stock.command` | `POST /pay` → `startPayment`: order → `PAYMENT_PENDING`, same saga row gets a fresh `correlationId` + reset retry count, `COMMIT_STOCK` outbox message queued — same one-transaction shape as checkout |
+| `stock-commit.reply` (success) | `PAID` (`closedAt` set) | `COMPLETED` | `order.paid` | inventory-service replies success → `onStockCommitReply` → `markPaid` + `markCompleted`, and an `ORDER_PAID` outbox message is queued in the same transaction |
+| `stock-commit.reply` (failure) — or none, on reconciliation timeout | `CONFIRMED` (`failureReason` set) | `CONFIRMED` | — | inventory-service replies failure, **or** reconciliation exhausts retries → `revertToConfirmed` + `markConfirmed` — stock hold stays intact, only the payment attempt is retried |
+| — | `CANCELLED` | *(saga row untouched)* | `release-stock.command` (fire-and-forget) | `POST /cancel` → `OrderCheckoutSaga.cancelOrder`, only from `OPEN` or `CONFIRMED` (blocked while a leg is in flight, blocked once `PAID`); cancelling from `CONFIRMED` also queues a `RELEASE_STOCK` outbox message in the same transaction, with no saga step of its own |
+
+"Consumed message" is the Kafka reply the saga was waiting for that causes the row's transition — blank where the trigger is an HTTP call instead (`POST /checkout`, `/pay`, `/cancel`) or a reconciliation timeout with no message at all. "Published message" is what gets queued to the outbox once the order/saga-state change in that row commits — it's a queue, not a live send: `OutboxPoller` relays it to Kafka asynchronously afterward (see Transactional Outbox below), so there's a short async gap between a row in this table becoming true and the published message actually reaching Kafka.
+
+Two things worth knowing that aren't obvious from the table alone: `shouldIgnoreReply` (see Idempotent Consumer below) treats `COMPLETED`, `COMPENSATED`, **and** the `CONFIRMED` step as terminal/idle for reply-matching purposes — a reply arriving in any of those is necessarily a stale redelivery, since the only thing that could produce a fresh one while at `CONFIRMED` (a commit-stock reply) is never sent until `startPayment` has already moved the step past it. And `SagaStep` also declares a `COMPENSATING` value that no code path currently assigns — it's not part of the live flow, just reserved for a future in-flight compensation state if one is ever needed.
 
 ## Auth flow
 
@@ -226,7 +260,7 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 
 ### Messaging reliability
 
-These four all defend the same Kafka exchange (the saga above) against the same two hazards — at-least-once redelivery and "the other side never replies" — each in a different, complementary way:
+These five all defend the same Kafka exchange (the saga above) against the same two hazards — at-least-once redelivery and "the other side never replies" — each in a different, complementary way:
 
 - **Idempotent Consumer** — makes reprocessing a redelivered message safe, without changing what it does.
   - order-service's checkout saga reply handlers (`OrderCheckoutSaga.onStockReservationReply`/`onStockCommitReply`) use `OrderSagaStateService.shouldIgnoreReply` for this: it treats `COMPLETED`, `COMPENSATED`, and `CONFIRMED` as terminal for the saga's current attempt, plus a stale-correlationId check for a reply belonging to an attempt already superseded by a fresh one.
@@ -235,9 +269,13 @@ These four all defend the same Kafka exchange (the saga above) against the same 
 - **Transactional Inbox** — the fuller, asynchronous sibling to Idempotent Consumer: decouples *receiving* a message from *processing* it, instead of doing both inline on the listener thread.
   - `StockReservationListener`'s three `@KafkaListener` methods only persist the incoming command into `inbox_messages` (status `PENDING`, keyed on `correlationId`) and ack — no business logic runs inline.
   - A separate scheduled worker, `InboxPoller`, claims a batch of `PENDING` rows (`SELECT ... FOR UPDATE SKIP LOCKED`, safe under concurrent pollers) and hands each to `InboxMessageProcessor`, which runs the actual `reserve`/`commit`/`release` step and marks the row `PROCESSED` atomically in one transaction, then publishes the reply (reserve/commit only — release has none).
-  - Why the extra machinery is worth it here but not on order-service's side: reserving/committing stock involves row locks across multiple ingredients and multi-step validation, not just a state-field update — this is the mirror image of Transactional Outbox's relay on the send side.
+  - Why this needs its own async worker rather than just running inline on the listener thread: reserving/committing stock involves row locks across multiple ingredients and multi-step validation, not something safe or fast enough to do synchronously on a Kafka consumer thread — Transactional Outbox below has the equivalent split (durable write, then a separate relay), but its relay side is comparatively light (send a stored payload, no business logic), so the asymmetry here is about how much work happens *after* the durable write, not whether one exists.
   - `correlationId` stays the idempotency key: a redelivered command with an already-`PROCESSED` row gets the stored reply resent without re-running business logic (needed so `OrderSagaReconciliationJob`'s retry-with-same-correlationId still gets answered); one still `PENDING`/`PROCESSING`/`FAILED` is simply dropped.
   - A technical failure rolls that attempt's transaction back; the row goes back to `PENDING` for another pass (up to `app.inbox.max-attempts`) or, once exhausted, `FAILED` permanently — silently, by design (see Reconciliation below for why that's safe to leave silent).
+- **Transactional Outbox** — the send-side mirror of Transactional Inbox above: makes "commit a state change" and "durably guarantee the message that must follow it" atomic, by writing both to the same database in the same transaction instead of committing the state change and then separately calling Kafka live.
+  - order-service's `OrderCheckoutSaga` writes an `OutboxMessage` row (status `PENDING`) in the *same* transaction as every order/saga-state change that needs a Kafka message to follow it — reserve, commit, release, and the final `order.paid` event. Before this pattern, those were two separate transactions (local commit, then a live `KafkaTemplate.send()`); a crash in between could leave a saga stuck with no command ever sent, invisible to `OrderSagaReconciliationJob` (which only scans steps a *sent* command produces, not the pre-send `STARTED` step). inventory-service's `InboxMessageProcessor` has the same shape for its two reply topics, queuing the reply in the same transaction as the stock mutation + inbox status update it answers.
+  - A separate scheduled `OutboxPoller`, one per service, claims a batch of `PENDING` rows the same `SELECT ... FOR UPDATE SKIP LOCKED` way `InboxPoller` does, and hands each to `OutboxMessagePublisher`, which sends it and blocks on Kafka's send future (`app.outbox.publish-timeout`) so the row only flips to `PUBLISHED` once the broker has actually acknowledged it — anything less would just reopen the same dual-write gap this pattern exists to close.
+  - Same retry/give-up shape as Transactional Inbox: a failed send goes back to `PENDING` for another sweep (up to `app.outbox.max-attempts`), then `FAILED` permanently. A row stuck `PROCESSING` because the process crashed after the broker ack but before the commit is a known, accepted exposure window, not reclaimed — same trade-off `InboxPoller` already makes on its side.
 - **Reconciliation** — `OrderSagaReconciliationJob` sweeps sagas stuck waiting on a reply on *either* saga leg, and retries or compensates them to the right target state per leg (see the business flow above). This is the safety net for "no reply ever arrives" — Idempotent Consumer and Transactional Inbox only handle a reply that *does* eventually show up, whether on time or redelivered.
 - **Dead Letter Queue** — inventory-service routes messages that fail for *technical* reasons at the Kafka-receipt layer (bad payload, bugs, DB errors — never a business "insufficient stock" outcome, which is a normal reply, not an exception) to a `.dlq` topic after a short exponential-backoff retry, instead of blocking the consumer on a poison-pill message. Applies uniformly to all three inventory command topics (`reserve-stock`, `commit-stock`, `release-stock`) via one shared error-handler bean, not configured per topic
 
@@ -295,7 +333,13 @@ Modules that opt into the `jacoco-maven-plugin` (declared once in the parent `po
 
 - **Gateway returns 503 right after restarting a service** — Spring Cloud Gateway's load balancer keeps a short-lived cache of service instances resolved via Eureka; it can go stale for a few seconds after a restart. Retry after ~5s before assuming something's actually broken.
 - **Docker build cache eating disk space** — repeated `docker compose build` during iterative development leaves old image layers behind indefinitely. Run `docker builder prune -f` periodically to reclaim space, or `docker system df` to check what's actually using it.
-- **A service can't reach another (Eureka lookups hang or 500) when you run one bare from an IDE alongside the rest in Docker** — every service's `eureka.instance.hostname` defaults to `host.docker.internal` rather than its auto-detected host IP, because on Windows that auto-detected IP can land on a virtual adapter (VPN/WSL/Hyper-V) that Docker containers can't route to. `host.docker.internal` works both directions — Docker Desktop hairpins a container's own published port back through it, so containers and bare-host processes can reach each other through it uniformly. Fully-dockerized services can instead register by container IP (`docker-compose.yml` sets `EUREKA_INSTANCE_PREFER_IP_ADDRESS=true` for order-service), which is simpler when nothing runs bare.
+- **A service can't reach another (Eureka lookups hang or 500) when you run one bare from an IDE alongside the rest in Docker** — every service's `eureka.instance.hostname` defaults to `host.docker.internal` rather than its auto-detected host IP, because on Windows that auto-detected IP can land on a virtual adapter (VPN/WSL/Hyper-V) that Docker containers can't route to. `host.docker.internal` is meant to work both directions — Docker Desktop hairpins a container's own published port back through it, so containers and bare-host processes should be able to reach each other through it uniformly. Fully-dockerized services can instead register by container IP (`docker-compose.yml` sets `EUREKA_INSTANCE_PREFER_IP_ADDRESS=true` for order-service), which is simpler when nothing runs bare.
+
+  If this was working and suddenly isn't — calls from a bare-host process (e.g. order-service run from Eclipse) to `host.docker.internal` start timing out, with nothing else changed — the usual cause is that Docker Desktop periodically rewrites its own entry for `host.docker.internal` in the Windows hosts file (`C:\Windows\System32\drivers\etc\hosts`) to the machine's *current* LAN IP (it changes whenever you switch networks or restart Docker Desktop), and that LAN IP is often unreachable for reasons that have nothing to do with the Windows Firewall. Only the **container** side needs Docker's own `host.docker.internal` resolution (which it manages independently of the Windows hosts file); a **bare-host** process reads the real Windows hosts file, so that entry needs to point at `127.0.0.1` instead — a container's published port is always reachable there regardless of which network the machine is currently on. Fix, as Administrator:
+  ```powershell
+  (Get-Content C:\Windows\System32\drivers\etc\hosts) -replace '^\S+(\s+host\.docker\.internal)$', '127.0.0.1$1' | Set-Content C:\Windows\System32\drivers\etc\hosts -Encoding ASCII
+  ```
+  Expect to need this again after a Docker Desktop restart or a network change — check `Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String host.docker.internal` first if the bare-host connectivity issue resurfaces.
 
 </details>
 
@@ -388,16 +432,24 @@ sequenceDiagram
     participant OS as order-service
     participant K as Kafka
     participant IS as inventory-service (listener)
+    participant OP as OutboxPoller (order-service)
     participant Poller as InboxPoller
     participant Job as OrderSagaReconciliationJob
 
     Note over OS,IS: Chặng Xác thực - giữ chỗ tồn kho (mềm)
     Customer->>OS: POST /api/orders/{id}/checkout
     activate OS
-    OS->>OS: Order -> PENDING_CONFIRMATION<br/>saga -> STARTED
-    OS->>K: publish reserve-stock.command (correlationId)
+    OS->>OS: Order -> PENDING_CONFIRMATION<br/>saga -> STARTED -> STOCK_RESERVATION_REQUESTED<br/>enqueue OutboxMessage (PENDING) - trong cùng 1 transaction
     OS-->>Customer: 202 Accepted
     deactivate OS
+
+    loop OutboxPoller quét theo poll-interval
+        OP->>OP: nhặt batch PENDING kế tiếp<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate OP
+        OP->>K: publish reserve-stock.command (correlationId)
+        OP->>OP: đánh dấu OutboxMessage PUBLISHED (đã nhận ack từ broker)
+        deactivate OP
+    end
 
     K->>IS: deliver reserve-stock.command
     activate IS
@@ -430,10 +482,17 @@ sequenceDiagram
     Note over OS,IS: Chặng Thanh toán - commit phần đã giữ chỗ
     Customer->>OS: POST /api/orders/{id}/pay
     activate OS
-    OS->>OS: Order -> PAYMENT_PENDING<br/>saga -> PAYMENT_REQUESTED (correlationId mới)
-    OS->>K: publish commit-stock.command
+    OS->>OS: Order -> PAYMENT_PENDING<br/>saga -> PAYMENT_REQUESTED (correlationId mới)<br/>enqueue OutboxMessage (PENDING) - trong cùng 1 transaction
     OS-->>Customer: 202 Accepted
     deactivate OS
+
+    loop OutboxPoller quét theo poll-interval
+        OP->>OP: nhặt batch PENDING kế tiếp<br/>(SELECT ... FOR UPDATE SKIP LOCKED -> PROCESSING)
+        activate OP
+        OP->>K: publish commit-stock.command (correlationId)
+        OP->>OP: đánh dấu OutboxMessage PUBLISHED (đã nhận ack từ broker)
+        deactivate OP
+    end
 
     K->>IS: deliver commit-stock.command
     activate IS
@@ -453,8 +512,8 @@ sequenceDiagram
     K->>OS: deliver stock-commit.reply
     activate OS
     alt success
-        OS->>OS: Order -> PAID<br/>saga -> COMPLETED
-        OS->>K: publish order.paid
+        OS->>OS: Order -> PAID<br/>saga -> COMPLETED<br/>enqueue OutboxMessage (order.paid) - trong cùng transaction
+        OP->>K: (bất đồng bộ, dùng chung loop OutboxPoller ở trên) publish order.paid
     else failure (hiếm - đã validate từ lúc giữ chỗ)
         OS->>OS: revert: Order -> CONFIRMED<br/>saga -> CONFIRMED
     end
@@ -464,13 +523,13 @@ sequenceDiagram
     Job->>Job: tìm saga kẹt ở STOCK_RESERVATION_REQUESTED<br/>hoặc PAYMENT_REQUESTED quá stuck-threshold (60s)
     alt chặng Xác thực, còn lượt retry
         Job->>OS: retryOrCompensate(orderId)
-        OS->>K: gửi lại reserve-stock.command (cùng correlationId)
+        OS->>OS: enqueue OutboxMessage (reserve-stock, cùng correlationId)
     else chặng Xác thực, hết lượt retry
         Job->>OS: retryOrCompensate(orderId)
         OS->>OS: compensate: Order -> OPEN
     else chặng Thanh toán, còn lượt retry
         Job->>OS: retryOrCompensate(orderId)
-        OS->>K: gửi lại commit-stock.command (cùng correlationId)
+        OS->>OS: enqueue OutboxMessage (commit-stock, cùng correlationId)
     else chặng Thanh toán, hết lượt retry
         Job->>OS: retryOrCompensate(orderId)
         OS->>OS: revert: Order -> CONFIRMED (vẫn giữ chỗ tồn kho)
@@ -478,8 +537,8 @@ sequenceDiagram
 
     Note over OS,IS: Hủy đơn đang CONFIRMED - trả lại chỗ đã giữ
     Customer->>OS: POST /api/orders/{id}/cancel
-    OS->>OS: Order -> CANCELLED
-    OS->>K: publish release-stock.command (fire-and-forget)
+    OS->>OS: Order -> CANCELLED<br/>enqueue OutboxMessage (release-stock) - trong cùng transaction
+    OP->>K: (bất đồng bộ, dùng chung loop OutboxPoller ở trên) publish release-stock.command
     K->>IS: deliver release-stock.command
     IS->>IS: enqueue InboxMessage (PENDING, correlationId)
     IS-->>K: ack
@@ -491,7 +550,26 @@ Cả 2 chặng đều xử lý 2 kiểu lỗi giống nhau:
 - **Có reply trả về, nhưng báo thất bại** — xử lý trực tiếp trong listener nhận reply: `onStockReservationReply` compensate chặng Xác thực về `OPEN`; `onStockCommitReply` revert chặng Thanh toán về `CONFIRMED` (chỗ giữ tồn kho vẫn hợp lệ — chỉ có bước commit thất bại, nên không cần xác thực lại, chỉ cần thử thanh toán lại).
 - **Không có reply nào trả về** (inventory-service bị down, message bị mất) — bản thân cơ chế request/reply không thể tự phát hiện trường hợp này. `OrderSagaReconciliationJob` giờ quét cả 2 chặng (`STOCK_RESERVATION_REQUESTED` và `PAYMENT_REQUESTED`) quá `stuck-threshold`, và `retryOrCompensate` rẽ nhánh theo đúng chặng đang kẹt: chặng Xác thực bỏ cuộc về `OPEN` (chưa từng giữ chỗ gì), chặng Thanh toán bỏ cuộc về `CONFIRMED` (vẫn giữ nguyên chỗ đã giữ — cùng logic như trường hợp reply báo lỗi ở trên).
 
-Retry lại ở chặng nào cũng an toàn vì mỗi lần đều publish lại với *cùng* `correlationId` của chặng đó (mỗi chặng có 1 correlationId mới riêng, sinh ra qua `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka key message theo `orderId`, nên mọi lần gửi đều rơi vào cùng 1 partition và được inventory-service xử lý tuần tự; bảng `inbox_messages` dùng `correlationId` làm khóa chính (chính là Transactional Inbox ở trên) — nên khi 1 correlationId đã `PROCESSED` bị gửi lại, nó chỉ nhận lại đúng reply đã lưu, thay vì hiệu ứng bị áp dụng 2 lần. Việc trả chỗ giữ khi hủy đơn `CONFIRMED` **cố tình không** được Reconciliation theo dõi — đây là fire-and-forget, không có reply để chờ, một khoảng trống được chấp nhận cho hiện tại.
+Retry lại ở chặng nào cũng an toàn vì mỗi lần đều đưa lại *cùng* `correlationId` của chặng đó vào outbox (mỗi chặng có 1 correlationId mới riêng, sinh ra qua `OrderSagaStateService.start`/`startPaymentAttempt`): Kafka key message theo `orderId`, nên mọi lần gửi đều rơi vào cùng 1 partition và được inventory-service xử lý tuần tự; bảng `inbox_messages` dùng `correlationId` làm khóa chính (chính là Transactional Inbox ở trên) — nên khi 1 correlationId đã `PROCESSED` bị gửi lại, nó chỉ nhận lại đúng reply đã lưu, thay vì hiệu ứng bị áp dụng 2 lần. Việc trả chỗ giữ khi hủy đơn `CONFIRMED` vẫn **cố tình không** được Reconciliation theo dõi — đây là fire-and-forget, không có reply để chờ. Transactional Outbox bên dưới đóng lại khoảng trống hẹp hơn là "lệnh release chưa từng được gửi vì process crash trước khi gọi Kafka trực tiếp" (giờ nó được đưa vào hàng đợi bền vững trong cùng transaction với việc hủy đơn), nhưng nó không thêm nhánh reply/compensation nào cho release cả — nếu inventory-service down đủ lâu để hết lượt retry riêng của nó (`app.outbox.max-attempts`), lệnh release đó sẽ bị đánh dấu `FAILED` và không ai thử lại nữa.
+
+### Trạng thái đơn hàng × trạng thái saga
+
+Hai state machine trên di chuyển song song nhưng không phải là một: `Order.status` là thứ POS UI polling và hiển thị; `OrderSagaState.step` là sổ sách điều phối nội bộ, API không bao giờ expose trực tiếp. Bảng dưới đây liệt kê mọi tổ hợp có thể đạt tới và điều gì kích hoạt từng chuyển trạng thái:
+
+| Message nhận vào (gây ra dòng này) | Order status | Saga step | Message publish ra (enqueue sau khi mark) | Kích hoạt bởi |
+|---|---|---|---|---|
+| — | `OPEN` | *(chưa có dòng saga)* | — | Đơn hàng được tạo |
+| — | `PENDING_CONFIRMATION` | `STARTED` → `STOCK_RESERVATION_REQUESTED` | `reserve-stock.command` | `POST /checkout` → `OrderCheckoutSaga.startCheckout`: 1 transaction chuyển đơn sang `PENDING_CONFIRMATION`, tạo dòng saga (correlationId mới), và enqueue message `RESERVE_STOCK` vào outbox |
+| `stock-reservation.reply` (success) | `CONFIRMED` | `CONFIRMED` | — | inventory-service trả reply thành công → `onStockReservationReply` → `markConfirmed` (cả order lẫn saga) |
+| `stock-reservation.reply` (failure) — hoặc không có message nào, khi do reconciliation timeout | `OPEN` (có `failureReason`) | `COMPENSATED` | — | inventory-service trả reply thất bại, **hoặc** `OrderSagaReconciliationJob` hết `max-retries` mà không có reply → `compensateToOpen` + `markCompensated` |
+| — | `PAYMENT_PENDING` | `PAYMENT_REQUESTED` | `commit-stock.command` | `POST /pay` → `startPayment`: đơn → `PAYMENT_PENDING`, cùng dòng saga được gán correlationId mới + reset retry count, enqueue message `COMMIT_STOCK` vào outbox — cùng kiểu 1-transaction như checkout |
+| `stock-commit.reply` (success) | `PAID` (có `closedAt`) | `COMPLETED` | `order.paid` | inventory-service trả reply thành công → `onStockCommitReply` → `markPaid` + `markCompleted`, đồng thời enqueue message `ORDER_PAID` vào outbox trong cùng transaction |
+| `stock-commit.reply` (failure) — hoặc không có message nào, khi do reconciliation timeout | `CONFIRMED` (có `failureReason`) | `CONFIRMED` | — | inventory-service trả reply thất bại, **hoặc** reconciliation hết lượt retry → `revertToConfirmed` + `markConfirmed` — chỗ giữ tồn kho vẫn nguyên, chỉ có lượt thanh toán được thử lại |
+| — | `CANCELLED` | *(dòng saga giữ nguyên)* | `release-stock.command` (fire-and-forget) | `POST /cancel` → `OrderCheckoutSaga.cancelOrder`, chỉ áp dụng từ `OPEN` hoặc `CONFIRMED` (chặn khi đang có 1 chặng saga đang chạy, chặn khi đã `PAID`); hủy từ `CONFIRMED` còn enqueue thêm message `RELEASE_STOCK` vào outbox trong cùng transaction, không có bước saga riêng nào cho việc này |
+
+"Message nhận vào" là reply Kafka mà saga đang đợi, chính là thứ gây ra chuyển trạng thái của dòng đó — để trống ở những dòng mà tác nhân kích hoạt là 1 lời gọi HTTP (`POST /checkout`, `/pay`, `/cancel`) hoặc do reconciliation timeout mà không có message nào cả. "Message publish ra" là thứ được enqueue vào outbox ngay khi thay đổi order/saga-state của dòng đó commit — đây là enqueue vào hàng đợi, không phải gửi thẳng: `OutboxPoller` mới là bên relay nó sang Kafka bất đồng bộ sau đó (xem Transactional Outbox bên dưới), nên sẽ có 1 khoảng trễ ngắn giữa lúc dòng này trở thành đúng và lúc message publish ra thực sự tới được Kafka.
+
+Hai điều đáng biết mà bảng trên không tự nói lên: `shouldIgnoreReply` (xem Idempotent Consumer bên dưới) coi `COMPLETED`, `COMPENSATED`, **và** step `CONFIRMED` là terminal/rảnh khi khớp reply — 1 reply tới trong bất kỳ trạng thái nào ở trên chắc chắn là gửi lại của 1 cái đã xử lý, vì thứ duy nhất có thể tạo ra reply mới lúc đang ở `CONFIRMED` (reply của commit-stock) chỉ được gửi sau khi `startPayment` đã chuyển step qua khỏi đó. Và `SagaStep` cũng khai báo thêm giá trị `COMPENSATING` mà hiện chưa có đoạn code nào gán tới — nó không nằm trong luồng chạy thật, chỉ đang được để dành cho 1 trạng thái compensation đang-chạy-dở nếu sau này cần tới.
 
 ## Luồng xác thực
 
@@ -523,7 +601,7 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 
 ### Độ tin cậy khi truyền message (Messaging reliability)
 
-Cả 4 pattern dưới đây đều bảo vệ cùng 1 luồng trao đổi qua Kafka (saga ở trên) trước cùng 2 rủi ro — Kafka gửi lại message (at-least-once) và "phía kia không bao giờ trả lời" — mỗi pattern giải quyết theo 1 cách khác nhau, bổ sung cho nhau:
+Cả 5 pattern dưới đây đều bảo vệ cùng 1 luồng trao đổi qua Kafka (saga ở trên) trước cùng 2 rủi ro — Kafka gửi lại message (at-least-once) và "phía kia không bao giờ trả lời" — mỗi pattern giải quyết theo 1 cách khác nhau, bổ sung cho nhau:
 
 - **Idempotent Consumer** — đảm bảo xử lý lại 1 message bị gửi trùng là an toàn, mà không làm sai lệch kết quả.
   - Các reply handler trong saga checkout của order-service (`OrderCheckoutSaga.onStockReservationReply`/`onStockCommitReply`) dùng `OrderSagaStateService.shouldIgnoreReply`: coi `COMPLETED`, `COMPENSATED`, và `CONFIRMED` là terminal cho attempt hiện tại của saga, cộng thêm check `correlationId` đã cũ (thuộc về 1 attempt đã bị 1 attempt mới thay thế).
@@ -532,9 +610,13 @@ Cả 4 pattern dưới đây đều bảo vệ cùng 1 luồng trao đổi qua K
 - **Transactional Inbox** — phiên bản đầy đủ, bất đồng bộ của Idempotent Consumer: tách việc *nhận* message khỏi việc *xử lý* nó, thay vì làm cả 2 ngay trong listener thread.
   - 3 method `@KafkaListener` của `StockReservationListener` chỉ lưu command nhận được vào bảng `inbox_messages` (status `PENDING`, khoá là `correlationId`) rồi ACK — không chạy business logic ngay bên trong.
   - Một worker chạy theo lịch riêng, `InboxPoller`, sẽ nhặt 1 batch dòng `PENDING` (`SELECT ... FOR UPDATE SKIP LOCKED`, an toàn khi có nhiều poller chạy đồng thời) và giao từng dòng cho `InboxMessageProcessor` — nơi thực sự chạy bước `reserve`/`commit`/`release` và đánh dấu dòng `PROCESSED` cùng lúc trong 1 transaction, rồi mới publish reply (chỉ reserve/commit — release thì không có reply).
-  - Vì sao đáng bỏ thêm công sức ở đây nhưng không cần bên order-service: reserve/commit tồn kho có khóa nhiều dòng ingredient cùng lúc và validate nhiều bước, chứ không đơn thuần là cập nhật 1 field trạng thái — đây là đối xứng ngược lại với relay của Transactional Outbox ở phía gửi.
+  - Vì sao cần 1 worker bất đồng bộ riêng thay vì chạy thẳng trên listener thread: reserve/commit tồn kho có khóa nhiều dòng ingredient cùng lúc và validate nhiều bước, không đủ an toàn hay đủ nhanh để chạy đồng bộ ngay trên consumer thread của Kafka — Transactional Outbox bên dưới cũng tách làm 2 phần tương tự (ghi bền vững, rồi 1 relay riêng), nhưng phần relay của nó nhẹ hơn nhiều (chỉ gửi lại payload đã lưu, không có business logic) — nên khác biệt ở đây nằm ở lượng việc làm *sau* bước ghi bền vững, chứ không phải có hay không có bước tách đó.
   - `correlationId` vẫn là khoá khử trùng lặp: 1 command bị gửi lại mà dòng tương ứng đã `PROCESSED` sẽ được gửi lại đúng reply đã lưu mà không chạy lại business logic (cần thiết để retry cùng correlationId của `OrderSagaReconciliationJob` vẫn được trả lời); còn dòng vẫn `PENDING`/`PROCESSING`/`FAILED` thì bị bỏ qua.
   - Lỗi kỹ thuật khiến transaction của lần thử đó rollback; dòng được đưa lại `PENDING` để thử tiếp (tới `app.inbox.max-attempts` lần), hoặc khi hết lượt thì chuyển `FAILED` vĩnh viễn — im lặng, có chủ đích (xem Reconciliation bên dưới để biết vì sao im lặng vẫn an toàn).
+- **Transactional Outbox** — đối xứng phía gửi của Transactional Inbox ở trên: biến "commit 1 thay đổi trạng thái" và "đảm bảo bền vững message phải theo sau nó" thành 1 hành động atomic, bằng cách ghi cả 2 vào cùng database trong cùng 1 transaction, thay vì commit thay đổi trạng thái rồi mới gọi Kafka trực tiếp ở 1 bước riêng.
+  - `OrderCheckoutSaga` của order-service ghi 1 dòng `OutboxMessage` (status `PENDING`) trong *cùng* transaction với mọi thay đổi order/saga-state cần 1 Kafka message theo sau nó — reserve, commit, release, và event `order.paid` cuối cùng. Trước khi có pattern này, đây là 2 transaction tách biệt (commit cục bộ, rồi gọi `KafkaTemplate.send()` trực tiếp); nếu crash ở giữa, saga có thể kẹt lại mà không có command nào từng được gửi, và `OrderSagaReconciliationJob` không phát hiện ra (nó chỉ quét các step do 1 command *đã gửi* tạo ra, không quét step `STARTED` trước khi gửi). `InboxMessageProcessor` của inventory-service cũng có cấu trúc y hệt cho 2 topic reply của nó, enqueue reply vào cùng transaction với thay đổi tồn kho + cập nhật status inbox mà nó đang trả lời.
+  - Một `OutboxPoller` chạy theo lịch riêng, 1 cái cho mỗi service, nhặt 1 batch dòng `PENDING` theo đúng kiểu `SELECT ... FOR UPDATE SKIP LOCKED` mà `InboxPoller` dùng, rồi giao từng dòng cho `OutboxMessagePublisher` — nơi gửi message đó và chờ (block) trên future gửi Kafka (`app.outbox.publish-timeout`) để dòng chỉ chuyển sang `PUBLISHED` khi broker đã thực sự ack — làm ít hơn thế sẽ mở lại đúng lỗ hổng dual-write mà pattern này sinh ra để đóng lại.
+  - Cùng kiểu retry/bỏ cuộc như Transactional Inbox: gửi thất bại thì quay lại `PENDING` để thử ở lượt quét sau (tới `app.outbox.max-attempts` lần), rồi mới `FAILED` vĩnh viễn. Dòng bị kẹt ở `PROCESSING` vì process crash sau khi broker đã ack nhưng trước khi commit là 1 khoảng trống được biết trước và chấp nhận, không được thu hồi lại — cùng đánh đổi mà `InboxPoller` đã chấp nhận ở phía nó.
 - **Reconciliation** — `OrderSagaReconciliationJob` quét các saga bị kẹt khi chờ reply ở **cả 2 chặng**, rồi retry hoặc compensate về đúng trạng thái đích tương ứng từng chặng (xem luồng nghiệp vụ bên trên). Đây là lưới an toàn cho tình huống "không có reply nào tới" — Idempotent Consumer và Transactional Inbox chỉ xử lý trường hợp reply *có* tới, dù đúng hẹn hay bị gửi lại.
 - **Dead Letter Queue** — inventory-service chuyển các message lỗi vì nguyên nhân *kỹ thuật* ở tầng nhận message từ Kafka (payload sai định dạng, bug, lỗi DB — không bao giờ tính trường hợp nghiệp vụ "hết hàng", vì đó là 1 reply bình thường, không phải exception) sang topic `.dlq` sau vài lần retry theo exponential backoff, thay vì để nó chặn cứng consumer (poison-pill message). Áp dụng đồng loạt cho cả 3 topic command của inventory (`reserve-stock`, `commit-stock`, `release-stock`) qua 1 bean xử lý lỗi dùng chung, không cấu hình riêng từng topic
 
@@ -592,6 +674,12 @@ Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement
 
 - **Gateway trả về 503 ngay sau khi restart 1 service** — load balancer của Spring Cloud Gateway giữ cache instance của service (phân giải qua Eureka) trong thời gian ngắn; cache này có thể bị stale vài giây sau khi restart. Thử lại sau ~5s trước khi kết luận là lỗi thật.
 - **Docker build cache chiếm hết dung lượng ổ đĩa** — build đi build lại nhiều lần (`docker compose build`) trong lúc dev để lại các layer image cũ, không tự dọn. Chạy `docker builder prune -f` định kỳ để giải phóng dung lượng, hoặc `docker system df` để xem cái gì đang chiếm chỗ.
-- **1 service không gọi được service khác (Eureka lookup treo hoặc trả 500) khi chạy 1 service bare từ IDE cùng lúc với phần còn lại đang chạy Docker** — `eureka.instance.hostname` của mỗi service mặc định là `host.docker.internal` thay vì IP tự nhận diện, vì trên Windows, IP tự nhận diện đó có thể rơi vào 1 virtual adapter (VPN/WSL/Hyper-V) mà container Docker không route tới được. `host.docker.internal` hoạt động theo cả 2 chiều — Docker Desktop "hairpin" cổng của chính container đó vòng qua host, nên cả container lẫn tiến trình chạy bare đều gọi được lẫn nhau qua đường này. Nếu mọi thứ đều chạy trong Docker (không có gì bare) thì có thể đăng ký thẳng bằng IP container cho đơn giản hơn (`docker-compose.yml` đã set `EUREKA_INSTANCE_PREFER_IP_ADDRESS=true` cho order-service).
+- **1 service không gọi được service khác (Eureka lookup treo hoặc trả 500) khi chạy 1 service bare từ IDE cùng lúc với phần còn lại đang chạy Docker** — `eureka.instance.hostname` của mỗi service mặc định là `host.docker.internal` thay vì IP tự nhận diện, vì trên Windows, IP tự nhận diện đó có thể rơi vào 1 virtual adapter (VPN/WSL/Hyper-V) mà container Docker không route tới được. `host.docker.internal` về nguyên lý hoạt động theo cả 2 chiều — Docker Desktop "hairpin" cổng của chính container đó vòng qua host, nên cả container lẫn tiến trình chạy bare đều gọi được lẫn nhau qua đường này. Nếu mọi thứ đều chạy trong Docker (không có gì bare) thì có thể đăng ký thẳng bằng IP container cho đơn giản hơn (`docker-compose.yml` đã set `EUREKA_INSTANCE_PREFER_IP_ADDRESS=true` cho order-service).
+
+  Nếu trước đó vẫn chạy bình thường mà tự nhiên hỏng — gọi `host.docker.internal` từ tiến trình chạy bare-host (vd order-service chạy từ Eclipse) bắt đầu bị timeout, trong khi không đổi gì khác — nguyên nhân thường gặp là Docker Desktop định kỳ **tự ghi đè** dòng `host.docker.internal` trong hosts file Windows (`C:\Windows\System32\drivers\etc\hosts`) thành IP LAN *hiện tại* của máy (đổi mỗi khi chuyển mạng hoặc restart Docker Desktop), và IP LAN đó thường không kết nối được vì lý do không liên quan gì tới Windows Firewall. Chỉ phía **container** cần cơ chế phân giải `host.docker.internal` riêng của Docker (Docker tự quản lý, không đọc hosts file Windows) — còn tiến trình chạy trên **host** (đọc đúng hosts file Windows thật) cần dòng đó trỏ về `127.0.0.1`, vì cổng publish của container luôn truy cập được qua đó bất kể máy đang ở mạng nào. Sửa bằng PowerShell **quyền Administrator**:
+  ```powershell
+  (Get-Content C:\Windows\System32\drivers\etc\hosts) -replace '^\S+(\s+host\.docker\.internal)$', '127.0.0.1$1' | Set-Content C:\Windows\System32\drivers\etc\hosts -Encoding ASCII
+  ```
+  Có thể cần làm lại lệnh này sau khi Docker Desktop restart hoặc đổi mạng — kiểm tra trước bằng `Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String host.docker.internal` nếu lỗi kết nối bare-host tái xuất hiện.
 
 </details>

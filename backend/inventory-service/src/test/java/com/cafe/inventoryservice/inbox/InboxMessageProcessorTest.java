@@ -3,17 +3,19 @@ package com.cafe.inventoryservice.inbox;
 import com.cafe.common.event.InventoryStockCommitReply;
 import com.cafe.common.event.InventoryStockReservationReply;
 import com.cafe.common.event.OrderLineItem;
+import com.cafe.inventoryservice.outbox.OutboxMessage;
+import com.cafe.inventoryservice.outbox.OutboxMessageRepository;
+import com.cafe.inventoryservice.outbox.OutboxMessageType;
+import com.cafe.inventoryservice.outbox.OutboxStatus;
 import com.cafe.inventoryservice.reservation.StockReservationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Pageable;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.support.KafkaHeaders;
-import org.springframework.messaging.Message;
 
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -38,7 +40,7 @@ class InboxMessageProcessorTest {
     @Mock
     private StockReservationService stockReservationService;
     @Mock
-    private KafkaTemplate<Object, Object> kafkaTemplate;
+    private OutboxMessageRepository outboxMessageRepository;
 
     private InboxMessageProcessor processor;
 
@@ -46,7 +48,7 @@ class InboxMessageProcessorTest {
     void setUp() {
         InboxProperties properties = new InboxProperties(java.time.Duration.ofMillis(500), 20, 3);
         processor = new InboxMessageProcessor(inboxMessageRepository, stockReservationService,
-                kafkaTemplate, new ObjectMapper(), properties);
+                outboxMessageRepository, new ObjectMapper(), properties);
     }
 
     private InboxMessage pendingMessage(InboxMessageType type) throws Exception {
@@ -81,7 +83,7 @@ class InboxMessageProcessorTest {
     }
 
     @Test
-    void processOne_reserveStock_marksProcessedAndPublishesReply() throws Exception {
+    void processOne_reserveStock_marksProcessedAndQueuesReplyInOutbox() throws Exception {
         InboxMessage message = pendingMessage(InboxMessageType.RESERVE_STOCK);
         when(inboxMessageRepository.findById(CORRELATION_ID)).thenReturn(Optional.of(message));
         when(stockReservationService.reserve(eq(ORDER_ID), any()))
@@ -93,36 +95,35 @@ class InboxMessageProcessorTest {
         assertThat(message.getResultSuccess()).isTrue();
         assertThat(message.getProcessedAt()).isNotNull();
 
-        @SuppressWarnings("unchecked")
-        var captor = org.mockito.ArgumentCaptor.forClass(Message.class);
-        verify(kafkaTemplate).send(captor.capture());
-        assertThat(captor.getValue().getHeaders().get(KafkaHeaders.TOPIC))
-                .isEqualTo(InboxMessageProcessor.RESERVATION_REPLY_TOPIC);
-        assertThat(captor.getValue().getHeaders().get(KafkaHeaders.CORRELATION_ID)).isEqualTo(CORRELATION_ID);
+        ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
+        verify(outboxMessageRepository).save(captor.capture());
+        OutboxMessage queued = captor.getValue();
+        assertThat(queued.getOrderId()).isEqualTo(ORDER_ID);
+        assertThat(queued.getMessageType()).isEqualTo(OutboxMessageType.RESERVATION_REPLY);
+        assertThat(queued.getCorrelationId()).isEqualTo(CORRELATION_ID);
+        assertThat(queued.getStatus()).isEqualTo(OutboxStatus.PENDING);
     }
 
     @Test
-    void processOne_commitStock_marksProcessedAndPublishesReply() throws Exception {
+    void processOne_commitStock_marksProcessedAndQueuesReplyInOutbox() throws Exception {
         InboxMessage message = pendingMessage(InboxMessageType.COMMIT_STOCK);
         when(inboxMessageRepository.findById(CORRELATION_ID)).thenReturn(Optional.of(message));
         when(stockReservationService.commit(eq(ORDER_ID), any()))
-                .thenReturn(InventoryStockCommitReply.failure(ORDER_ID, "boom"));
+                .thenReturn(InventoryStockCommitReply.success(ORDER_ID));
 
         processor.processOne(CORRELATION_ID);
 
         assertThat(message.getStatus()).isEqualTo(InboxStatus.PROCESSED);
-        assertThat(message.getResultSuccess()).isFalse();
-        assertThat(message.getResultReason()).isEqualTo("boom");
+        assertThat(message.getResultSuccess()).isTrue();
+        assertThat(message.getResultReason()).isNull();
 
-        @SuppressWarnings("unchecked")
-        var captor = org.mockito.ArgumentCaptor.forClass(Message.class);
-        verify(kafkaTemplate).send(captor.capture());
-        assertThat(captor.getValue().getHeaders().get(KafkaHeaders.TOPIC))
-                .isEqualTo(InboxMessageProcessor.COMMIT_REPLY_TOPIC);
+        ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
+        verify(outboxMessageRepository).save(captor.capture());
+        assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.COMMIT_REPLY);
     }
 
     @Test
-    void processOne_releaseStock_marksProcessedWithoutPublishingReply() throws Exception {
+    void processOne_releaseStock_marksProcessedWithoutQueuingReply() throws Exception {
         InboxMessage message = pendingMessage(InboxMessageType.RELEASE_STOCK);
         when(inboxMessageRepository.findById(CORRELATION_ID)).thenReturn(Optional.of(message));
 
@@ -130,7 +131,7 @@ class InboxMessageProcessorTest {
 
         assertThat(message.getStatus()).isEqualTo(InboxStatus.PROCESSED);
         assertThat(message.getResultSuccess()).isTrue();
-        verify(kafkaTemplate, never()).send(any(Message.class));
+        verify(outboxMessageRepository, never()).save(any(OutboxMessage.class));
     }
 
     @Test
