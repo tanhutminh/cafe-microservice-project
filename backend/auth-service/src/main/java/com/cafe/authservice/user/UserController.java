@@ -9,6 +9,7 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -44,7 +45,7 @@ public class UserController {
 
     @PatchMapping("/{id}/status")
     @Operation(summary = "Activate or deactivate a staff account (a deactivated user can't log in)")
-    public UserResponse updateStatus(@Parameter(description = "The user's id", example = "3") @PathVariable Long id, @Valid @RequestBody UpdateUserStatusRequest request) {
+    public UserResponse updateStatus(@Parameter(description = "The user's id", example = "3") @PathVariable @Positive Long id, @Valid @RequestBody UpdateUserStatusRequest request) {
         User user = userService.setActive(id, request.active());
         return UserResponse.from(user);
     }

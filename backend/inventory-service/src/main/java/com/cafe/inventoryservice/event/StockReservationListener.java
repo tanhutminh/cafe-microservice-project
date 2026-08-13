@@ -11,6 +11,8 @@ import com.cafe.inventoryservice.inbox.InboxMessageRepository;
 import com.cafe.inventoryservice.inbox.InboxMessageType;
 import com.cafe.inventoryservice.inbox.InboxStatus;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -31,6 +33,15 @@ import org.springframework.transaction.annotation.Transactional;
  * processed, this is a no-op; if it was already PROCESSED, the stored reply is resent here so a
  * lost-reply retry (see OrderCheckoutSaga.retryOrCompensate, which redelivers with the same
  * correlationId) still gets answered without re-running business logic.
+ *
+ * {@link #validate} rejects a structurally invalid command (null orderId, null/empty items,
+ * a non-positive quantity - see the Bean Validation annotations on the command records
+ * themselves) before it's ever enqueued into {@code inbox_messages}, the same way {@code @Valid}
+ * guards a REST controller's {@code @RequestBody} - so InboxMessageProcessor's later,
+ * asynchronous processing never has to handle invalid data. A thrown
+ * {@link ConstraintViolationException} propagates out of the listener method like any other
+ * exception, routing to the DLQ via KafkaErrorHandlingConfig exactly like a deserialization
+ * failure would.
  */
 @Component
 public class StockReservationListener {
@@ -40,19 +51,23 @@ public class StockReservationListener {
     private final InboxMessageRepository inboxMessageRepository;
     private final ObjectMapper objectMapper;
     private final KafkaTemplate<Object, Object> kafkaTemplate;
+    private final Validator validator;
 
     public StockReservationListener(InboxMessageRepository inboxMessageRepository,
                                      ObjectMapper objectMapper,
-                                     KafkaTemplate<Object, Object> kafkaTemplate) {
+                                     KafkaTemplate<Object, Object> kafkaTemplate,
+                                     Validator validator) {
         this.inboxMessageRepository = inboxMessageRepository;
         this.objectMapper = objectMapper;
         this.kafkaTemplate = kafkaTemplate;
+        this.validator = validator;
     }
 
     @KafkaListener(topics = "inventory.reserve-stock.command")
     @Transactional
     public void onReserveStockCommand(InventoryReserveStockCommand command,
                                        @Header(KafkaHeaders.CORRELATION_ID) String correlationId) {
+        validate(command);
         var existing = inboxMessageRepository.findById(correlationId);
         if (existing.isPresent()) {
             resendReplyIfProcessed(existing.get(), InboxMessageProcessor.RESERVATION_REPLY_TOPIC,
@@ -70,6 +85,7 @@ public class StockReservationListener {
     @Transactional
     public void onCommitStockCommand(InventoryCommitStockCommand command,
                                       @Header(KafkaHeaders.CORRELATION_ID) String correlationId) {
+        validate(command);
         var existing = inboxMessageRepository.findById(correlationId);
         if (existing.isPresent()) {
             resendReplyIfProcessed(existing.get(), InboxMessageProcessor.COMMIT_REPLY_TOPIC,
@@ -87,12 +103,20 @@ public class StockReservationListener {
     @Transactional
     public void onReleaseStockCommand(InventoryReleaseStockCommand command,
                                        @Header(KafkaHeaders.CORRELATION_ID) String correlationId) {
+        validate(command);
         if (inboxMessageRepository.existsById(correlationId)) {
             return;
         }
 
         enqueue(correlationId, command.orderId(), InboxMessageType.RELEASE_STOCK, command.items());
         log.info("Inbox: queued release-stock command for order {} correlation {}", command.orderId(), correlationId);
+    }
+
+    private void validate(Object command) {
+        var violations = validator.validate(command);
+        if (!violations.isEmpty()) {
+            throw new ConstraintViolationException(violations);
+        }
     }
 
     private void enqueue(String correlationId, Long orderId, InboxMessageType type, Object items) {

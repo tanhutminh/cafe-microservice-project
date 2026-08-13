@@ -1,5 +1,10 @@
 package com.cafe.common.event;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+
 import java.util.List;
 
 /**
@@ -12,6 +17,10 @@ import java.util.List;
  * header (KafkaHeaders.CORRELATION_ID — the Correlation Identifier pattern), not as a
  * payload field — it's message envelope metadata, not business data, so it stays out of
  * this record. See com.cafe.orderservice.saga.OrderCheckoutSaga for how it's set.
+ *
+ * Validated at the Kafka consumption boundary (see StockReservationListener), not here at
+ * construction — these annotations declare the constraint, an explicit Validator.validate()
+ * call at the point of use enforces it, same two-step shape as every REST DTO's @Valid.
  */
-public record InventoryReserveStockCommand(Long orderId, List<OrderLineItem> items) {
+public record InventoryReserveStockCommand(@NotNull @Positive Long orderId, @NotEmpty @Valid List<OrderLineItem> items) {
 }

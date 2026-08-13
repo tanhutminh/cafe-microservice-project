@@ -10,6 +10,8 @@ import com.cafe.inventoryservice.inbox.InboxMessageRepository;
 import com.cafe.inventoryservice.inbox.InboxMessageType;
 import com.cafe.inventoryservice.inbox.InboxStatus;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Validation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,10 +24,12 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.messaging.Message;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -46,7 +50,8 @@ class StockReservationListenerTest {
 
     @BeforeEach
     void setUp() {
-        listener = new StockReservationListener(inboxMessageRepository, new ObjectMapper(), kafkaTemplate);
+        listener = new StockReservationListener(inboxMessageRepository, new ObjectMapper(), kafkaTemplate,
+                Validation.buildDefaultValidatorFactory().getValidator());
     }
 
     private InventoryReserveStockCommand reserveCommand() {
@@ -76,6 +81,17 @@ class StockReservationListenerTest {
         assertThat(saved.getStatus()).isEqualTo(InboxStatus.PENDING);
         assertThat(saved.getPayload()).contains("\"menuItemId\":1");
         verify(kafkaTemplate, never()).send(any(Message.class));
+    }
+
+    @Test
+    void onReserveStockCommand_invalidPayload_rejectedBeforeEnqueue() {
+        InventoryReserveStockCommand invalid = new InventoryReserveStockCommand(ORDER_ID, Collections.emptyList());
+
+        assertThatThrownBy(() -> listener.onReserveStockCommand(invalid, CORRELATION_ID))
+                .isInstanceOf(ConstraintViolationException.class);
+
+        verify(inboxMessageRepository, never()).findById(any());
+        verify(inboxMessageRepository, never()).save(any());
     }
 
     @Test

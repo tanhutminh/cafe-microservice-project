@@ -7,6 +7,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -26,7 +27,7 @@ public class MenuItemController {
     @GetMapping
     @Operation(summary = "Search menu items, optionally filtered by category and/or availability")
     public List<MenuItemResponse> search(
-            @Parameter(description = "Only return items in this category", example = "1") @RequestParam(required = false) Long categoryId,
+            @Parameter(description = "Only return items in this category", example = "1") @RequestParam(required = false) @Positive Long categoryId,
             @Parameter(description = "Only return items with this availability", example = "true") @RequestParam(required = false) Boolean available
     ) {
         return menuItemService.search(categoryId, available).stream().map(MenuItemResponse::from).toList();
@@ -34,7 +35,7 @@ public class MenuItemController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get a single menu item by id")
-    public MenuItemResponse findById(@Parameter(description = "The menu item's id", example = "12") @PathVariable Long id) {
+    public MenuItemResponse findById(@Parameter(description = "The menu item's id", example = "12") @PathVariable @Positive Long id) {
         return MenuItemResponse.from(menuItemService.findById(id));
     }
 
@@ -47,7 +48,7 @@ public class MenuItemController {
 
     @PutMapping("/{id}")
     @Operation(summary = "Update a menu item (ADMIN only)")
-    public MenuItemResponse update(@Parameter(description = "The menu item's id", example = "12") @PathVariable Long id, @Valid @RequestBody MenuItemRequest request) {
+    public MenuItemResponse update(@Parameter(description = "The menu item's id", example = "12") @PathVariable @Positive Long id, @Valid @RequestBody MenuItemRequest request) {
         return MenuItemResponse.from(menuItemService.update(id, request));
     }
 
@@ -59,7 +60,7 @@ public class MenuItemController {
                     + "of an ingredient mid-shift and the counter needs to stop taking orders for it "
                     + "right away, without losing the item's menu entry, price, or recipe."
     )
-    public MenuItemResponse updateAvailability(@Parameter(description = "The menu item's id", example = "12") @PathVariable Long id, @Valid @RequestBody UpdateAvailabilityRequest request) {
+    public MenuItemResponse updateAvailability(@Parameter(description = "The menu item's id", example = "12") @PathVariable @Positive Long id, @Valid @RequestBody UpdateAvailabilityRequest request) {
         return MenuItemResponse.from(menuItemService.updateAvailability(id, request.available()));
     }
 }

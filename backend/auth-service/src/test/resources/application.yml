@@ -1,0 +1,15 @@
+# Shadows src/main/resources/application.yml for tests (Maven puts target/test-classes ahead
+# of target/classes on the test classpath) - auth-service's real application.yml has a required
+# (non-optional) "configserver:" import, which would otherwise fail any @WebMvcTest/@SpringBootTest
+# slice that doesn't have config-server running. Slice tests here don't need real datasource/JWT
+# config, only enough of the Spring context to exercise a single controller + SecurityConfig.
+spring:
+  config:
+    import: ""
+  cloud:
+    config:
+      # Spring Cloud Config's own safety net normally fails the app if spring.config.import
+      # doesn't mention "configserver:" (to catch someone forgetting it) - has to be disabled
+      # too, on top of clearing the import itself above, or it fails with the opposite error.
+      import-check:
+        enabled: false

@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -29,13 +30,13 @@ public class OrderController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get an order by id - also how the POS polls checkout progress until it settles to PAID or back to OPEN")
-    public OrderResponse getOrder(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
+    public OrderResponse getOrder(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id) {
         return OrderResponse.from(orderService.getOrder(id));
     }
 
     @GetMapping(params = "tableId")
     @Operation(summary = "Get the current order for a table (the one occupying it right now, excluding CANCELLED)")
-    public OrderResponse getCurrentOrderForTable(@Parameter(description = "The table's id", example = "3") @RequestParam Long tableId) {
+    public OrderResponse getCurrentOrderForTable(@Parameter(description = "The table's id", example = "3") @RequestParam @Positive Long tableId) {
         return OrderResponse.from(orderService.getCurrentOrderForTable(tableId));
     }
 
@@ -48,21 +49,21 @@ public class OrderController {
 
     @PostMapping("/{id}/items")
     @Operation(summary = "Add a line item - looks up the menu item's name/price via menu-service and snapshots it onto the order")
-    public OrderResponse addItem(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody AddOrderItemRequest request) {
+    public OrderResponse addItem(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id, @Valid @RequestBody AddOrderItemRequest request) {
         return OrderResponse.from(orderService.addItem(id, request.menuItemId(), request.quantity()));
     }
 
     @DeleteMapping("/{id}/items/{itemId}")
     @Operation(summary = "Remove a line item from an OPEN order")
-    public OrderResponse removeItem(@Parameter(description = "The order's id", example = "101") @PathVariable Long id,
-                                     @Parameter(description = "The order line item's id (not the menu item's id)", example = "42") @PathVariable Long itemId) {
+    public OrderResponse removeItem(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id,
+                                     @Parameter(description = "The order line item's id (not the menu item's id)", example = "42") @PathVariable @Positive Long itemId) {
         return OrderResponse.from(orderService.removeItem(id, itemId));
     }
 
     @PatchMapping("/{id}/items/{itemId}")
     @Operation(summary = "Set a line item's quantity on an OPEN order (min 1 - use DELETE to remove it entirely)")
-    public OrderResponse updateItemQuantity(@Parameter(description = "The order's id", example = "101") @PathVariable Long id,
-                                             @Parameter(description = "The order line item's id (not the menu item's id)", example = "42") @PathVariable Long itemId,
+    public OrderResponse updateItemQuantity(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id,
+                                             @Parameter(description = "The order line item's id (not the menu item's id)", example = "42") @PathVariable @Positive Long itemId,
                                              @Valid @RequestBody UpdateOrderItemQuantityRequest request) {
         return OrderResponse.from(orderService.updateItemQuantity(id, itemId, request.quantity()));
     }
@@ -73,13 +74,13 @@ public class OrderController {
             description = "Blocked while either saga leg is in flight (PENDING_CONFIRMATION / PAYMENT_PENDING). "
                     + "Cancelling a CONFIRMED order releases its stock hold back to inventory-service."
     )
-    public OrderResponse cancel(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
+    public OrderResponse cancel(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id) {
         return OrderResponse.from(orderCheckoutSaga.cancelOrder(id));
     }
 
     @PostMapping("/{id}/move")
     @Operation(summary = "Move an order to a different AVAILABLE table (blocked mid-checkout)")
-    public OrderResponse moveTable(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody MoveTableRequest request) {
+    public OrderResponse moveTable(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id, @Valid @RequestBody MoveTableRequest request) {
         return OrderResponse.from(orderService.moveTable(id, request.tableId()));
     }
 
@@ -95,7 +96,7 @@ public class OrderController {
                     + "for payment) or back to OPEN with failureReason set (e.g. an ingredient ran out - "
                     + "fix the order and try again)."
     )
-    public OrderResponse checkout(@Parameter(description = "The order's id", example = "101") @PathVariable Long id) {
+    public OrderResponse checkout(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id) {
         return OrderResponse.from(orderCheckoutSaga.startCheckout(id));
     }
 
@@ -109,7 +110,7 @@ public class OrderController {
                     + "published) or back to CONFIRMED with failureReason set - the stock hold is untouched, "
                     + "just retry payment."
     )
-    public OrderResponse pay(@Parameter(description = "The order's id", example = "101") @PathVariable Long id, @Valid @RequestBody PayRequest request) {
+    public OrderResponse pay(@Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id, @Valid @RequestBody PayRequest request) {
         return OrderResponse.from(orderCheckoutSaga.startPayment(id, request.paymentMethod()));
     }
 }

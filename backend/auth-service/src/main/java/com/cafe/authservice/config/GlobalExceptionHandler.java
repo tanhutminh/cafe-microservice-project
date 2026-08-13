@@ -9,9 +9,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.method.ParameterErrors;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.List;
@@ -41,6 +44,18 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.NOT_FOUND, "No resource found for this path", request);
     }
 
+    /**
+     * A path variable/query param that fails type conversion (e.g. a non-numeric id segment)
+     * never reaches @Positive validation - it fails during Spring's own argument resolution
+     * with this exception instead, which would otherwise fall through to the catch-all
+     * handleUnexpected below and misreport a client input error as a 500.
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiError> handleTypeMismatch(MethodArgumentTypeMismatchException e, HttpServletRequest request) {
+        String message = "Invalid value for '" + e.getName() + "': " + e.getValue();
+        return build(HttpStatus.BAD_REQUEST, message, request);
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException e, HttpServletRequest request) {
         List<ApiError.FieldViolation> violations = e.getBindingResult().getFieldErrors().stream()
@@ -48,6 +63,30 @@ public class GlobalExceptionHandler {
                 .toList();
         ApiError body = ApiError.of(HttpStatus.BAD_REQUEST.value(), "Validation Failed",
                 "Request body did not pass validation", request.getRequestURI(), violations);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+    }
+
+    /**
+     * @Positive/@Size etc. on a bare @PathVariable/@RequestParam fails with this, not
+     * MethodArgumentNotValidException - same ApiError shape as that handler either way. A
+     * handler method that mixes a directly-constrained parameter (e.g. @Positive Long id) with
+     * a @Valid @RequestBody one has *all* of its validation - including the body's - reported
+     * through this single exception instead of splitting across both handlers; a body violation
+     * shows up as a {@link ParameterErrors} result (implements Errors, so real nested field
+     * names are still available via getFieldErrors()), while a plain scalar violation is just
+     * the parameter's own name.
+     */
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public ResponseEntity<ApiError> handleMethodValidation(HandlerMethodValidationException e, HttpServletRequest request) {
+        List<ApiError.FieldViolation> violations = e.getParameterValidationResults().stream()
+                .flatMap(result -> result instanceof ParameterErrors bodyErrors
+                        ? bodyErrors.getFieldErrors().stream()
+                                .map(fe -> new ApiError.FieldViolation(fe.getField(), fe.getDefaultMessage()))
+                        : result.getResolvableErrors().stream()
+                                .map(err -> new ApiError.FieldViolation(result.getMethodParameter().getParameterName(), err.getDefaultMessage())))
+                .toList();
+        ApiError body = ApiError.of(HttpStatus.BAD_REQUEST.value(), "Validation Failed",
+                "Request did not pass validation", request.getRequestURI(), violations);
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
     }
 
