@@ -16,6 +16,8 @@ import com.cafe.orderservice.outbox.OutboxMessageType;
 import com.cafe.orderservice.outbox.OutboxStatus;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -64,15 +66,17 @@ public class OrderCheckoutSaga {
     private final OutboxMessageRepository outboxMessageRepository;
     private final ObjectMapper objectMapper;
     private final SagaReconciliationProperties reconciliationProperties;
+    private final Validator validator;
 
     public OrderCheckoutSaga(OrderService orderService, OrderSagaStateService sagaStateService,
                               OutboxMessageRepository outboxMessageRepository, ObjectMapper objectMapper,
-                              SagaReconciliationProperties reconciliationProperties) {
+                              SagaReconciliationProperties reconciliationProperties, Validator validator) {
         this.orderService = orderService;
         this.sagaStateService = sagaStateService;
         this.outboxMessageRepository = outboxMessageRepository;
         this.objectMapper = objectMapper;
         this.reconciliationProperties = reconciliationProperties;
+        this.validator = validator;
     }
 
     // ---- Verify leg ----
@@ -107,6 +111,7 @@ public class OrderCheckoutSaga {
     @Transactional
     public void onStockReservationReply(InventoryStockReservationReply reply,
                                          @Header(KafkaHeaders.CORRELATION_ID) String correlationId) {
+        validate(reply);
         if (sagaStateService.shouldIgnoreReply(reply.orderId(), correlationId)) {
             log.info("Checkout saga: ignoring stale/settled stock-reservation reply for order {}", reply.orderId());
             return;
@@ -149,6 +154,7 @@ public class OrderCheckoutSaga {
     @Transactional
     public void onStockCommitReply(InventoryStockCommitReply reply,
                                     @Header(KafkaHeaders.CORRELATION_ID) String correlationId) {
+        validate(reply);
         if (sagaStateService.shouldIgnoreReply(reply.orderId(), correlationId)) {
             log.info("Checkout saga: ignoring stale/settled stock-commit reply for order {}", reply.orderId());
             return;
@@ -258,6 +264,22 @@ public class OrderCheckoutSaga {
         OrderPaidEvent event = new OrderPaidEvent(
                 order.getId(), order.getTable().getId(), order.getClosedAt(), toLineItems(order), grandTotal, order.getPaymentMethod());
         enqueue(OutboxMessageType.ORDER_PAID, order, correlationId, event);
+    }
+
+    /**
+     * Rejects a structurally invalid reply (null orderId - see the command/reply records'
+     * Bean Validation annotations in common-lib) before it ever reaches {@code shouldIgnoreReply}
+     * (a null orderId would otherwise NPE/IllegalArgumentException out of the JPA lookup there).
+     * Same two-step shape as a REST controller's {@code @Valid}: annotations declare the
+     * constraint, this call enforces it. Thrown {@link ConstraintViolationException} propagates
+     * out of the listener method like any other exception, routing to the DLQ via
+     * KafkaErrorHandlingConfig exactly like a deserialization failure would.
+     */
+    private void validate(Object reply) {
+        var violations = validator.validate(reply);
+        if (!violations.isEmpty()) {
+            throw new ConstraintViolationException(violations);
+        }
     }
 
     private void enqueue(OutboxMessageType type, Order order, String correlationId, Object payload) {

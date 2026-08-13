@@ -1,5 +1,7 @@
 package com.cafe.orderservice.saga;
 
+import com.cafe.common.event.InventoryStockCommitReply;
+import com.cafe.common.event.InventoryStockReservationReply;
 import com.cafe.orderservice.order.Order;
 import com.cafe.orderservice.order.OrderItem;
 import com.cafe.orderservice.order.OrderService;
@@ -10,9 +12,15 @@ import com.cafe.orderservice.outbox.OutboxMessageType;
 import com.cafe.orderservice.outbox.OutboxStatus;
 import com.cafe.orderservice.table.DiningTable;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -22,8 +30,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -38,6 +51,8 @@ class OrderCheckoutSagaTest {
 
     private static final Long ORDER_ID = 42L;
     private static final String CORRELATION_ID = "corr-1";
+
+    private static final Validator VALIDATOR = Validation.buildDefaultValidatorFactory().getValidator();
 
     @Mock
     private OrderService orderService;
@@ -55,7 +70,7 @@ class OrderCheckoutSagaTest {
         // does for the real injected instance (registers JavaTimeModule for Instant fields like
         // OrderPaidEvent.closedAt) - a bare `new ObjectMapper()` doesn't have it.
         saga = new OrderCheckoutSaga(orderService, sagaStateService, outboxMessageRepository,
-                new ObjectMapper().findAndRegisterModules(), properties);
+                new ObjectMapper().findAndRegisterModules(), properties, VALIDATOR);
     }
 
     private Order order(OrderStatus status) {
@@ -113,7 +128,7 @@ class OrderCheckoutSagaTest {
     private OrderCheckoutSaga sagaWith(OrderSagaStateRepository sagaStateRepository) {
         SagaReconciliationProperties properties = new SagaReconciliationProperties(Duration.ofSeconds(60), 3);
         return new OrderCheckoutSaga(orderService, new OrderSagaStateService(sagaStateRepository),
-                outboxMessageRepository, new ObjectMapper().findAndRegisterModules(), properties);
+                outboxMessageRepository, new ObjectMapper().findAndRegisterModules(), properties, VALIDATOR);
     }
 
     @Test
@@ -126,19 +141,21 @@ class OrderCheckoutSagaTest {
 
         Order result = saga.startCheckout(ORDER_ID);
 
-        assertThat(result).isSameAs(pendingOrder);
         OrderSagaState state = sagaStateRepository.findById(ORDER_ID).orElseThrow();
-        assertThat(state.getStep()).isEqualTo(SagaStep.STOCK_RESERVATION_REQUESTED);
-        assertThat(state.getCorrelationId()).isNotBlank();
-
         ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
         verify(outboxMessageRepository).save(captor.capture());
         OutboxMessage queued = captor.getValue();
-        assertThat(queued.getOrderId()).isEqualTo(ORDER_ID);
-        assertThat(queued.getMessageType()).isEqualTo(OutboxMessageType.RESERVE_STOCK);
-        assertThat(queued.getCorrelationId()).isEqualTo(state.getCorrelationId());
-        assertThat(queued.getStatus()).isEqualTo(OutboxStatus.PENDING);
-        assertThat(queued.getPayload()).contains("\"orderId\":42");
+
+        assertAll(
+                () -> assertThat(result).isSameAs(pendingOrder),
+                () -> assertThat(state.getStep()).isEqualTo(SagaStep.STOCK_RESERVATION_REQUESTED),
+                () -> assertThat(state.getCorrelationId()).isNotBlank(),
+                () -> assertThat(queued.getOrderId()).isEqualTo(ORDER_ID),
+                () -> assertThat(queued.getMessageType()).isEqualTo(OutboxMessageType.RESERVE_STOCK),
+                () -> assertThat(queued.getCorrelationId()).isEqualTo(state.getCorrelationId()),
+                () -> assertThat(queued.getStatus()).isEqualTo(OutboxStatus.PENDING),
+                () -> assertThat(queued.getPayload()).contains("\"orderId\":42")
+        );
     }
 
     @Test
@@ -154,42 +171,46 @@ class OrderCheckoutSagaTest {
 
         saga.startPayment(ORDER_ID, "CASH");
 
-        assertThat(existing.getStep()).isEqualTo(SagaStep.PAYMENT_REQUESTED);
-        assertThat(existing.getCorrelationId()).isNotEqualTo("corr-verify");
-        assertThat(existing.getRetryCount()).isZero();
-
         ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
         verify(outboxMessageRepository).save(captor.capture());
-        assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.COMMIT_STOCK);
-        assertThat(captor.getValue().getCorrelationId()).isEqualTo(existing.getCorrelationId());
+
+        assertAll(
+                () -> assertThat(existing.getStep()).isEqualTo(SagaStep.PAYMENT_REQUESTED),
+                () -> assertThat(existing.getCorrelationId()).isNotEqualTo("corr-verify"),
+                () -> assertThat(existing.getRetryCount()).isZero(),
+                () -> assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.COMMIT_STOCK),
+                () -> assertThat(captor.getValue().getCorrelationId()).isEqualTo(existing.getCorrelationId())
+        );
     }
 
-    @Test
-    void cancelOrder_queuesReleaseWhenPreviouslyConfirmed() {
-        Order confirmed = order(OrderStatus.CONFIRMED);
+    private static Stream<Arguments> cancelOrderScenarios() {
+        return Stream.of(
+                Arguments.of("previouslyConfirmed_queuesRelease", OrderStatus.CONFIRMED, true),
+                Arguments.of("previouslyOpen_doesNotQueueRelease", OrderStatus.OPEN, false)
+        );
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("cancelOrderScenarios")
+    void cancelOrder_queuesReleaseOnlyWhenPreviouslyConfirmed(String caseName, OrderStatus initialStatus, boolean expectRelease) {
+        Order initial = order(initialStatus);
         Order cancelled = order(OrderStatus.CANCELLED);
-        when(orderService.getOrder(ORDER_ID)).thenReturn(confirmed);
+        when(orderService.getOrder(ORDER_ID)).thenReturn(initial);
         when(orderService.cancel(ORDER_ID)).thenReturn(cancelled);
 
         Order result = saga.cancelOrder(ORDER_ID);
 
         assertThat(result).isSameAs(cancelled);
-        ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
-        verify(outboxMessageRepository).save(captor.capture());
-        assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.RELEASE_STOCK);
-        assertThat(captor.getValue().getOrderId()).isEqualTo(ORDER_ID);
-    }
-
-    @Test
-    void cancelOrder_doesNotQueueReleaseWhenNotPreviouslyConfirmed() {
-        Order open = order(OrderStatus.OPEN);
-        Order cancelled = order(OrderStatus.CANCELLED);
-        when(orderService.getOrder(ORDER_ID)).thenReturn(open);
-        when(orderService.cancel(ORDER_ID)).thenReturn(cancelled);
-
-        saga.cancelOrder(ORDER_ID);
-
-        verify(outboxMessageRepository, never()).save(any(OutboxMessage.class));
+        if (expectRelease) {
+            ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
+            verify(outboxMessageRepository).save(captor.capture());
+            assertAll(
+                    () -> assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.RELEASE_STOCK),
+                    () -> assertThat(captor.getValue().getOrderId()).isEqualTo(ORDER_ID)
+            );
+        } else {
+            verify(outboxMessageRepository, never()).save(any(OutboxMessage.class));
+        }
     }
 
     @Test
@@ -201,11 +222,45 @@ class OrderCheckoutSagaTest {
         OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(state);
         OrderCheckoutSaga saga = sagaWith(sagaStateRepository);
 
-        saga.onStockReservationReply(
-                com.cafe.common.event.InventoryStockReservationReply.success(ORDER_ID), CORRELATION_ID);
+        saga.onStockReservationReply(InventoryStockReservationReply.success(ORDER_ID), CORRELATION_ID);
 
         verify(orderService).markConfirmed(ORDER_ID);
         assertThat(state.getStep()).isEqualTo(SagaStep.CONFIRMED);
+    }
+
+    /**
+     * Both onStockReservationReply and onStockCommitReply call the same private validate()
+     * before touching any saga/order state, and both reply records share the identical
+     * @NotNull @Positive orderId constraint - one parameterized suite over (handler, invalid
+     * payload) pairs covers both entry points and both constraints instead of testing only one
+     * handler/one constraint and leaving the other three combinations unverified.
+     */
+    private static Stream<Arguments> invalidReplyPayloads() {
+        return Stream.of(
+                Arguments.of("onStockReservationReply_nullOrderId",
+                        (Consumer<OrderCheckoutSaga>) s -> s.onStockReservationReply(
+                                new InventoryStockReservationReply(null, true, null), CORRELATION_ID)),
+                Arguments.of("onStockReservationReply_negativeOrderId",
+                        (Consumer<OrderCheckoutSaga>) s -> s.onStockReservationReply(
+                                new InventoryStockReservationReply(-1L, true, null), CORRELATION_ID)),
+                Arguments.of("onStockCommitReply_nullOrderId",
+                        (Consumer<OrderCheckoutSaga>) s -> s.onStockCommitReply(
+                                new InventoryStockCommitReply(null, true, null), CORRELATION_ID)),
+                Arguments.of("onStockCommitReply_negativeOrderId",
+                        (Consumer<OrderCheckoutSaga>) s -> s.onStockCommitReply(
+                                new InventoryStockCommitReply(-1L, true, null), CORRELATION_ID))
+        );
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidReplyPayloads")
+    void invalidReplyPayload_rejectedBeforeTouchingSagaState(String caseName, Consumer<OrderCheckoutSaga> invoker) {
+        assertThatThrownBy(() -> invoker.accept(saga))
+                .isInstanceOf(ConstraintViolationException.class);
+
+        verify(sagaStateService, never()).shouldIgnoreReply(any(), any());
+        verify(orderService, never()).markConfirmed(anyLong());
+        verify(orderService, never()).markPaid(anyLong());
     }
 
     @Test
@@ -214,8 +269,7 @@ class OrderCheckoutSagaTest {
         OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(state);
         OrderCheckoutSaga saga = sagaWith(sagaStateRepository);
 
-        saga.onStockReservationReply(
-                com.cafe.common.event.InventoryStockReservationReply.failure(ORDER_ID, "out of stock"), CORRELATION_ID);
+        saga.onStockReservationReply(InventoryStockReservationReply.failure(ORDER_ID, "out of stock"), CORRELATION_ID);
 
         verify(orderService).compensateToOpen(ORDER_ID, "out of stock");
         assertThat(state.getStep()).isEqualTo(SagaStep.COMPENSATED);
@@ -229,7 +283,7 @@ class OrderCheckoutSagaTest {
         OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(state);
         OrderCheckoutSaga saga = sagaWith(sagaStateRepository);
 
-        saga.onStockReservationReply(com.cafe.common.event.InventoryStockReservationReply.success(ORDER_ID), CORRELATION_ID);
+        saga.onStockReservationReply(InventoryStockReservationReply.success(ORDER_ID), CORRELATION_ID);
 
         verify(orderService, never()).markConfirmed(anyLong());
         assertThat(state.getStep()).isEqualTo(SagaStep.CONFIRMED);
@@ -245,13 +299,16 @@ class OrderCheckoutSagaTest {
         OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(state);
         OrderCheckoutSaga saga = sagaWith(sagaStateRepository);
 
-        saga.onStockCommitReply(com.cafe.common.event.InventoryStockCommitReply.success(ORDER_ID), CORRELATION_ID);
+        saga.onStockCommitReply(InventoryStockCommitReply.success(ORDER_ID), CORRELATION_ID);
 
-        assertThat(state.getStep()).isEqualTo(SagaStep.COMPLETED);
         ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
         verify(outboxMessageRepository).save(captor.capture());
-        assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.ORDER_PAID);
-        assertThat(captor.getValue().getCorrelationId()).isEqualTo(CORRELATION_ID);
+
+        assertAll(
+                () -> assertThat(state.getStep()).isEqualTo(SagaStep.COMPLETED),
+                () -> assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.ORDER_PAID),
+                () -> assertThat(captor.getValue().getCorrelationId()).isEqualTo(CORRELATION_ID)
+        );
     }
 
     @Test
@@ -260,7 +317,7 @@ class OrderCheckoutSagaTest {
         OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(state);
         OrderCheckoutSaga saga = sagaWith(sagaStateRepository);
 
-        saga.onStockCommitReply(com.cafe.common.event.InventoryStockCommitReply.failure(ORDER_ID, "payment declined"), CORRELATION_ID);
+        saga.onStockCommitReply(InventoryStockCommitReply.failure(ORDER_ID, "payment declined"), CORRELATION_ID);
 
         verify(orderService).revertToConfirmed(ORDER_ID, "payment declined");
         assertThat(state.getStep()).isEqualTo(SagaStep.CONFIRMED);
@@ -276,37 +333,46 @@ class OrderCheckoutSagaTest {
 
         saga.retryOrCompensate(ORDER_ID);
 
-        assertThat(state.getRetryCount()).isEqualTo(2);
         ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
         verify(outboxMessageRepository).save(captor.capture());
-        assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.RESERVE_STOCK);
-        assertThat(captor.getValue().getCorrelationId()).isEqualTo(CORRELATION_ID);
         verify(orderService, never()).compensateToOpen(anyLong(), any());
+
+        assertAll(
+                () -> assertThat(state.getRetryCount()).isEqualTo(2),
+                () -> assertThat(captor.getValue().getMessageType()).isEqualTo(OutboxMessageType.RESERVE_STOCK),
+                () -> assertThat(captor.getValue().getCorrelationId()).isEqualTo(CORRELATION_ID)
+        );
     }
 
-    @Test
-    void retryOrCompensate_atMaxRetries_compensatesReservationLegToOpen() {
-        OrderSagaState state = sagaState(SagaStep.STOCK_RESERVATION_REQUESTED, CORRELATION_ID, 3);
+    /**
+     * Both legs share the same "give up after maxRetries" shape but compensate to different
+     * targets (see retryOrCompensate's Javadoc for why) - one parameterized suite over
+     * (initialStep, expected service call, expected final step) covers both instead of
+     * duplicating the whole arrange/act block per leg.
+     */
+    private static Stream<Arguments> atMaxRetriesLegs() {
+        return Stream.of(
+                Arguments.of("reservationLeg_compensatesToOpen", SagaStep.STOCK_RESERVATION_REQUESTED,
+                        (BiConsumer<OrderService, Long>) (svc, id) -> verify(svc).compensateToOpen(eq(id), any()),
+                        SagaStep.COMPENSATED),
+                Arguments.of("paymentLeg_revertsToConfirmed", SagaStep.PAYMENT_REQUESTED,
+                        (BiConsumer<OrderService, Long>) (svc, id) -> verify(svc).revertToConfirmed(eq(id), any()),
+                        SagaStep.CONFIRMED)
+        );
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("atMaxRetriesLegs")
+    void retryOrCompensate_atMaxRetries_compensatesAppropriateLeg(
+            String caseName, SagaStep initialStep, BiConsumer<OrderService, Long> verifyServiceCall, SagaStep expectedFinalStep) {
+        OrderSagaState state = sagaState(initialStep, CORRELATION_ID, 3);
         OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(state);
         OrderCheckoutSaga saga = sagaWith(sagaStateRepository);
 
         saga.retryOrCompensate(ORDER_ID);
 
-        verify(orderService).compensateToOpen(eq(ORDER_ID), any());
-        assertThat(state.getStep()).isEqualTo(SagaStep.COMPENSATED);
-        verify(outboxMessageRepository, never()).save(any(OutboxMessage.class));
-    }
-
-    @Test
-    void retryOrCompensate_atMaxRetries_revertsPaymentLegToConfirmed() {
-        OrderSagaState state = sagaState(SagaStep.PAYMENT_REQUESTED, CORRELATION_ID, 3);
-        OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(state);
-        OrderCheckoutSaga saga = sagaWith(sagaStateRepository);
-
-        saga.retryOrCompensate(ORDER_ID);
-
-        verify(orderService).revertToConfirmed(eq(ORDER_ID), any());
-        assertThat(state.getStep()).isEqualTo(SagaStep.CONFIRMED);
+        verifyServiceCall.accept(orderService, ORDER_ID);
+        assertThat(state.getStep()).isEqualTo(expectedFinalStep);
     }
 
     @Test

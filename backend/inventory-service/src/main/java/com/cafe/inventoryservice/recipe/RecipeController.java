@@ -6,6 +6,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -23,7 +25,7 @@ public class RecipeController {
 
     @GetMapping
     @Operation(summary = "Get a menu item's recipe (empty list if it has none - such items are always treated as in-stock)")
-    public List<RecipeItemResponse> findByMenuItemId(@Parameter(description = "The menu item's id (owned by menu-service - just an application-level reference here)", example = "12") @PathVariable Long menuItemId) {
+    public List<RecipeItemResponse> findByMenuItemId(@Parameter(description = "The menu item's id (owned by menu-service - just an application-level reference here)", example = "12") @PathVariable @Positive Long menuItemId) {
         return recipeService.findByMenuItemId(menuItemId).stream().map(RecipeItemResponse::from).toList();
     }
 
@@ -35,8 +37,8 @@ public class RecipeController {
                     + "request body is deleted. Sending an empty list clears the recipe entirely, "
                     + "making the item always-in-stock again."
     )
-    public List<RecipeItemResponse> replace(@Parameter(description = "The menu item's id (owned by menu-service - just an application-level reference here)", example = "12") @PathVariable Long menuItemId,
-                                             @Valid @RequestBody List<@Valid RecipeItemRequest> lines) {
+    public List<RecipeItemResponse> replace(@Parameter(description = "The menu item's id (owned by menu-service - just an application-level reference here)", example = "12") @PathVariable @Positive Long menuItemId,
+                                             @Valid @RequestBody @Size(max = 50) List<@Valid RecipeItemRequest> lines) {
         return recipeService.replace(menuItemId, lines).stream().map(RecipeItemResponse::from).toList();
     }
 }

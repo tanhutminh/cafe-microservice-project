@@ -1,5 +1,8 @@
 package com.cafe.common.event;
 
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+
 /**
  * Reply published by inventory-service on Kafka topic "inventory.stock-reservation.reply",
  * key = orderId. On success == false, order-service (the saga orchestrator) compensates
@@ -13,7 +16,7 @@ package com.cafe.common.event;
  * header, not a field here, since it's envelope metadata rather than business data
  * (Correlation Identifier pattern).
  */
-public record InventoryStockReservationReply(Long orderId, boolean success, String reason) {
+public record InventoryStockReservationReply(@NotNull @Positive Long orderId, boolean success, String reason) {
 
     public static InventoryStockReservationReply success(Long orderId) {
         return new InventoryStockReservationReply(orderId, true, null);
