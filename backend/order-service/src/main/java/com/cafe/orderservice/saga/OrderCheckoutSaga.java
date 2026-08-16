@@ -16,6 +16,9 @@ import com.cafe.orderservice.outbox.OutboxMessageType;
 import com.cafe.orderservice.outbox.OutboxStatus;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.propagation.Propagator;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Validator;
 import org.slf4j.Logger;
@@ -27,7 +30,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -67,16 +72,21 @@ public class OrderCheckoutSaga {
     private final ObjectMapper objectMapper;
     private final SagaReconciliationProperties reconciliationProperties;
     private final Validator validator;
+    private final Tracer tracer;
+    private final Propagator propagator;
 
     public OrderCheckoutSaga(OrderService orderService, OrderSagaStateService sagaStateService,
                               OutboxMessageRepository outboxMessageRepository, ObjectMapper objectMapper,
-                              SagaReconciliationProperties reconciliationProperties, Validator validator) {
+                              SagaReconciliationProperties reconciliationProperties, Validator validator,
+                              Tracer tracer, Propagator propagator) {
         this.orderService = orderService;
         this.sagaStateService = sagaStateService;
         this.outboxMessageRepository = outboxMessageRepository;
         this.objectMapper = objectMapper;
         this.reconciliationProperties = reconciliationProperties;
         this.validator = validator;
+        this.tracer = tracer;
+        this.propagator = propagator;
     }
 
     // ---- Verify leg ----
@@ -290,8 +300,26 @@ public class OrderCheckoutSaga {
                 .payload(serialize(payload))
                 .status(OutboxStatus.PENDING)
                 .attemptCount(0)
+                .traceparent(captureTraceParent())
                 .build();
         outboxMessageRepository.save(message);
+    }
+
+    /**
+     * Captures the current W3C traceparent string so {@link com.cafe.orderservice.outbox.OutboxMessagePublisher}
+     * can restore it into a child span on the poller thread, which has no live trace context of
+     * its own - see that class's Javadoc for the full distributed-tracing picture. Null when
+     * there's no live span (e.g. a scheduler-thread caller like OrderSagaReconciliationJob);
+     * publishOne() then just starts a fresh root span instead of erroring.
+     */
+    private String captureTraceParent() {
+        Span current = tracer.currentSpan();
+        if (current == null) {
+            return null;
+        }
+        Map<String, String> carrier = new HashMap<>();
+        propagator.inject(current.context(), carrier, Map::put);
+        return carrier.get("traceparent");
     }
 
     private String serialize(Object payload) {

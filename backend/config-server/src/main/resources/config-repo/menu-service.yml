@@ -1,0 +1,6 @@
+# Served by config-server to the client named "menu-service" (spring.application.name).
+management:
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project. Lower this for a real deployment.
+      probability: 1.0

@@ -11,6 +11,9 @@ import com.cafe.inventoryservice.reservation.StockReservationService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.propagation.Propagator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
@@ -19,7 +22,9 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.stream.Collectors;
 
@@ -38,6 +43,13 @@ import java.util.stream.Collectors;
  * stock mutation + status transition above, instead of calling KafkaTemplate directly, closing
  * the dual-write gap where a crash after commit but before the send would silently lose a reply
  * order-service is waiting on.
+ *
+ * <p>Distributed tracing: this runs on the poller's own thread, disconnected from the Kafka
+ * consumer thread that received the command and persisted the {@link InboxMessage} row.
+ * {@link #processOne} restores the {@code traceparent} string captured at receipt time into a
+ * child span and keeps it current for the whole method body, so {@link #publishReply}'s own
+ * capture records *this* span - not the original inbound one - onto the outgoing
+ * {@link OutboxMessage}, closing the loop back to order-service.
  */
 @Service
 public class InboxMessageProcessor {
@@ -54,17 +66,23 @@ public class InboxMessageProcessor {
     private final OutboxMessageRepository outboxMessageRepository;
     private final ObjectMapper objectMapper;
     private final InboxProperties properties;
+    private final Tracer tracer;
+    private final Propagator propagator;
 
     public InboxMessageProcessor(InboxMessageRepository inboxMessageRepository,
                                   StockReservationService stockReservationService,
                                   OutboxMessageRepository outboxMessageRepository,
                                   ObjectMapper objectMapper,
-                                  InboxProperties properties) {
+                                  InboxProperties properties,
+                                  Tracer tracer,
+                                  Propagator propagator) {
         this.inboxMessageRepository = inboxMessageRepository;
         this.stockReservationService = stockReservationService;
         this.outboxMessageRepository = outboxMessageRepository;
         this.objectMapper = objectMapper;
         this.properties = properties;
+        this.tracer = tracer;
+        this.propagator = propagator;
     }
 
     @Transactional
@@ -81,29 +99,63 @@ public class InboxMessageProcessor {
         InboxMessage message = inboxMessageRepository.findById(correlationId)
                 .orElseThrow(() -> new NoSuchElementException("Inbox message not found: " + correlationId));
 
-        List<OrderLineItem> items = deserializeItems(message.getPayload());
+        Span span = startChildSpan("inbox-process", message.getTraceparent())
+                .tag("inbox.correlation.id", correlationId)
+                .tag("inbox.message.type", message.getMessageType().name())
+                .start();
 
-        switch (message.getMessageType()) {
-            case RESERVE_STOCK -> {
-                InventoryStockReservationReply reply =
-                        stockReservationService.reserve(message.getOrderId(), items);
-                markProcessed(message, reply.success(), reply.reason());
-                publishReply(OutboxMessageType.RESERVATION_REPLY, message.getOrderId(), correlationId, reply);
+        try (Tracer.SpanInScope ignored = tracer.withSpan(span)) {
+            List<OrderLineItem> items = deserializeItems(message.getPayload());
+
+            switch (message.getMessageType()) {
+                case RESERVE_STOCK -> {
+                    InventoryStockReservationReply reply =
+                            stockReservationService.reserve(message.getOrderId(), items);
+                    markProcessed(message, reply.success(), reply.reason());
+                    publishReply(OutboxMessageType.RESERVATION_REPLY, message.getOrderId(), correlationId, reply);
+                }
+                case COMMIT_STOCK -> {
+                    InventoryStockCommitReply reply =
+                            stockReservationService.commit(message.getOrderId(), items);
+                    markProcessed(message, reply.success(), reply.reason());
+                    publishReply(OutboxMessageType.COMMIT_REPLY, message.getOrderId(), correlationId, reply);
+                }
+                case RELEASE_STOCK -> {
+                    stockReservationService.release(message.getOrderId(), items);
+                    markProcessed(message, true, null);
+                }
             }
-            case COMMIT_STOCK -> {
-                InventoryStockCommitReply reply =
-                        stockReservationService.commit(message.getOrderId(), items);
-                markProcessed(message, reply.success(), reply.reason());
-                publishReply(OutboxMessageType.COMMIT_REPLY, message.getOrderId(), correlationId, reply);
-            }
-            case RELEASE_STOCK -> {
-                stockReservationService.release(message.getOrderId(), items);
-                markProcessed(message, true, null);
-            }
+        } catch (RuntimeException e) {
+            span.error(e);
+            throw e;
+        } finally {
+            span.end();
         }
 
         log.info("Inbox processed: order {} correlation {} type {}",
                 message.getOrderId(), correlationId, message.getMessageType());
+    }
+
+    /** Restores a stored traceparent into a new child span, or starts a fresh root span when
+     *  there wasn't one to restore. */
+    private Span.Builder startChildSpan(String name, String traceparent) {
+        if (traceparent == null) {
+            return tracer.spanBuilder().name(name);
+        }
+        return propagator.extract(Map.of("traceparent", traceparent), Map::get).name(name);
+    }
+
+    /** Captures the current W3C traceparent (the inbox-process span above, while it's in scope)
+     *  so {@link com.cafe.inventoryservice.outbox.OutboxMessagePublisher} can restore it into a
+     *  child span on its own poller thread - see this class's Javadoc for the full picture. */
+    private String captureTraceParent() {
+        Span current = tracer.currentSpan();
+        if (current == null) {
+            return null;
+        }
+        Map<String, String> carrier = new HashMap<>();
+        propagator.inject(current.context(), carrier, Map::put);
+        return carrier.get("traceparent");
     }
 
     /**
@@ -138,6 +190,7 @@ public class InboxMessageProcessor {
                 .payload(serialize(reply))
                 .status(OutboxStatus.PENDING)
                 .attemptCount(0)
+                .traceparent(captureTraceParent())
                 .build();
         outboxMessageRepository.save(outboxMessage);
     }

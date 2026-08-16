@@ -59,6 +59,12 @@ public class InboxMessage {
     @Column(name = "error_reason", length = 500)
     private String errorReason;
 
+    /** W3C traceparent string captured from the live Kafka consumer span when this row was
+     *  persisted, restored into a child span by {@link InboxMessageProcessor} - see the
+     *  distributed tracing docs on that class. Null when there was no live span to capture. */
+    @Column(length = 64)
+    private String traceparent;
+
     @Column(name = "received_at", nullable = false)
     private Instant receivedAt;
 
