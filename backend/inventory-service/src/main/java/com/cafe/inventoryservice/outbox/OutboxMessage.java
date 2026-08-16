@@ -57,6 +57,12 @@ public class OutboxMessage {
     @Column(name = "error_reason", length = 500)
     private String errorReason;
 
+    /** W3C traceparent string captured at enqueue time, restored into a child span by
+     *  {@link OutboxMessagePublisher} - see the distributed tracing docs on that class. Null
+     *  when there was no live span to capture. */
+    @Column(length = 64)
+    private String traceparent;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

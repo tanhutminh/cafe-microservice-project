@@ -1,4 +1,24 @@
 # Served by config-server to the client named "inventory-service" (spring.application.name).
+management:
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project, and 100% sampling is what makes
+      # the outbox/inbox round trip through Kafka reliably show up in Zipkin. Lower this for
+      # a real deployment.
+      probability: 1.0
+
+spring:
+  kafka:
+    template:
+      # Lets KafkaTemplate.send() auto-inject the current span's traceparent onto outgoing
+      # record headers - the mechanism the manual outbox/inbox span-bridging code relies on.
+      observation-enabled: true
+    listener:
+      # Lets @KafkaListener auto-extract the parent span from an inbound record's traceparent
+      # header, giving StockReservationListener a live span to capture into each new
+      # InboxMessage row.
+      observation-enabled: true
+
 app:
   inbox:
     # How often InboxPoller sweeps for PENDING messages to claim and process.

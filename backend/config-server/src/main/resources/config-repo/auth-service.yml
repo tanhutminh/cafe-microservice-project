@@ -1,4 +1,10 @@
 # Served by config-server to the client named "auth-service" (spring.application.name).
+management:
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project. Lower this for a real deployment.
+      probability: 1.0
+
 # DEV-ONLY key material: this RSA keypair (see gateway.yml for the matching public key)
 # is committed for local-dev convenience only. A real deployment must inject the private
 # key via a secrets manager / env-var-backed profile, never commit it.

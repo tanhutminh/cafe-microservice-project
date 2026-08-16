@@ -1,4 +1,24 @@
 # Served by config-server to the client named "order-service" (spring.application.name).
+management:
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project, and 100% sampling is what makes
+      # the outbox/inbox round trip through Kafka reliably show up in Zipkin. Lower this for
+      # a real deployment.
+      probability: 1.0
+
+spring:
+  kafka:
+    template:
+      # Lets KafkaTemplate.send() auto-inject the current span's traceparent onto outgoing
+      # record headers - the mechanism the manual outbox/inbox span-bridging code relies on.
+      observation-enabled: true
+    listener:
+      # Lets @KafkaListener auto-extract the parent span from an inbound record's traceparent
+      # header - what gives OrderCheckoutSaga's reply listeners full trace continuity for free,
+      # since they run business logic inline (no Inbox pattern on this side).
+      observation-enabled: true
+
 app:
   saga-reconciliation:
     # How long a saga can sit at STOCK_RESERVATION_REQUESTED with no reply before the

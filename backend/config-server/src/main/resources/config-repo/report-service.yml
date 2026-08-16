@@ -1,0 +1,17 @@
+# Served by config-server to the client named "report-service" (spring.application.name).
+management:
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project. Lower this for a real deployment.
+      probability: 1.0
+
+spring:
+  kafka:
+    template:
+      # report-service has the spring-kafka dependency and a bootstrap-servers connection
+      # wired (docker-compose) but no @KafkaListener/KafkaTemplate usage yet - this is a no-op
+      # today, set proactively so tracing is consistent the moment it starts consuming
+      # order.paid (its evident purpose, given the name and the wiring already in place).
+      observation-enabled: true
+    listener:
+      observation-enabled: true

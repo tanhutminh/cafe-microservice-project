@@ -12,6 +12,10 @@ import com.cafe.orderservice.outbox.OutboxMessageType;
 import com.cafe.orderservice.outbox.OutboxStatus;
 import com.cafe.orderservice.table.DiningTable;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.TraceContext;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.propagation.Propagator;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -28,6 +32,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
@@ -40,6 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -70,7 +76,7 @@ class OrderCheckoutSagaTest {
         // does for the real injected instance (registers JavaTimeModule for Instant fields like
         // OrderPaidEvent.closedAt) - a bare `new ObjectMapper()` doesn't have it.
         saga = new OrderCheckoutSaga(orderService, sagaStateService, outboxMessageRepository,
-                new ObjectMapper().findAndRegisterModules(), properties, VALIDATOR);
+                new ObjectMapper().findAndRegisterModules(), properties, VALIDATOR, Tracer.NOOP, Propagator.NOOP);
     }
 
     private Order order(OrderStatus status) {
@@ -128,7 +134,8 @@ class OrderCheckoutSagaTest {
     private OrderCheckoutSaga sagaWith(OrderSagaStateRepository sagaStateRepository) {
         SagaReconciliationProperties properties = new SagaReconciliationProperties(Duration.ofSeconds(60), 3);
         return new OrderCheckoutSaga(orderService, new OrderSagaStateService(sagaStateRepository),
-                outboxMessageRepository, new ObjectMapper().findAndRegisterModules(), properties, VALIDATOR);
+                outboxMessageRepository, new ObjectMapper().findAndRegisterModules(), properties, VALIDATOR,
+                Tracer.NOOP, Propagator.NOOP);
     }
 
     @Test
@@ -156,6 +163,43 @@ class OrderCheckoutSagaTest {
                 () -> assertThat(queued.getStatus()).isEqualTo(OutboxStatus.PENDING),
                 () -> assertThat(queued.getPayload()).contains("\"orderId\":42")
         );
+    }
+
+    /**
+     * Distributed tracing: proves enqueue() (via startCheckout -> publishReservationCommand)
+     * actually captures the live current span into the persisted row's traceparent, through
+     * Propagator.inject - rather than just not crashing, which is all the Tracer.NOOP-based tests
+     * elsewhere in this class prove (NOOP's currentSpan() returns null, so captureTraceParent()
+     * harmlessly stores a null traceparent there).
+     */
+    @Test
+    void startCheckout_capturesLiveSpanTraceparentOntoEnqueuedMessage() {
+        String traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        Tracer mockTracer = mock(Tracer.class);
+        Propagator mockPropagator = mock(Propagator.class);
+        Span currentSpan = mock(Span.class);
+        TraceContext context = mock(TraceContext.class);
+        when(mockTracer.currentSpan()).thenReturn(currentSpan);
+        when(currentSpan.context()).thenReturn(context);
+        doAnswer(invocation -> {
+            Map<String, String> carrier = invocation.getArgument(1);
+            Propagator.Setter<Map<String, String>> setter = invocation.getArgument(2);
+            setter.set(carrier, "traceparent", traceparent);
+            return null;
+        }).when(mockPropagator).inject(eq(context), any(), any());
+
+        Order pendingOrder = order(OrderStatus.PENDING_CONFIRMATION);
+        when(orderService.checkout(ORDER_ID)).thenReturn(pendingOrder);
+
+        SagaReconciliationProperties properties = new SagaReconciliationProperties(Duration.ofSeconds(60), 3);
+        OrderCheckoutSaga tracedSaga = new OrderCheckoutSaga(orderService, sagaStateService, outboxMessageRepository,
+                new ObjectMapper().findAndRegisterModules(), properties, VALIDATOR, mockTracer, mockPropagator);
+
+        tracedSaga.startCheckout(ORDER_ID);
+
+        ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
+        verify(outboxMessageRepository).save(captor.capture());
+        assertThat(captor.getValue().getTraceparent()).isEqualTo(traceparent);
     }
 
     @Test

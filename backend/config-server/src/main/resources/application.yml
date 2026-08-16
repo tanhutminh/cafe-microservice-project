@@ -17,3 +17,9 @@ management:
     web:
       exposure:
         include: health,info
+  # config-server can't consume its own config-repo output (no spring.config.import), so its
+  # tracing config lives here directly instead of a config-repo/config-server.yml file - the
+  # one deliberate exception to this project's usual "operational tunable -> config-repo" split.
+  tracing:
+    sampling:
+      probability: 1.0

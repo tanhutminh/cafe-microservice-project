@@ -11,6 +11,9 @@ import com.cafe.inventoryservice.inbox.InboxMessageRepository;
 import com.cafe.inventoryservice.inbox.InboxMessageType;
 import com.cafe.inventoryservice.inbox.InboxStatus;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.propagation.Propagator;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Validator;
 import org.slf4j.Logger;
@@ -23,6 +26,9 @@ import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * The Transactional Inbox pattern's receive side. Each listener method only persists the
@@ -52,15 +58,21 @@ public class StockReservationListener {
     private final ObjectMapper objectMapper;
     private final KafkaTemplate<Object, Object> kafkaTemplate;
     private final Validator validator;
+    private final Tracer tracer;
+    private final Propagator propagator;
 
     public StockReservationListener(InboxMessageRepository inboxMessageRepository,
                                      ObjectMapper objectMapper,
                                      KafkaTemplate<Object, Object> kafkaTemplate,
-                                     Validator validator) {
+                                     Validator validator,
+                                     Tracer tracer,
+                                     Propagator propagator) {
         this.inboxMessageRepository = inboxMessageRepository;
         this.objectMapper = objectMapper;
         this.kafkaTemplate = kafkaTemplate;
         this.validator = validator;
+        this.tracer = tracer;
+        this.propagator = propagator;
     }
 
     @KafkaListener(topics = "inventory.reserve-stock.command")
@@ -134,7 +146,25 @@ public class StockReservationListener {
                 .payload(payload)
                 .status(InboxStatus.PENDING)
                 .attemptCount(0)
+                .traceparent(captureTraceParent())
                 .build());
+    }
+
+    /**
+     * Captures the current W3C traceparent string so {@link com.cafe.inventoryservice.inbox.InboxMessageProcessor}
+     * can restore it into a child span on the poller thread, which has no live trace context of
+     * its own. Live here because {@code spring.kafka.listener.observation-enabled=true} makes
+     * Spring Kafka auto-extract the parent span from the inbound record's own traceparent header
+     * before this listener method runs. Null when there's no live span to capture.
+     */
+    private String captureTraceParent() {
+        Span current = tracer.currentSpan();
+        if (current == null) {
+            return null;
+        }
+        Map<String, String> carrier = new HashMap<>();
+        propagator.inject(current.context(), carrier, Map::put);
+        return carrier.get("traceparent");
     }
 
     private void resendReplyIfProcessed(InboxMessage message, String topic, ReplyFactory replyFactory) {
