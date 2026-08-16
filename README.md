@@ -334,7 +334,27 @@ cd backend
 mvn -pl inventory-service -am test
 ```
 
-Modules that opt into the `jacoco-maven-plugin` (declared once in the parent `pom.xml`'s `pluginManagement`; so far only `inventory-service` activates it) write a drill-down HTML coverage report on every `mvn test` run, at `<module>/target/site/jacoco/index.html` — e.g. `backend/inventory-service/target/site/jacoco/index.html`. It's a plain static file, not served by anything: open it as a `file://` URL, e.g. `file:///<path-to-repo>/backend/inventory-service/target/site/jacoco/index.html` (substitute your own absolute repo path), or just double-click the file. You'll see coverage per package, then per class, then per line (same drill-down shape as the frontend's report; uncovered lines are highlighted red). To check a different module once it opts in, swap the `-pl` module name and the path accordingly. Backend test coverage is being built out module by module rather than all at once; check the codebase for current status instead of treating this README as the tracker.
+Modules that opt into the `jacoco-maven-plugin` (declared once in the parent `pom.xml`'s `pluginManagement`; `common-lib`, `auth-service`, `menu-service`, `order-service`, and `inventory-service` activate it so far) write a drill-down HTML coverage report on every `mvn test` run, at `<module>/target/site/jacoco/index.html` — e.g. `backend/inventory-service/target/site/jacoco/index.html`. It's a plain static file, not served by anything: open it as a `file://` URL, e.g. `file:///<path-to-repo>/backend/inventory-service/target/site/jacoco/index.html` (substitute your own absolute repo path), or just double-click the file. You'll see coverage per package, then per class, then per line (same drill-down shape as the frontend's report; uncovered lines are highlighted red). To check a different module once it opts in, swap the `-pl` module name and the path accordingly. Backend test coverage is being built out module by module rather than all at once; check the codebase for current status instead of treating this README as the tracker.
+
+## Code formatting
+
+Backend uses [Spotless](https://github.com/diffplug/spotless) with Google Java Format, declared once (as an active plugin, not just `pluginManagement`) in the parent `backend/pom.xml` — every module inherits it automatically, no per-module opt-in needed:
+
+```bash
+cd backend
+mvn spotless:check   # fails if a changed file isn't formatted correctly
+mvn spotless:apply   # rewrites files in place to fix it
+```
+
+Frontend uses [Prettier](https://prettier.io/), configured via `frontend/.prettierrc`:
+
+```bash
+cd frontend
+npm run format:check
+npm run format
+```
+
+Both checks run automatically in a `pre-commit` git hook (`.git/hooks/pre-commit` — not tracked by git, since hooks live outside version control; copy it manually into a fresh clone) that blocks a commit if staged code fails formatting. Spotless's `ratchetFrom` setting means only files that differ from `origin/master` are checked, so the pre-existing codebase keeps whatever formatting it already had until a file is touched again — there's no one-time "reformat everything" commit to wade through.
 
 ## Troubleshooting
 
@@ -682,7 +702,27 @@ cd backend
 mvn -pl inventory-service -am test
 ```
 
-Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement` của `pom.xml` gốc; hiện chỉ `inventory-service` kích hoạt) sẽ ghi ra báo cáo coverage dạng HTML drill-down sau mỗi lần `mvn test`, tại `<module>/target/site/jacoco/index.html` — ví dụ `backend/inventory-service/target/site/jacoco/index.html`. Đây chỉ là file tĩnh, không có server nào phục vụ cả: mở dạng URL `file://`, ví dụ `file:///<đường-dẫn-repo>/backend/inventory-service/target/site/jacoco/index.html` (thay bằng đường dẫn tuyệt đối repo của bạn), hoặc double-click file đó cũng được. Bạn sẽ thấy coverage theo từng package, rồi từng class, rồi từng dòng code (cùng kiểu drill-down như báo cáo bên frontend; dòng chưa được test sẽ tô đỏ). Muốn xem module khác khi module đó bật jacoco, chỉ cần đổi tên module ở `-pl` và đường dẫn tương ứng. Coverage backend đang được xây dần từng module một chứ chưa phủ hết cùng lúc; xem trực tiếp codebase để biết tình trạng hiện tại thay vì coi README này là nơi theo dõi.
+Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement` của `pom.xml` gốc; hiện `common-lib`, `auth-service`, `menu-service`, `order-service`, và `inventory-service` đã kích hoạt) sẽ ghi ra báo cáo coverage dạng HTML drill-down sau mỗi lần `mvn test`, tại `<module>/target/site/jacoco/index.html` — ví dụ `backend/inventory-service/target/site/jacoco/index.html`. Đây chỉ là file tĩnh, không có server nào phục vụ cả: mở dạng URL `file://`, ví dụ `file:///<đường-dẫn-repo>/backend/inventory-service/target/site/jacoco/index.html` (thay bằng đường dẫn tuyệt đối repo của bạn), hoặc double-click file đó cũng được. Bạn sẽ thấy coverage theo từng package, rồi từng class, rồi từng dòng code (cùng kiểu drill-down như báo cáo bên frontend; dòng chưa được test sẽ tô đỏ). Muốn xem module khác khi module đó bật jacoco, chỉ cần đổi tên module ở `-pl` và đường dẫn tương ứng. Coverage backend đang được xây dần từng module một chứ chưa phủ hết cùng lúc; xem trực tiếp codebase để biết tình trạng hiện tại thay vì coi README này là nơi theo dõi.
+
+## Định dạng code (Code formatting)
+
+Backend dùng [Spotless](https://github.com/diffplug/spotless) với Google Java Format, khai báo 1 lần (dạng plugin chủ động, không chỉ `pluginManagement`) ở `backend/pom.xml` gốc — mọi module con tự động kế thừa, không cần opt-in riêng từng module:
+
+```bash
+cd backend
+mvn spotless:check   # báo lỗi nếu file đã sửa chưa đúng định dạng
+mvn spotless:apply   # tự viết lại file cho đúng định dạng
+```
+
+Frontend dùng [Prettier](https://prettier.io/), cấu hình tại `frontend/.prettierrc`:
+
+```bash
+cd frontend
+npm run format:check
+npm run format
+```
+
+Cả 2 được tự động enforce qua git hook `pre-commit` (`.git/hooks/pre-commit` — không được git track vì hook nằm ngoài version control; cần copy thủ công khi clone máy mới) — chặn commit nếu code đã stage chưa đúng định dạng. Cấu hình `ratchetFrom` của Spotless nghĩa là chỉ những file khác biệt so với `origin/master` mới bị kiểm tra — code cũ giữ nguyên định dạng ban đầu cho tới khi có ai đó động vào lại, không có 1 commit "format lại toàn bộ" nào phải lướt qua.
 
 ## Xử lý sự cố thường gặp
 
