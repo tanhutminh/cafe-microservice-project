@@ -15,7 +15,7 @@ spring:
       observation-enabled: true
     listener:
       # Lets @KafkaListener auto-extract the parent span from an inbound record's traceparent
-      # header - what gives OrderCheckoutSaga's reply listeners full trace continuity for free,
+      # header - what gives OrderSaga's reply listeners full trace continuity for free,
       # since they run business logic inline (no Inbox pattern on this side).
       observation-enabled: true
 
