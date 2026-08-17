@@ -1,5 +1,5 @@
 -- Transactional Outbox pattern: the send-side mirror of inventory-service's Transactional
--- Inbox (see inventory-service's V6__transactional_inbox.sql). OrderCheckoutSaga writes a row
+-- Inbox (see inventory-service's V6__transactional_inbox.sql). OrderSaga writes a row
 -- here in the same transaction as the order/saga-state change it belongs to, instead of calling
 -- KafkaTemplate directly - closing the dual-write gap where a crash between the local commit and
 -- the live Kafka send could leave a saga stuck with no command ever sent, undetected by
