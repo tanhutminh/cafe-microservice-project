@@ -25,6 +25,8 @@
     <resilience4j.version>2.3.0</resilience4j.version>
     <springdoc.version>2.8.6</springdoc.version>
     <jacoco.version>0.8.12</jacoco.version>
+    <spotless.version>2.44.3</spotless.version>
+    <google-java-format.version>1.25.2</google-java-format.version>
   </properties>
 
   <modules>
@@ -169,5 +171,28 @@
         </plugin>
       </plugins>
     </pluginManagement>
+    <!-- Active (not just managed) so every module inherits it automatically with no
+         per-module opt-in - unlike jacoco above, a formatter should apply uniformly to all
+         Java code, not be selectively enabled. `mvn spotless:check` (read-only, what the
+         pre-commit hook runs) / `mvn spotless:apply` (rewrites files in place). -->
+    <plugins>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>${spotless.version}</version>
+        <configuration>
+          <!-- Only enforces format on files that differ from master - the pre-existing
+               codebase keeps its current formatting until a file is touched again, instead
+               of one big reformat-everything diff burying real changes in noise. -->
+          <ratchetFrom>origin/master</ratchetFrom>
+          <java>
+            <googleJavaFormat>
+              <version>${google-java-format.version}</version>
+              <style>GOOGLE</style>
+            </googleJavaFormat>
+          </java>
+        </configuration>
+      </plugin>
+    </plugins>
   </build>
 </project>
