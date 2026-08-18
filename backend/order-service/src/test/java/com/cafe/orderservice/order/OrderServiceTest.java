@@ -28,11 +28,11 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 /**
- * Unit coverage for OrderService's own logic - previously only exercised indirectly through
- * OrderControllerTest's MockMvc slice, which doesn't reach branch-level coverage (e.g. every
- * OrderStatus value against a guard). Mirrors OrderSagaTest's plain-Mockito style rather
- * than @DataJpaTest, since nothing here needs a real database - OrderRepository is a thin
- * pass-through.
+ * Unit coverage for OrderService's own logic. OrderControllerTest's MockMvc slice stubs
+ * OrderService out entirely (@MockitoBean), so none of its branches ever execute there (e.g. every
+ * OrderStatus value against a guard) - this class is where that coverage actually lives. Mirrors
+ * OrderSagaTest's plain-Mockito style rather than @DataJpaTest, since nothing here needs a real
+ * database - OrderRepository is a thin pass-through.
  */
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTest {

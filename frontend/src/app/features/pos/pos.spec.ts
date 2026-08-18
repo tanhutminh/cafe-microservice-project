@@ -258,5 +258,200 @@ describe('Pos', () => {
       expect(orderApi.createOrder).not.toHaveBeenCalled();
       expect(orderApi.checkout).not.toHaveBeenCalled();
     });
+
+    it('stops the spinner when the request errors', () => {
+      orderApi.createOrder.mockReturnValue(throwError(() => new Error('fail')));
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+
+      component.confirm();
+
+      expect(component.checkingOut()).toBe(false);
+    });
+  });
+
+  describe('confirmEnabled() length mismatch', () => {
+    it('is true when the draft has a different number of items than the current order', () => {
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+
+      component.draftItems.set([
+        { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
+        { menuItemId: 9, name: 'Mocha', price: 50000, quantity: 1 },
+      ]);
+
+      expect(component.confirmEnabled()).toBe(true);
+    });
+  });
+
+  describe('startMoveTable() / cancelMoveTable()', () => {
+    it('toggles movingTable on and off', () => {
+      const component = createComponent();
+
+      component.startMoveTable();
+      expect(component.movingTable()).toBe(true);
+
+      component.cancelMoveTable();
+      expect(component.movingTable()).toBe(false);
+    });
+  });
+
+  describe('selectTable() while moving an order', () => {
+    it('moves the current order to an AVAILABLE table and exits move mode', () => {
+      const movedOrder: Order = { ...openOrder, tableId: 5, tableNumber: 'T5' };
+      orderApi.moveTable.mockReturnValue(of(movedOrder));
+      const availableTarget: DiningTable = { ...availableTable, id: 5, tableNumber: 'T5' };
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+      component.movingTable.set(true);
+
+      component.selectTable(availableTarget);
+
+      expect(orderApi.moveTable).toHaveBeenCalledWith(101, { tableId: 5 });
+      expect(component.currentOrder()).toEqual(movedOrder);
+      expect(component.movingTable()).toBe(false);
+    });
+
+    it('does nothing when the move target is OCCUPIED', () => {
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+      component.movingTable.set(true);
+
+      component.selectTable(occupiedTable);
+
+      expect(orderApi.moveTable).not.toHaveBeenCalled();
+    });
+
+    it('exits move mode without calling the API when there is no current order', () => {
+      const component = createComponent();
+      component.movingTable.set(true);
+
+      component.selectTable(availableTable);
+
+      expect(orderApi.moveTable).not.toHaveBeenCalled();
+      expect(component.movingTable()).toBe(false);
+    });
+  });
+
+  describe('cancelOrder()', () => {
+    it('cancels, closes the panel, and reloads tables', () => {
+      const component = createComponent();
+      component.selectedTable.set(occupiedTable);
+      component.currentOrder.set(openOrder);
+
+      component.cancelOrder();
+
+      expect(orderApi.cancelOrder).toHaveBeenCalledWith(101);
+      expect(component.currentOrder()).toBeNull();
+      expect(component.selectedTable()).toBeNull();
+    });
+
+    it('does nothing when there is no current order', () => {
+      const component = createComponent();
+
+      component.cancelOrder();
+
+      expect(orderApi.cancelOrder).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('releaseTable()', () => {
+    it('releases the table by tableId exactly once and closes the panel', () => {
+      const component = createComponent();
+      component.selectedTable.set(occupiedTable);
+      component.currentOrder.set(openOrder);
+
+      component.releaseTable();
+
+      expect(orderApi.releaseTable).toHaveBeenCalledWith(openOrder.tableId);
+      expect(orderApi.releaseTable).toHaveBeenCalledTimes(1);
+      expect(component.currentOrder()).toBeNull();
+    });
+
+    it('does nothing when there is no current order', () => {
+      const component = createComponent();
+
+      component.releaseTable();
+
+      expect(orderApi.releaseTable).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pay()', () => {
+    it('starts payment and shows the spinner', () => {
+      const component = createComponent();
+      component.currentOrder.set({ ...openOrder, status: 'CONFIRMED' });
+
+      component.pay('CASH');
+
+      expect(orderApi.pay).toHaveBeenCalledWith(101, { paymentMethod: 'CASH' });
+      expect(component.checkingOut()).toBe(true);
+    });
+
+    it('does nothing when there is no current order', () => {
+      const component = createComponent();
+
+      component.pay('CASH');
+
+      expect(orderApi.pay).not.toHaveBeenCalled();
+    });
+
+    it('stops the spinner when the request errors', () => {
+      orderApi.pay.mockReturnValue(throwError(() => new Error('fail')));
+      const component = createComponent();
+      component.currentOrder.set({ ...openOrder, status: 'CONFIRMED' });
+
+      component.pay('CASH');
+
+      expect(component.checkingOut()).toBe(false);
+    });
+  });
+
+  describe('pollUntilSettled (driven via confirm())', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('keeps polling while PENDING_CONFIRMATION, then stops once settled', async () => {
+      const pending: Order = { ...openOrder, status: 'PENDING_CONFIRMATION' };
+      const confirmed: Order = { ...openOrder, status: 'CONFIRMED' };
+      orderApi.createOrder.mockReturnValue(of(pending));
+      orderApi.getOrder.mockReturnValueOnce(of(pending)).mockReturnValueOnce(of(confirmed));
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+
+      component.confirm();
+      expect(component.checkingOut()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(orderApi.getOrder).toHaveBeenCalledTimes(1);
+      expect(component.checkingOut()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(orderApi.getOrder).toHaveBeenCalledTimes(2);
+      expect(component.checkingOut()).toBe(false);
+      expect(component.currentOrder()?.status).toBe('CONFIRMED');
+    });
+
+    it('gives up and stops the spinner after the max poll attempts', async () => {
+      const pending: Order = { ...openOrder, status: 'PENDING_CONFIRMATION' };
+      orderApi.createOrder.mockReturnValue(of(pending));
+      orderApi.getOrder.mockReturnValue(of(pending));
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+
+      component.confirm();
+      await vi.advanceTimersByTimeAsync(1000 * 11);
+
+      expect(orderApi.getOrder).toHaveBeenCalledTimes(10);
+      expect(component.checkingOut()).toBe(false);
+    });
   });
 });

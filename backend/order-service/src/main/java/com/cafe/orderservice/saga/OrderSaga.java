@@ -98,8 +98,8 @@ public class OrderSaga {
 
   /**
    * Builds a brand-new order from a locally-built draft cart and immediately starts checkout — the
-   * POS screen no longer persists items one click at a time; it only calls this once, when staff
-   * hit Confirm. The table itself was already occupied earlier (see {@code
+   * POS screen calls this once, when staff hit Confirm, after building the item list entirely as
+   * client-side state. The table itself was already occupied earlier (see {@code
    * DiningTableController#occupy}), before any item was ever picked, so table status is untouched
    * here. One atomic transaction, same reasoning as {@link #cancelOrder}: never split an order
    * mutation from the saga machinery that must follow it.
@@ -113,8 +113,7 @@ public class OrderSaga {
   /**
    * Re-submits a full item list for an order that failed a previous checkout attempt (status OPEN,
    * failureReason set) and re-runs checkout from scratch. Only OPEN is a legal starting point today
-   * — checking out a CONFIRMED order (editing after it was already verified once) is a separate,
-   * later milestone.
+   * — every other status, including CONFIRMED, is rejected.
    */
   @Transactional
   public Order startCheckout(Long orderId, List<OrderLineItem> newItems) {

@@ -59,9 +59,9 @@ public class OrderService {
 
   /**
    * Replaces the order's entire item list with {@code newItems} — used to submit a locally-built
-   * draft cart, either for a fresh order under a failed-verify retry or (in a later milestone) an
-   * edit to an already-verified order. Old lines not present in {@code newItems} are deleted
-   * (relies on {@code orphanRemoval} on {@link Order#getItems()}), not just superseded.
+   * draft cart when retrying a failed verify attempt (order status OPEN). Old lines not present in
+   * {@code newItems} are deleted (relies on {@code orphanRemoval} on {@link Order#getItems()}), not
+   * just superseded.
    */
   @Transactional
   public Order replaceItems(Long orderId, List<OrderLineItem> newItems) {
