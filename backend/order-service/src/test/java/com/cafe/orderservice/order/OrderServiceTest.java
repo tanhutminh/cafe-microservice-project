@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -14,10 +15,13 @@ import com.cafe.orderservice.client.MenuServiceClient;
 import com.cafe.orderservice.client.dto.MenuItemDetails;
 import com.cafe.orderservice.table.DiningTable;
 import com.cafe.orderservice.table.DiningTableService;
+import com.cafe.orderservice.table.TableStatus;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -52,7 +56,11 @@ class OrderServiceTest {
   }
 
   private DiningTable table() {
-    return DiningTable.builder().id(TABLE_ID).tableNumber("T3").capacity(4).build();
+    return table(TableStatus.OCCUPIED);
+  }
+
+  private DiningTable table(TableStatus status) {
+    return DiningTable.builder().id(TABLE_ID).tableNumber("T3").capacity(4).status(status).build();
   }
 
   private Order order(OrderStatus status) {
@@ -81,6 +89,76 @@ class OrderServiceTest {
     verify(diningTableService, never()).occupy(anyLong());
     assertThat(result.getItems()).hasSize(1);
     assertThat(result.getItems().get(0).getQuantity()).isEqualTo(2);
+  }
+
+  private static final Set<OrderStatus> IN_PROGRESS_STATUSES =
+      EnumSet.of(
+          OrderStatus.OPEN,
+          OrderStatus.PENDING_CONFIRMATION,
+          OrderStatus.CONFIRMED,
+          OrderStatus.PAYMENT_PENDING);
+
+  /**
+   * Every OrderStatus, not just a representative pair: an order in progress (OPEN through
+   * PAYMENT_PENDING) must block a second order on the table, but PAID and CANCELLED must not - a
+   * table that was paid and released (or a cancelled attempt) is legitimately free to reuse, and
+   * this table's seed/demo data routinely has old PAID orders sitting on AVAILABLE tables.
+   */
+  @ParameterizedTest
+  @EnumSource(OrderStatus.class)
+  void createOrderWithItems_statusGuard(OrderStatus existingOrderStatus) {
+    // Matches on tableId only, not the exact status collection: OrderService.IN_PROGRESS_STATUSES
+    // is a List, this test's own set is an EnumSet, and List.equals(Set) is always false per the
+    // Collections contract regardless of shared elements - asserting the real call site passes
+    // the right statuses isn't this test's job anyway, just that the guard branches correctly on
+    // whatever the repository reports.
+    when(orderRepository.existsByTable_IdAndStatusIn(eq(TABLE_ID), any()))
+        .thenReturn(IN_PROGRESS_STATUSES.contains(existingOrderStatus));
+
+    if (IN_PROGRESS_STATUSES.contains(existingOrderStatus)) {
+      assertThatThrownBy(
+              () -> orderService.createOrderWithItems(TABLE_ID, List.of(new OrderLineItem(9L, 1))))
+          .isInstanceOf(BusinessRuleException.class);
+      verify(diningTableService, never()).findById(anyLong());
+      verify(orderRepository, never()).save(any(Order.class));
+    } else {
+      when(diningTableService.findById(TABLE_ID)).thenReturn(table());
+      when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+      when(orderRepository.save(any(Order.class)))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+
+      Order result = orderService.createOrderWithItems(TABLE_ID, List.of(new OrderLineItem(9L, 1)));
+
+      assertThat(result.getItems()).hasSize(1);
+    }
+  }
+
+  /**
+   * Every TableStatus: only OCCUPIED may have an order created on it. This is what actually
+   * enforces the "table must already be OCCUPIED" precondition documented on this method - without
+   * it, a table released (or never occupied at all) between selection and Confirm could still end
+   * up with an order, leaving the table's own status permanently out of sync with it.
+   */
+  @ParameterizedTest
+  @EnumSource(TableStatus.class)
+  void createOrderWithItems_rejectsWhenTableNotOccupied(TableStatus status) {
+    when(orderRepository.existsByTable_IdAndStatusIn(eq(TABLE_ID), any())).thenReturn(false);
+    when(diningTableService.findById(TABLE_ID)).thenReturn(table(status));
+
+    if (status == TableStatus.OCCUPIED) {
+      when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+      when(orderRepository.save(any(Order.class)))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+
+      Order result = orderService.createOrderWithItems(TABLE_ID, List.of(new OrderLineItem(9L, 1)));
+
+      assertThat(result.getItems()).hasSize(1);
+    } else {
+      assertThatThrownBy(
+              () -> orderService.createOrderWithItems(TABLE_ID, List.of(new OrderLineItem(9L, 1))))
+          .isInstanceOf(BusinessRuleException.class);
+      verify(orderRepository, never()).save(any(Order.class));
+    }
   }
 
   @Test

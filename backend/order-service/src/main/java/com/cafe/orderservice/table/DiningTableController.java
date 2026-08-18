@@ -70,8 +70,8 @@ public class DiningTableController {
           "Called the moment staff pick an AVAILABLE table to start building an order on it, "
               + "before any Order row exists - items are picked in a local draft cart on the POS screen "
               + "and only sent to the server as a whole when the order is confirmed. Occupying up front "
-              + "(rather than on first item, or on confirm) avoids a window where two staff members could "
-              + "both start building an order on the same table.")
+              + "avoids a window where two staff members could both start building an order on the same "
+              + "table.")
   public DiningTableResponse occupy(
       @Parameter(description = "The table's id", example = "3") @PathVariable @Positive Long id) {
     diningTableService.occupy(id);

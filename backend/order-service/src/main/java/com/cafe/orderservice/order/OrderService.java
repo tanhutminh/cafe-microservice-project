@@ -7,6 +7,7 @@ import com.cafe.orderservice.client.MenuServiceClient;
 import com.cafe.orderservice.client.dto.MenuItemDetails;
 import com.cafe.orderservice.table.DiningTable;
 import com.cafe.orderservice.table.DiningTableService;
+import com.cafe.orderservice.table.TableStatus;
 import java.time.Instant;
 import java.util.List;
 import org.springframework.stereotype.Service;
@@ -14,6 +15,19 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class OrderService {
+
+  /**
+   * Statuses that mean a customer is actively being served on the table right now — blocks creating
+   * a second order there. Wider than {@link DiningTableService}'s own ACTIVE_ORDER_STATUSES (which
+   * only guards releasing/moving a table): PAID is deliberately excluded here too, same as there,
+   * since a paid-but-not-yet-released table is free to start a new order on (pay-first-then-dine).
+   */
+  private static final List<OrderStatus> IN_PROGRESS_STATUSES =
+      List.of(
+          OrderStatus.OPEN,
+          OrderStatus.PENDING_CONFIRMATION,
+          OrderStatus.CONFIRMED,
+          OrderStatus.PAYMENT_PENDING);
 
   private final OrderRepository orderRepository;
   private final DiningTableService diningTableService;
@@ -45,13 +59,19 @@ public class OrderService {
   }
 
   /**
-   * Table must already be OCCUPIED (see {@link DiningTableService#occupy}) — the POS screen calls
-   * that separately the moment staff pick the table, before any item is chosen, so this method
-   * never touches table status itself.
+   * Requires the table to already be OCCUPIED (see {@link DiningTableService#occupy}) — this method
+   * never itself transitions table status, only verifies it. Also throws if another order is
+   * already in progress on the table.
    */
   @Transactional
   public Order createOrderWithItems(Long tableId, List<OrderLineItem> items) {
+    if (orderRepository.existsByTable_IdAndStatusIn(tableId, IN_PROGRESS_STATUSES)) {
+      throw new BusinessRuleException("Table already has an order in progress: " + tableId);
+    }
     DiningTable table = diningTableService.findById(tableId);
+    if (table.getStatus() != TableStatus.OCCUPIED) {
+      throw new BusinessRuleException("Table is not occupied: " + tableId);
+    }
     Order order = Order.builder().table(table).status(OrderStatus.OPEN).build();
     items.forEach(line -> addResolvedItem(order, line));
     return orderRepository.save(order);

@@ -1,3 +1,4 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { of, throwError } from 'rxjs';
@@ -139,6 +140,17 @@ describe('Pos', () => {
       expect(component.currentOrder()).toBeNull();
     });
 
+    it('backs out of the selection when occupying an AVAILABLE table fails', () => {
+      orderApi.occupyTable.mockReturnValue(
+        throwError(() => new HttpErrorResponse({ status: 409 })),
+      );
+      const component = createComponent();
+
+      component.selectTable(availableTable);
+
+      expect(component.selectedTable()).toBeNull();
+    });
+
     it('loads the current order for an OCCUPIED table', () => {
       const component = createComponent();
 
@@ -151,8 +163,10 @@ describe('Pos', () => {
       ]);
     });
 
-    it('shows an empty draft, not an error, when an OCCUPIED table has no order yet', () => {
-      orderApi.getCurrentOrderForTable.mockReturnValue(throwError(() => new Error('404')));
+    it('shows an empty draft, not an error, when an OCCUPIED table has no order yet (404)', () => {
+      orderApi.getCurrentOrderForTable.mockReturnValue(
+        throwError(() => new HttpErrorResponse({ status: 404 })),
+      );
       const component = createComponent();
 
       component.selectTable(occupiedTable);
@@ -160,6 +174,17 @@ describe('Pos', () => {
       expect(component.selectedTable()).toEqual(occupiedTable);
       expect(component.currentOrder()).toBeNull();
       expect(component.canEdit()).toBe(true);
+    });
+
+    it('backs out of the selection on a non-404 error instead of showing a false empty draft', () => {
+      orderApi.getCurrentOrderForTable.mockReturnValue(
+        throwError(() => new HttpErrorResponse({ status: 500 })),
+      );
+      const component = createComponent();
+
+      component.selectTable(occupiedTable);
+
+      expect(component.selectedTable()).toBeNull();
     });
   });
 
@@ -171,6 +196,19 @@ describe('Pos', () => {
       component.closeOrderPanel();
 
       expect(orderApi.releaseTable).toHaveBeenCalledWith(3);
+    });
+
+    it('still reloads tables when releasing fails, so the list reflects the real state', () => {
+      orderApi.releaseTable.mockReturnValue(
+        throwError(() => new HttpErrorResponse({ status: 500 })),
+      );
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      orderApi.listTables.mockClear();
+
+      component.closeOrderPanel();
+
+      expect(orderApi.listTables).toHaveBeenCalled();
     });
 
     it('does not release the table when an order already exists', () => {
@@ -332,6 +370,20 @@ describe('Pos', () => {
       expect(orderApi.moveTable).not.toHaveBeenCalled();
       expect(component.movingTable()).toBe(false);
     });
+
+    it('exits move mode and reloads tables when the move fails', () => {
+      orderApi.moveTable.mockReturnValue(throwError(() => new HttpErrorResponse({ status: 500 })));
+      const availableTarget: DiningTable = { ...availableTable, id: 5, tableNumber: 'T5' };
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+      component.movingTable.set(true);
+      orderApi.listTables.mockClear();
+
+      component.selectTable(availableTarget);
+
+      expect(component.movingTable()).toBe(false);
+      expect(orderApi.listTables).toHaveBeenCalled();
+    });
   });
 
   describe('cancelOrder()', () => {
@@ -354,6 +406,20 @@ describe('Pos', () => {
 
       expect(orderApi.cancelOrder).not.toHaveBeenCalled();
     });
+
+    it('still reloads tables when cancelling fails', () => {
+      orderApi.cancelOrder.mockReturnValue(
+        throwError(() => new HttpErrorResponse({ status: 500 })),
+      );
+      const component = createComponent();
+      component.selectedTable.set(occupiedTable);
+      component.currentOrder.set(openOrder);
+      orderApi.listTables.mockClear();
+
+      component.cancelOrder();
+
+      expect(orderApi.listTables).toHaveBeenCalled();
+    });
   });
 
   describe('releaseTable()', () => {
@@ -375,6 +441,20 @@ describe('Pos', () => {
       component.releaseTable();
 
       expect(orderApi.releaseTable).not.toHaveBeenCalled();
+    });
+
+    it('still reloads tables when releasing fails', () => {
+      orderApi.releaseTable.mockReturnValue(
+        throwError(() => new HttpErrorResponse({ status: 500 })),
+      );
+      const component = createComponent();
+      component.selectedTable.set(occupiedTable);
+      component.currentOrder.set(openOrder);
+      orderApi.listTables.mockClear();
+
+      component.releaseTable();
+
+      expect(orderApi.listTables).toHaveBeenCalled();
     });
   });
 

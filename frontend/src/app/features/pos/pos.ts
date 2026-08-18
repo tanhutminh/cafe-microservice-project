@@ -1,3 +1,4 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { Component, inject, signal } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -111,16 +112,30 @@ export class Pos {
     this.currentOrder.set(null);
     this.draftItems.set([]);
     if (table.status === 'AVAILABLE') {
-      this.orderApi.occupyTable(table.id).subscribe(() => this.reloadTables());
+      this.orderApi.occupyTable(table.id).subscribe({
+        next: () => this.reloadTables(),
+        error: () => {
+          // Someone else already occupied it (or another failure) - back out of the selection
+          // instead of leaving a draft cart open on a table we don't actually hold.
+          this.selectedTable.set(null);
+          this.reloadTables();
+        },
+      });
     } else {
-      // A 404 here means the table is OCCUPIED but nothing was ever confirmed on it (staff picked
-      // items and closed the panel, or reloaded mid-draft) - not an error, just an empty cart to build.
       this.orderApi.getCurrentOrderForTable(table.id).subscribe({
         next: (order) => {
           this.currentOrder.set(order);
           this.draftItems.set(this.toDraftItems(order.items));
         },
-        error: () => undefined,
+        error: (error: HttpErrorResponse) => {
+          // A 404 means the table is OCCUPIED but nothing was ever confirmed on it (staff picked
+          // items and closed the panel, or reloaded mid-draft) - not an error, just an empty cart
+          // to build. Anything else (network/server failure) is a real error - back out rather
+          // than showing a false empty draft on a table we don't actually know the state of.
+          if (error.status !== 404) {
+            this.selectedTable.set(null);
+          }
+        },
       });
     }
   }
@@ -134,8 +149,12 @@ export class Pos {
     this.movingTable.set(false);
     if (hadNoOrder) {
       // Nothing was ever confirmed on this table - closing the panel abandons the draft, so free
-      // the table back up rather than leaving it OCCUPIED with nothing to show for it.
-      this.orderApi.releaseTable(table.id).subscribe(() => this.reloadTables());
+      // the table back up rather than leaving it OCCUPIED with nothing to show for it. Reload
+      // either way on failure too, so the table list reflects whatever the server actually has.
+      this.orderApi.releaseTable(table.id).subscribe({
+        next: () => this.reloadTables(),
+        error: () => this.reloadTables(),
+      });
     }
   }
 
@@ -153,11 +172,17 @@ export class Pos {
       this.movingTable.set(false);
       return;
     }
-    this.orderApi.moveTable(order.id, { tableId: table.id }).subscribe((updated) => {
-      this.currentOrder.set(updated);
-      this.selectedTable.set(table);
-      this.movingTable.set(false);
-      this.reloadTables();
+    this.orderApi.moveTable(order.id, { tableId: table.id }).subscribe({
+      next: (updated) => {
+        this.currentOrder.set(updated);
+        this.selectedTable.set(table);
+        this.movingTable.set(false);
+        this.reloadTables();
+      },
+      error: () => {
+        this.movingTable.set(false);
+        this.reloadTables();
+      },
     });
   }
 
@@ -167,9 +192,12 @@ export class Pos {
     if (!order) {
       return;
     }
-    this.orderApi.releaseTable(order.tableId).subscribe(() => {
-      this.closeOrderPanel();
-      this.reloadTables();
+    this.orderApi.releaseTable(order.tableId).subscribe({
+      next: () => {
+        this.closeOrderPanel();
+        this.reloadTables();
+      },
+      error: () => this.reloadTables(),
     });
   }
 
@@ -209,9 +237,12 @@ export class Pos {
     if (!order) {
       return;
     }
-    this.orderApi.cancelOrder(order.id).subscribe(() => {
-      this.closeOrderPanel();
-      this.reloadTables();
+    this.orderApi.cancelOrder(order.id).subscribe({
+      next: () => {
+        this.closeOrderPanel();
+        this.reloadTables();
+      },
+      error: () => this.reloadTables(),
     });
   }
 

@@ -33,16 +33,15 @@
   </div>
 
   @if (selectedTable(); as table) {
+    @let status = currentOrder()?.status;
+
     <div class="menu-panel">
       <h3>{{ 'pos.menu' | transloco }}</h3>
-      @if (
-        currentOrder()?.status === 'PENDING_CONFIRMATION' ||
-        currentOrder()?.status === 'PAYMENT_PENDING'
-      ) {
+      @if (status === 'PENDING_CONFIRMATION' || status === 'PAYMENT_PENDING') {
         <p class="hint">{{ 'pos.orderLocked' | transloco }}</p>
-      } @else if (currentOrder()?.status === 'CONFIRMED') {
+      } @else if (status === 'CONFIRMED') {
         <p class="hint">{{ 'pos.orderConfirmedHint' | transloco }}</p>
-      } @else if (currentOrder()?.status === 'PAID') {
+      } @else if (status === 'PAID') {
         <p class="hint">{{ 'pos.orderPaidHint' | transloco }}</p>
       } @else if (canEdit()) {
         @for (category of categories(); track category.id) {
@@ -143,7 +142,7 @@
             {{ 'pos.verify' | transloco }}
           </button>
         </div>
-      } @else if (currentOrder()?.status === 'CONFIRMED') {
+      } @else if (status === 'CONFIRMED') {
         <div class="actions">
           <button mat-stroked-button (click)="cancelOrder()">
             {{ 'pos.cancelOrder' | transloco }}
@@ -158,7 +157,7 @@
             {{ 'pos.payCard' | transloco }}
           </button>
         </div>
-      } @else if (currentOrder()?.status === 'PAID') {
+      } @else if (status === 'PAID') {
         <div class="success-banner">{{ 'pos.paid' | transloco }}</div>
         <div class="actions">
           <button mat-stroked-button (click)="startMoveTable()">
