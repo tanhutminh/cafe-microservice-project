@@ -9,7 +9,7 @@ import { MenuApiService } from '../../core/menu/menu-api.service';
 import { Category } from '../../core/models/category.model';
 import { DiningTable } from '../../core/models/dining-table.model';
 import { MenuItem } from '../../core/models/menu-item.model';
-import { Order, OrderItem } from '../../core/models/order.model';
+import { DraftItem, Order, OrderItem } from '../../core/models/order.model';
 import { OrderApiService } from '../../core/order/order-api.service';
 import { LanguageSwitcher } from '../../shared/language-switcher/language-switcher';
 
@@ -26,10 +26,10 @@ const POLL_MAX_ATTEMPTS = 10;
     MatToolbarModule,
     RouterLink,
     TranslocoModule,
-    LanguageSwitcher
+    LanguageSwitcher,
   ],
   templateUrl: './pos.html',
-  styleUrl: './pos.scss'
+  styleUrl: './pos.scss',
 })
 export class Pos {
   private readonly orderApi = inject(OrderApiService);
@@ -40,13 +40,16 @@ export class Pos {
   readonly menuItems = signal<MenuItem[]>([]);
   readonly selectedTable = signal<DiningTable | null>(null);
   readonly currentOrder = signal<Order | null>(null);
+  readonly draftItems = signal<DraftItem[]>([]);
   readonly checkingOut = signal(false);
   readonly movingTable = signal(false);
 
   constructor() {
     this.reloadTables();
     this.menuApi.listCategories().subscribe((categories) => this.categories.set(categories));
-    this.menuApi.listMenuItems().subscribe((items) => this.menuItems.set(items.filter((item) => item.available)));
+    this.menuApi
+      .listMenuItems()
+      .subscribe((items) => this.menuItems.set(items.filter((item) => item.available)));
   }
 
   private reloadTables(): void {
@@ -57,6 +60,46 @@ export class Pos {
     return this.menuItems().filter((item) => item.categoryId === categoryId);
   }
 
+  /** Items can be picked (as a local draft, not yet persisted) whenever there's no order yet or it's still OPEN. */
+  canEdit(): boolean {
+    const order = this.currentOrder();
+    return !order || order.status === 'OPEN';
+  }
+
+  /** Enabled once there's something to submit and it actually differs from what the order already holds. */
+  confirmEnabled(): boolean {
+    const items = this.draftItems();
+    if (items.length === 0) {
+      return false;
+    }
+    const order = this.currentOrder();
+    return !order || this.draftDiffersFromOrder(items, order.items);
+  }
+
+  grandTotal(): number {
+    if (this.canEdit()) {
+      return this.draftItems().reduce((sum, item) => sum + item.price * item.quantity, 0);
+    }
+    return this.currentOrder()?.grandTotal ?? 0;
+  }
+
+  private draftDiffersFromOrder(draft: DraftItem[], orderItems: OrderItem[]): boolean {
+    if (draft.length !== orderItems.length) {
+      return true;
+    }
+    const quantityByMenuItemId = new Map(draft.map((item) => [item.menuItemId, item.quantity]));
+    return orderItems.some((item) => quantityByMenuItemId.get(item.menuItemId) !== item.quantity);
+  }
+
+  private toDraftItems(items: OrderItem[]): DraftItem[] {
+    return items.map((item) => ({
+      menuItemId: item.menuItemId,
+      name: item.name,
+      price: item.price,
+      quantity: item.quantity,
+    }));
+  }
+
   selectTable(table: DiningTable): void {
     if (this.movingTable()) {
       if (table.status === 'AVAILABLE') {
@@ -65,23 +108,35 @@ export class Pos {
       return;
     }
     this.selectedTable.set(table);
+    this.currentOrder.set(null);
+    this.draftItems.set([]);
     if (table.status === 'AVAILABLE') {
-      this.orderApi.createOrder({ tableId: table.id }).subscribe((order) => {
-        this.currentOrder.set(order);
-        this.reloadTables();
-      });
+      this.orderApi.occupyTable(table.id).subscribe(() => this.reloadTables());
     } else {
+      // A 404 here means the table is OCCUPIED but nothing was ever confirmed on it (staff picked
+      // items and closed the panel, or reloaded mid-draft) - not an error, just an empty cart to build.
       this.orderApi.getCurrentOrderForTable(table.id).subscribe({
-        next: (order) => this.currentOrder.set(order),
-        error: () => this.selectedTable.set(null)
+        next: (order) => {
+          this.currentOrder.set(order);
+          this.draftItems.set(this.toDraftItems(order.items));
+        },
+        error: () => undefined,
       });
     }
   }
 
   closeOrderPanel(): void {
+    const table = this.selectedTable();
+    const hadNoOrder = table && !this.currentOrder();
     this.selectedTable.set(null);
     this.currentOrder.set(null);
+    this.draftItems.set([]);
     this.movingTable.set(false);
+    if (hadNoOrder) {
+      // Nothing was ever confirmed on this table - closing the panel abandons the draft, so free
+      // the table back up rather than leaving it OCCUPIED with nothing to show for it.
+      this.orderApi.releaseTable(table.id).subscribe(() => this.reloadTables());
+    }
   }
 
   startMoveTable(): void {
@@ -118,41 +173,35 @@ export class Pos {
     });
   }
 
-  addItem(item: MenuItem): void {
-    const order = this.currentOrder();
-    if (!order) {
-      return;
-    }
-    this.orderApi.addItem(order.id, { menuItemId: item.id, quantity: 1 }).subscribe((updated) => this.currentOrder.set(updated));
+  addToDraft(item: MenuItem): void {
+    this.draftItems.update((items) => {
+      const existing = items.find((i) => i.menuItemId === item.id);
+      if (existing) {
+        return items.map((i) =>
+          i.menuItemId === item.id ? { ...i, quantity: i.quantity + 1 } : i,
+        );
+      }
+      return [...items, { menuItemId: item.id, name: item.name, price: item.price, quantity: 1 }];
+    });
   }
 
-  removeItem(orderItemId: number): void {
-    const order = this.currentOrder();
-    if (!order) {
-      return;
-    }
-    this.orderApi.removeItem(order.id, orderItemId).subscribe((updated) => this.currentOrder.set(updated));
+  removeFromDraft(menuItemId: number): void {
+    this.draftItems.update((items) => items.filter((i) => i.menuItemId !== menuItemId));
   }
 
-  increaseQuantity(item: OrderItem): void {
-    const order = this.currentOrder();
-    if (!order) {
-      return;
-    }
-    this.orderApi.updateItemQuantity(order.id, item.id, { quantity: item.quantity + 1 }).subscribe((updated) => this.currentOrder.set(updated));
+  increaseDraftQuantity(menuItemId: number): void {
+    this.draftItems.update((items) =>
+      items.map((i) => (i.menuItemId === menuItemId ? { ...i, quantity: i.quantity + 1 } : i)),
+    );
   }
 
   /** Decreasing past 1 removes the line entirely rather than allowing a 0 (or negative) quantity. */
-  decreaseQuantity(item: OrderItem): void {
-    const order = this.currentOrder();
-    if (!order) {
-      return;
-    }
-    if (item.quantity <= 1) {
-      this.removeItem(item.id);
-      return;
-    }
-    this.orderApi.updateItemQuantity(order.id, item.id, { quantity: item.quantity - 1 }).subscribe((updated) => this.currentOrder.set(updated));
+  decreaseDraftQuantity(menuItemId: number): void {
+    this.draftItems.update((items) =>
+      items
+        .map((i) => (i.menuItemId === menuItemId ? { ...i, quantity: i.quantity - 1 } : i))
+        .filter((i) => i.quantity > 0),
+    );
   }
 
   cancelOrder(): void {
@@ -166,18 +215,28 @@ export class Pos {
     });
   }
 
-  verify(): void {
+  /** The one Confirm action for both cases: opening a brand-new order, or retrying a failed one. */
+  confirm(): void {
+    const table = this.selectedTable();
     const order = this.currentOrder();
-    if (!order) {
+    if (!table || !this.confirmEnabled()) {
       return;
     }
+    const items = this.draftItems().map((item) => ({
+      menuItemId: item.menuItemId,
+      quantity: item.quantity,
+    }));
     this.checkingOut.set(true);
-    this.orderApi.checkout(order.id).subscribe({
+    const request = order
+      ? this.orderApi.checkout(order.id, { items })
+      : this.orderApi.createOrder({ tableId: table.id, items });
+    request.subscribe({
       next: (updated) => {
         this.currentOrder.set(updated);
+        this.draftItems.set(this.toDraftItems(updated.items));
         this.pollUntilSettled(updated.id, 0);
       },
-      error: () => this.checkingOut.set(false)
+      error: () => this.checkingOut.set(false),
     });
   }
 
@@ -192,7 +251,7 @@ export class Pos {
         this.currentOrder.set(updated);
         this.pollUntilSettled(updated.id, 0);
       },
-      error: () => this.checkingOut.set(false)
+      error: () => this.checkingOut.set(false),
     });
   }
 
@@ -204,6 +263,7 @@ export class Pos {
     setTimeout(() => {
       this.orderApi.getOrder(orderId).subscribe((order) => {
         this.currentOrder.set(order);
+        this.draftItems.set(this.toDraftItems(order.items));
         if (order.status === 'PENDING_CONFIRMATION' || order.status === 'PAYMENT_PENDING') {
           this.pollUntilSettled(orderId, attempt + 1);
         } else {

@@ -3,7 +3,13 @@ import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 import { environment } from '../../../environments/environment';
 import { DiningTable } from '../models/dining-table.model';
-import { AddOrderItemRequest, CreateOrderRequest, MoveTableRequest, Order, PayRequest, UpdateOrderItemQuantityRequest } from '../models/order.model';
+import {
+  CheckoutRequest,
+  CreateOrderRequest,
+  MoveTableRequest,
+  Order,
+  PayRequest,
+} from '../models/order.model';
 
 @Injectable({ providedIn: 'root' })
 export class OrderApiService {
@@ -11,6 +17,10 @@ export class OrderApiService {
 
   listTables(): Observable<DiningTable[]> {
     return this.http.get<DiningTable[]>(`${environment.apiBaseUrl}/tables`);
+  }
+
+  occupyTable(tableId: number): Observable<DiningTable> {
+    return this.http.post<DiningTable>(`${environment.apiBaseUrl}/tables/${tableId}/occupy`, {});
   }
 
   getOrder(orderId: number): Observable<Order> {
@@ -26,24 +36,12 @@ export class OrderApiService {
     return this.http.post<Order>(`${environment.apiBaseUrl}/orders`, request);
   }
 
-  addItem(orderId: number, request: AddOrderItemRequest): Observable<Order> {
-    return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/items`, request);
-  }
-
-  removeItem(orderId: number, orderItemId: number): Observable<Order> {
-    return this.http.delete<Order>(`${environment.apiBaseUrl}/orders/${orderId}/items/${orderItemId}`);
-  }
-
-  updateItemQuantity(orderId: number, orderItemId: number, request: UpdateOrderItemQuantityRequest): Observable<Order> {
-    return this.http.patch<Order>(`${environment.apiBaseUrl}/orders/${orderId}/items/${orderItemId}`, request);
-  }
-
   cancelOrder(orderId: number): Observable<Order> {
     return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/cancel`, {});
   }
 
-  checkout(orderId: number): Observable<Order> {
-    return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/checkout`, {});
+  checkout(orderId: number, request: CheckoutRequest): Observable<Order> {
+    return this.http.post<Order>(`${environment.apiBaseUrl}/orders/${orderId}/checkout`, request);
   }
 
   pay(orderId: number, request: PayRequest): Observable<Order> {
