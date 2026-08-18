@@ -15,6 +15,8 @@ import static org.mockito.Mockito.when;
 
 import com.cafe.common.event.InventoryStockCommitReply;
 import com.cafe.common.event.InventoryStockReservationReply;
+import com.cafe.common.event.OrderLineItem;
+import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.orderservice.order.Order;
 import com.cafe.orderservice.order.OrderItem;
 import com.cafe.orderservice.order.OrderService;
@@ -35,6 +37,7 @@ import jakarta.validation.Validator;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
@@ -46,6 +49,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -229,6 +233,59 @@ class OrderSagaTest {
     ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
     verify(outboxMessageRepository).save(captor.capture());
     assertThat(captor.getValue().getTraceparent()).isEqualTo(traceparent);
+  }
+
+  @Test
+  void createAndCheckout_buildsOrderAndQueuesFullReservation() {
+    List<OrderLineItem> items = List.of(new OrderLineItem(9L, 2));
+    Order created = order(OrderStatus.OPEN);
+    Order pendingOrder = order(OrderStatus.PENDING_CONFIRMATION);
+    when(orderService.createOrderWithItems(3L, items)).thenReturn(created);
+    when(orderService.checkout(ORDER_ID)).thenReturn(pendingOrder);
+
+    OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(null);
+    OrderSaga saga = sagaWith(sagaStateRepository);
+
+    Order result = saga.createAndCheckout(3L, items);
+
+    OrderSagaState state = sagaStateRepository.findById(ORDER_ID).orElseThrow();
+    ArgumentCaptor<OutboxMessage> captor = ArgumentCaptor.forClass(OutboxMessage.class);
+    verify(outboxMessageRepository).save(captor.capture());
+
+    assertAll(
+        () -> assertThat(result).isSameAs(pendingOrder),
+        () -> assertThat(state.getStep()).isEqualTo(SagaStep.STOCK_RESERVATION_REQUESTED),
+        () ->
+            assertThat(captor.getValue().getMessageType())
+                .isEqualTo(OutboxMessageType.RESERVE_STOCK));
+  }
+
+  @Test
+  void startCheckout_fromOpen_replacesItemsAndQueuesFullReservation() {
+    List<OrderLineItem> newItems = List.of(new OrderLineItem(11L, 3));
+    when(orderService.getOrder(ORDER_ID)).thenReturn(order(OrderStatus.OPEN));
+    Order pendingOrder = order(OrderStatus.PENDING_CONFIRMATION);
+    when(orderService.checkout(ORDER_ID)).thenReturn(pendingOrder);
+
+    OrderSagaStateRepository sagaStateRepository = fakeSagaStateRepository(null);
+    OrderSaga saga = sagaWith(sagaStateRepository);
+
+    Order result = saga.startCheckout(ORDER_ID, newItems);
+
+    assertAll(
+        () -> assertThat(result).isSameAs(pendingOrder),
+        () -> verify(orderService).replaceItems(ORDER_ID, newItems));
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = OrderStatus.class, names = "OPEN", mode = EnumSource.Mode.EXCLUDE)
+  void startCheckout_fromDisallowedStatus_throws(OrderStatus status) {
+    when(orderService.getOrder(ORDER_ID)).thenReturn(order(status));
+
+    assertThatThrownBy(() -> saga.startCheckout(ORDER_ID, List.of(new OrderLineItem(9L, 1))))
+        .isInstanceOf(BusinessRuleException.class);
+
+    verify(orderService, never()).replaceItems(anyLong(), any());
   }
 
   @Test

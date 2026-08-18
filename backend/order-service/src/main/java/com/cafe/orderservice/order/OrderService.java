@@ -1,5 +1,6 @@
 package com.cafe.orderservice.order;
 
+import com.cafe.common.event.OrderLineItem;
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
 import com.cafe.orderservice.client.MenuServiceClient;
@@ -7,6 +8,7 @@ import com.cafe.orderservice.client.dto.MenuItemDetails;
 import com.cafe.orderservice.table.DiningTable;
 import com.cafe.orderservice.table.DiningTableService;
 import java.time.Instant;
+import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -42,63 +44,46 @@ public class OrderService {
         .orElseThrow(() -> ResourceNotFoundException.of("Current order for table", tableId));
   }
 
+  /**
+   * Table must already be OCCUPIED (see {@link DiningTableService#occupy}) — the POS screen calls
+   * that separately the moment staff pick the table, before any item is chosen, so this method
+   * never touches table status itself.
+   */
   @Transactional
-  public Order createOrder(Long tableId) {
+  public Order createOrderWithItems(Long tableId, List<OrderLineItem> items) {
     DiningTable table = diningTableService.findById(tableId);
-    diningTableService.occupy(tableId);
     Order order = Order.builder().table(table).status(OrderStatus.OPEN).build();
+    items.forEach(line -> addResolvedItem(order, line));
     return orderRepository.save(order);
   }
 
+  /**
+   * Replaces the order's entire item list with {@code newItems} — used to submit a locally-built
+   * draft cart, either for a fresh order under a failed-verify retry or (in a later milestone) an
+   * edit to an already-verified order. Old lines not present in {@code newItems} are deleted
+   * (relies on {@code orphanRemoval} on {@link Order#getItems()}), not just superseded.
+   */
   @Transactional
-  public Order addItem(Long orderId, Long menuItemId, int quantity) {
+  public Order replaceItems(Long orderId, List<OrderLineItem> newItems) {
     Order order = getOrder(orderId);
     requireOpen(order);
+    order.getItems().clear();
+    newItems.forEach(line -> addResolvedItem(order, line));
+    return orderRepository.save(order);
+  }
 
-    MenuItemDetails details = menuServiceClient.findMenuItem(menuItemId);
+  private void addResolvedItem(Order order, OrderLineItem line) {
+    MenuItemDetails details = menuServiceClient.findMenuItem(line.menuItemId());
     if (!details.available()) {
       throw new BusinessRuleException("Menu item is not available: " + details.name());
     }
-
-    order.getItems().stream()
-        .filter(item -> item.getMenuItemId().equals(menuItemId))
-        .findFirst()
-        .ifPresentOrElse(
-            existing -> existing.setQuantity(existing.getQuantity() + quantity),
-            () ->
-                order.addItem(
-                    OrderItem.builder()
-                        .menuItemId(details.id())
-                        .nameSnapshot(details.name())
-                        .priceSnapshot(details.price())
-                        .quantity(quantity)
-                        .build()));
-    return orderRepository.save(order);
-  }
-
-  @Transactional
-  public Order removeItem(Long orderId, Long orderItemId) {
-    Order order = getOrder(orderId);
-    requireOpen(order);
-    boolean removed = order.getItems().removeIf(item -> item.getId().equals(orderItemId));
-    if (!removed) {
-      throw ResourceNotFoundException.of("OrderItem", orderItemId);
-    }
-    return orderRepository.save(order);
-  }
-
-  /** Sets a line's quantity directly (min 1 - use removeItem to take it down to 0 instead). */
-  @Transactional
-  public Order updateItemQuantity(Long orderId, Long orderItemId, int quantity) {
-    Order order = getOrder(orderId);
-    requireOpen(order);
-    OrderItem item =
-        order.getItems().stream()
-            .filter(i -> i.getId().equals(orderItemId))
-            .findFirst()
-            .orElseThrow(() -> ResourceNotFoundException.of("OrderItem", orderItemId));
-    item.setQuantity(quantity);
-    return orderRepository.save(order);
+    order.addItem(
+        OrderItem.builder()
+            .menuItemId(details.id())
+            .nameSnapshot(details.name())
+            .priceSnapshot(details.price())
+            .quantity(line.quantity())
+            .build());
   }
 
   @Transactional

@@ -1,17 +1,19 @@
 package com.cafe.orderservice.order;
 
+import com.cafe.common.event.OrderLineItem;
 import com.cafe.orderservice.order.dto.AddOrderItemRequest;
+import com.cafe.orderservice.order.dto.CheckoutRequest;
 import com.cafe.orderservice.order.dto.CreateOrderRequest;
 import com.cafe.orderservice.order.dto.MoveTableRequest;
 import com.cafe.orderservice.order.dto.OrderResponse;
 import com.cafe.orderservice.order.dto.PayRequest;
-import com.cafe.orderservice.order.dto.UpdateOrderItemQuantityRequest;
 import com.cafe.orderservice.saga.OrderSaga;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
+import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -49,44 +51,17 @@ public class OrderController {
 
   @PostMapping
   @ResponseStatus(HttpStatus.CREATED)
-  @Operation(summary = "Open a new order on an AVAILABLE table")
+  @Operation(
+      summary =
+          "Open a new order on an already-OCCUPIED table with its full item list, and "
+              + "immediately start checkout",
+      description =
+          "The table must already be OCCUPIED (see POST /api/tables/{id}/occupy) - the POS screen "
+              + "builds the item list locally as a draft cart and only calls this once, when staff hit "
+              + "Confirm, instead of persisting each item pick separately.")
   public OrderResponse createOrder(@Valid @RequestBody CreateOrderRequest request) {
-    return OrderResponse.from(orderService.createOrder(request.tableId()));
-  }
-
-  @PostMapping("/{id}/items")
-  @Operation(
-      summary =
-          "Add a line item - looks up the menu item's name/price via menu-service and snapshots it onto the order")
-  public OrderResponse addItem(
-      @Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id,
-      @Valid @RequestBody AddOrderItemRequest request) {
-    return OrderResponse.from(orderService.addItem(id, request.menuItemId(), request.quantity()));
-  }
-
-  @DeleteMapping("/{id}/items/{itemId}")
-  @Operation(summary = "Remove a line item from an OPEN order")
-  public OrderResponse removeItem(
-      @Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id,
-      @Parameter(description = "The order line item's id (not the menu item's id)", example = "42")
-          @PathVariable
-          @Positive
-          Long itemId) {
-    return OrderResponse.from(orderService.removeItem(id, itemId));
-  }
-
-  @PatchMapping("/{id}/items/{itemId}")
-  @Operation(
-      summary =
-          "Set a line item's quantity on an OPEN order (min 1 - use DELETE to remove it entirely)")
-  public OrderResponse updateItemQuantity(
-      @Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id,
-      @Parameter(description = "The order line item's id (not the menu item's id)", example = "42")
-          @PathVariable
-          @Positive
-          Long itemId,
-      @Valid @RequestBody UpdateOrderItemQuantityRequest request) {
-    return OrderResponse.from(orderService.updateItemQuantity(id, itemId, request.quantity()));
+    return OrderResponse.from(
+        orderSaga.createAndCheckout(request.tableId(), toLineItems(request.items())));
   }
 
   @PostMapping("/{id}/cancel")
@@ -112,9 +87,11 @@ public class OrderController {
   @ResponseStatus(HttpStatus.ACCEPTED)
   @Operation(
       summary =
-          "Verify: start the verify saga, soft-reserving stock (returns immediately - not paid yet)",
+          "Verify: replace the order's item list with the given one and start the verify saga, "
+              + "soft-reserving stock (returns immediately - not paid yet)",
       description =
-          "Moves the order to PENDING_CONFIRMATION and asks inventory-service to hold "
+          "Only legal from OPEN today - re-submitting a failed order's draft cart (fix an item and "
+              + "try again). Moves the order to PENDING_CONFIRMATION and asks inventory-service to hold "
               + "stock over Kafka (Ingredient.reservedQuantity, not yet deducted from currentStock). "
               + "The response you get back here still shows PENDING_CONFIRMATION: this call only "
               + "starts the saga and returns 202 as soon as that first local step commits. Poll "
@@ -122,8 +99,15 @@ public class OrderController {
               + "for payment) or back to OPEN with failureReason set (e.g. an ingredient ran out - "
               + "fix the order and try again).")
   public OrderResponse checkout(
-      @Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id) {
-    return OrderResponse.from(orderSaga.startCheckout(id));
+      @Parameter(description = "The order's id", example = "101") @PathVariable @Positive Long id,
+      @Valid @RequestBody CheckoutRequest request) {
+    return OrderResponse.from(orderSaga.startCheckout(id, toLineItems(request.items())));
+  }
+
+  private static List<OrderLineItem> toLineItems(List<AddOrderItemRequest> items) {
+    return items.stream()
+        .map(item -> new OrderLineItem(item.menuItemId(), item.quantity()))
+        .toList();
   }
 
   @PostMapping("/{id}/pay")

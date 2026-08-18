@@ -7,6 +7,7 @@ import com.cafe.common.event.InventoryStockCommitReply;
 import com.cafe.common.event.InventoryStockReservationReply;
 import com.cafe.common.event.OrderLineItem;
 import com.cafe.common.event.OrderPaidEvent;
+import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.orderservice.order.Order;
 import com.cafe.orderservice.order.OrderService;
 import com.cafe.orderservice.order.OrderStatus;
@@ -96,8 +97,39 @@ public class OrderSaga {
   // ---- Verify leg ----
 
   /**
-   * Verify steps 1+2, one atomic transaction: order to PENDING_CONFIRMATION, saga row STARTED, then
-   * immediately queue the reservation command and advance the saga step to
+   * Builds a brand-new order from a locally-built draft cart and immediately starts checkout — the
+   * POS screen no longer persists items one click at a time; it only calls this once, when staff
+   * hit Confirm. The table itself was already occupied earlier (see {@code
+   * DiningTableController#occupy}), before any item was ever picked, so table status is untouched
+   * here. One atomic transaction, same reasoning as {@link #cancelOrder}: never split an order
+   * mutation from the saga machinery that must follow it.
+   */
+  @Transactional
+  public Order createAndCheckout(Long tableId, List<OrderLineItem> items) {
+    Order created = orderService.createOrderWithItems(tableId, items);
+    return startCheckout(created.getId());
+  }
+
+  /**
+   * Re-submits a full item list for an order that failed a previous checkout attempt (status OPEN,
+   * failureReason set) and re-runs checkout from scratch. Only OPEN is a legal starting point today
+   * — checking out a CONFIRMED order (editing after it was already verified once) is a separate,
+   * later milestone.
+   */
+  @Transactional
+  public Order startCheckout(Long orderId, List<OrderLineItem> newItems) {
+    Order existing = orderService.getOrder(orderId);
+    if (existing.getStatus() != OrderStatus.OPEN) {
+      throw new BusinessRuleException(
+          "Order cannot be checked out from status " + existing.getStatus() + ": " + orderId);
+    }
+    orderService.replaceItems(orderId, newItems);
+    return startCheckout(orderId);
+  }
+
+  /**
+   * Checkout steps 1+2, one atomic transaction: order to PENDING_CONFIRMATION, saga row STARTED,
+   * then immediately queue the reservation command and advance the saga step to
    * STOCK_RESERVATION_REQUESTED — all-or-nothing, so there's no window where the order/saga commit
    * lands without a durable record of the command that must eventually follow it.
    */

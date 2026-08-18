@@ -3,22 +3,23 @@ package com.cafe.orderservice.order;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.cafe.common.event.OrderLineItem;
 import com.cafe.orderservice.config.SecurityConfig;
 import com.cafe.orderservice.saga.OrderSaga;
 import com.cafe.orderservice.table.DiningTable;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
+import java.util.List;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
@@ -70,9 +71,15 @@ class OrderControllerTest {
   /**
    * One case per distinct constraint reachable through OrderController - not just a representative
    * subset - covering every request-body DTO it validates
-   * (CreateOrderRequest/AddOrderItemRequest/UpdateOrderItemQuantityRequest/MoveTableRequest/
-   * PayRequest) plus the itemId path variable, which removeItem/updateItemQuantity are the only
-   * endpoints validating alongside a sibling id param.
+   * (CreateOrderRequest/AddOrderItemRequest/CheckoutRequest/MoveTableRequest/PayRequest).
+   * AddOrderItemRequest's own constraints are exercised once via CreateOrderRequest's nested
+   * `@Valid List&lt;AddOrderItemRequest&gt; items` cascade (Spring reports nested violations as
+   * "items[0].&lt;field&gt;") - CheckoutRequest reuses the identical DTO/cascade, so it only needs
+   * its own `@NotEmpty items` case, which additionally exercises a materially different code path
+   * (checkout mixes a `@Positive` path id with a `@Valid` body, so it routes through
+   * HandlerMethodValidationException/ParameterErrors instead of createOrder's plain
+   * MethodArgumentNotValidException - see the pay_invalidPaymentMethodOnValidOrder case below for
+   * the same distinction).
    */
   private static Stream<Arguments> validationFailures() {
     return Stream.of(
@@ -84,7 +91,10 @@ class OrderControllerTest {
         Arguments.of(
             "createOrder_missingTableId",
             (Supplier<MockHttpServletRequestBuilder>)
-                () -> post("/api/orders").contentType(MediaType.APPLICATION_JSON).content("{}"),
+                () ->
+                    post("/api/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"items\":[{\"menuItemId\":12,\"quantity\":2}]}"),
             "tableId",
             "must not be null"),
         Arguments.of(
@@ -93,50 +103,54 @@ class OrderControllerTest {
                 () ->
                     post("/api/orders")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"tableId\":-1}"),
+                        .content("{\"tableId\":-1,\"items\":[{\"menuItemId\":12,\"quantity\":2}]}"),
             "tableId",
             "must be greater than 0"),
         Arguments.of(
-            "addItem_missingMenuItemId",
+            "createOrder_emptyItems",
             (Supplier<MockHttpServletRequestBuilder>)
                 () ->
-                    post("/api/orders/101/items")
+                    post("/api/orders")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"quantity\":2}"),
-            "menuItemId",
+                        .content("{\"tableId\":3,\"items\":[]}"),
+            "items",
+            "must not be empty"),
+        Arguments.of(
+            "createOrder_missingMenuItemIdInItems",
+            (Supplier<MockHttpServletRequestBuilder>)
+                () ->
+                    post("/api/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tableId\":3,\"items\":[{\"quantity\":2}]}"),
+            "items[0].menuItemId",
             "must not be null"),
         Arguments.of(
-            "addItem_negativeMenuItemId",
+            "createOrder_negativeMenuItemIdInItems",
             (Supplier<MockHttpServletRequestBuilder>)
                 () ->
-                    post("/api/orders/101/items")
+                    post("/api/orders")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"menuItemId\":-1,\"quantity\":2}"),
-            "menuItemId",
+                        .content("{\"tableId\":3,\"items\":[{\"menuItemId\":-1,\"quantity\":2}]}"),
+            "items[0].menuItemId",
             "must be greater than 0"),
         Arguments.of(
-            "addItem_zeroQuantity",
+            "createOrder_zeroQuantityInItems",
             (Supplier<MockHttpServletRequestBuilder>)
                 () ->
-                    post("/api/orders/101/items")
+                    post("/api/orders")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"menuItemId\":12,\"quantity\":0}"),
-            "quantity",
+                        .content("{\"tableId\":3,\"items\":[{\"menuItemId\":12,\"quantity\":0}]}"),
+            "items[0].quantity",
             "must be greater than or equal to 1"),
         Arguments.of(
-            "removeItem_negativeItemId",
-            (Supplier<MockHttpServletRequestBuilder>) () -> delete("/api/orders/101/items/-1"),
-            "itemId",
-            "must be greater than 0"),
-        Arguments.of(
-            "updateItemQuantity_zeroQuantity",
+            "checkout_emptyItems",
             (Supplier<MockHttpServletRequestBuilder>)
                 () ->
-                    patch("/api/orders/101/items/42")
+                    post("/api/orders/101/checkout")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"quantity\":0}"),
-            "quantity",
-            "must be greater than or equal to 1"),
+                        .content("{\"items\":[]}"),
+            "items",
+            "must not be empty"),
         Arguments.of(
             "moveTable_missingTableId",
             (Supplier<MockHttpServletRequestBuilder>)
@@ -262,28 +276,8 @@ class OrderControllerTest {
                 () ->
                     post("/api/orders")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"tableId\":3}"),
+                        .content("{\"tableId\":3,\"items\":[{\"menuItemId\":12,\"quantity\":2}]}"),
             HttpStatus.CREATED),
-        Arguments.of(
-            "addItem",
-            (Supplier<MockHttpServletRequestBuilder>)
-                () ->
-                    post("/api/orders/101/items")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"menuItemId\":12,\"quantity\":2}"),
-            HttpStatus.OK),
-        Arguments.of(
-            "removeItem",
-            (Supplier<MockHttpServletRequestBuilder>) () -> delete("/api/orders/101/items/42"),
-            HttpStatus.OK),
-        Arguments.of(
-            "updateItemQuantity",
-            (Supplier<MockHttpServletRequestBuilder>)
-                () ->
-                    patch("/api/orders/101/items/42")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"quantity\":3}"),
-            HttpStatus.OK),
         Arguments.of(
             "moveTable",
             (Supplier<MockHttpServletRequestBuilder>)
@@ -294,7 +288,11 @@ class OrderControllerTest {
             HttpStatus.OK),
         Arguments.of(
             "checkout",
-            (Supplier<MockHttpServletRequestBuilder>) () -> post("/api/orders/101/checkout"),
+            (Supplier<MockHttpServletRequestBuilder>)
+                () ->
+                    post("/api/orders/101/checkout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"items\":[{\"menuItemId\":12,\"quantity\":2}]}"),
             HttpStatus.ACCEPTED),
         Arguments.of(
             "cancel",
@@ -321,13 +319,13 @@ class OrderControllerTest {
       case "getOrder" -> when(orderService.getOrder(101L)).thenReturn(sampleOrder());
       case "getCurrentOrderForTable" ->
           when(orderService.getCurrentOrderForTable(3L)).thenReturn(sampleOrder());
-      case "createOrder" -> when(orderService.createOrder(3L)).thenReturn(sampleOrder());
-      case "addItem" -> when(orderService.addItem(101L, 12L, 2)).thenReturn(sampleOrder());
-      case "removeItem" -> when(orderService.removeItem(101L, 42L)).thenReturn(sampleOrder());
-      case "updateItemQuantity" ->
-          when(orderService.updateItemQuantity(101L, 42L, 3)).thenReturn(sampleOrder());
+      case "createOrder" ->
+          when(orderSaga.createAndCheckout(eq(3L), eq(List.of(new OrderLineItem(12L, 2)))))
+              .thenReturn(sampleOrder());
       case "moveTable" -> when(orderService.moveTable(101L, 5L)).thenReturn(sampleOrder());
-      case "checkout" -> when(orderSaga.startCheckout(101L)).thenReturn(sampleOrder());
+      case "checkout" ->
+          when(orderSaga.startCheckout(eq(101L), eq(List.of(new OrderLineItem(12L, 2)))))
+              .thenReturn(sampleOrder());
       case "cancel" -> when(orderSaga.cancelOrder(101L)).thenReturn(sampleOrder());
       case "pay" -> when(orderSaga.startPayment(101L, "CASH")).thenReturn(sampleOrder());
     }
