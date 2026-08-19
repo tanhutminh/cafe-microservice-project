@@ -96,8 +96,35 @@ public class OrderSaga {
   // ---- Verify leg ----
 
   /**
-   * Verify steps 1+2, one atomic transaction: order to PENDING_CONFIRMATION, saga row STARTED, then
-   * immediately queue the reservation command and advance the saga step to
+   * Builds a brand-new order from a locally-built draft cart and immediately starts checkout — the
+   * POS screen calls this once, when staff hit Confirm, after building the item list entirely as
+   * client-side state. The table itself was already occupied earlier (see {@code
+   * DiningTableController#occupy}), before any item was ever picked, so table status is untouched
+   * here. One atomic transaction, same reasoning as {@link #cancelOrder}: never split an order
+   * mutation from the saga machinery that must follow it.
+   */
+  @Transactional
+  public Order createAndCheckout(Long tableId, List<OrderLineItem> items) {
+    Order created = orderService.createOrderWithItems(tableId, items);
+    return startCheckout(created.getId());
+  }
+
+  /**
+   * Re-submits a full item list for an order that failed a previous checkout attempt (status OPEN,
+   * failureReason set) and re-runs checkout from scratch. Only OPEN is a legal starting point today
+   * — every other status, including CONFIRMED, is rejected. No separate status check here:
+   * replaceItems() already guards this (and checkout() guards it again below), so a third redundant
+   * fetch+check would just be extra work for no extra safety.
+   */
+  @Transactional
+  public Order startCheckout(Long orderId, List<OrderLineItem> newItems) {
+    orderService.replaceItems(orderId, newItems);
+    return startCheckout(orderId);
+  }
+
+  /**
+   * Checkout steps 1+2, one atomic transaction: order to PENDING_CONFIRMATION, saga row STARTED,
+   * then immediately queue the reservation command and advance the saga step to
    * STOCK_RESERVATION_REQUESTED — all-or-nothing, so there's no window where the order/saga commit
    * lands without a durable record of the command that must eventually follow it.
    */

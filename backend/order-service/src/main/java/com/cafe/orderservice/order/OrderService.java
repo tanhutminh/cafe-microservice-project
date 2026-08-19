@@ -1,17 +1,35 @@
 package com.cafe.orderservice.order;
 
+import com.cafe.common.event.OrderLineItem;
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
 import com.cafe.orderservice.client.MenuServiceClient;
 import com.cafe.orderservice.client.dto.MenuItemDetails;
 import com.cafe.orderservice.table.DiningTable;
 import com.cafe.orderservice.table.DiningTableService;
+import com.cafe.orderservice.table.TableStatus;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class OrderService {
+
+  /**
+   * Statuses that mean a customer is actively being served on the table right now — blocks creating
+   * a second order there. Wider than {@link DiningTableService}'s own ACTIVE_ORDER_STATUSES (which
+   * only guards releasing/moving a table): PAID is deliberately excluded here too, same as there,
+   * since a paid-but-not-yet-released table is free to start a new order on (pay-first-then-dine).
+   */
+  private static final List<OrderStatus> IN_PROGRESS_STATUSES =
+      List.of(
+          OrderStatus.OPEN,
+          OrderStatus.PENDING_CONFIRMATION,
+          OrderStatus.CONFIRMED,
+          OrderStatus.PAYMENT_PENDING);
 
   private final OrderRepository orderRepository;
   private final DiningTableService diningTableService;
@@ -42,63 +60,67 @@ public class OrderService {
         .orElseThrow(() -> ResourceNotFoundException.of("Current order for table", tableId));
   }
 
+  /**
+   * Requires the table to already be OCCUPIED (see {@link DiningTableService#occupy}) — this method
+   * never itself transitions table status, only verifies it. Also throws if another order is
+   * already in progress on the table. Same caveat as {@link DiningTableService#occupy}: this
+   * in-progress check-then-insert has no row version/lock guarding it yet, so it narrows but
+   * doesn't fully close the window for two near-simultaneous requests on the same table.
+   */
   @Transactional
-  public Order createOrder(Long tableId) {
+  public Order createOrderWithItems(Long tableId, List<OrderLineItem> items) {
+    if (orderRepository.existsByTable_IdAndStatusIn(tableId, IN_PROGRESS_STATUSES)) {
+      throw new BusinessRuleException("Table already has an order in progress: " + tableId);
+    }
     DiningTable table = diningTableService.findById(tableId);
-    diningTableService.occupy(tableId);
+    if (table.getStatus() != TableStatus.OCCUPIED) {
+      throw new BusinessRuleException("Table is not occupied: " + tableId);
+    }
     Order order = Order.builder().table(table).status(OrderStatus.OPEN).build();
+    dedupeLines(items).forEach(line -> addResolvedItem(order, line));
     return orderRepository.save(order);
   }
 
+  /**
+   * Replaces the order's entire item list with {@code newItems} — used to submit a locally-built
+   * draft cart when retrying a failed verify attempt (order status OPEN). Old lines not present in
+   * {@code newItems} are deleted (relies on {@code orphanRemoval} on {@link Order#getItems()}), not
+   * just superseded.
+   */
   @Transactional
-  public Order addItem(Long orderId, Long menuItemId, int quantity) {
+  public Order replaceItems(Long orderId, List<OrderLineItem> newItems) {
     Order order = getOrder(orderId);
     requireOpen(order);
+    order.getItems().clear();
+    dedupeLines(newItems).forEach(line -> addResolvedItem(order, line));
+    return orderRepository.save(order);
+  }
 
-    MenuItemDetails details = menuServiceClient.findMenuItem(menuItemId);
+  /**
+   * Keeps one line per menuItemId - the last occurrence wins, not a sum. The POS draft cart always
+   * merges client-side before submitting, but the server shouldn't rely on that: without this, a
+   * duplicate menuItemId across two lines would create two separate OrderItem rows instead of one.
+   */
+  private List<OrderLineItem> dedupeLines(List<OrderLineItem> lines) {
+    Map<Long, Integer> quantityByMenuItemId = new LinkedHashMap<>();
+    lines.forEach(line -> quantityByMenuItemId.put(line.menuItemId(), line.quantity()));
+    return quantityByMenuItemId.entrySet().stream()
+        .map(entry -> new OrderLineItem(entry.getKey(), entry.getValue()))
+        .toList();
+  }
+
+  private void addResolvedItem(Order order, OrderLineItem line) {
+    MenuItemDetails details = menuServiceClient.findMenuItem(line.menuItemId());
     if (!details.available()) {
       throw new BusinessRuleException("Menu item is not available: " + details.name());
     }
-
-    order.getItems().stream()
-        .filter(item -> item.getMenuItemId().equals(menuItemId))
-        .findFirst()
-        .ifPresentOrElse(
-            existing -> existing.setQuantity(existing.getQuantity() + quantity),
-            () ->
-                order.addItem(
-                    OrderItem.builder()
-                        .menuItemId(details.id())
-                        .nameSnapshot(details.name())
-                        .priceSnapshot(details.price())
-                        .quantity(quantity)
-                        .build()));
-    return orderRepository.save(order);
-  }
-
-  @Transactional
-  public Order removeItem(Long orderId, Long orderItemId) {
-    Order order = getOrder(orderId);
-    requireOpen(order);
-    boolean removed = order.getItems().removeIf(item -> item.getId().equals(orderItemId));
-    if (!removed) {
-      throw ResourceNotFoundException.of("OrderItem", orderItemId);
-    }
-    return orderRepository.save(order);
-  }
-
-  /** Sets a line's quantity directly (min 1 - use removeItem to take it down to 0 instead). */
-  @Transactional
-  public Order updateItemQuantity(Long orderId, Long orderItemId, int quantity) {
-    Order order = getOrder(orderId);
-    requireOpen(order);
-    OrderItem item =
-        order.getItems().stream()
-            .filter(i -> i.getId().equals(orderItemId))
-            .findFirst()
-            .orElseThrow(() -> ResourceNotFoundException.of("OrderItem", orderItemId));
-    item.setQuantity(quantity);
-    return orderRepository.save(order);
+    order.addItem(
+        OrderItem.builder()
+            .menuItemId(details.id())
+            .nameSnapshot(details.name())
+            .priceSnapshot(details.price())
+            .quantity(line.quantity())
+            .build());
   }
 
   @Transactional
@@ -179,12 +201,29 @@ public class OrderService {
   public Order startPayment(Long orderId, String paymentMethod) {
     Order order = getOrder(orderId);
     if (order.getStatus() != OrderStatus.CONFIRMED) {
-      throw new BusinessRuleException("Order must be verified before payment: " + orderId);
+      throw new BusinessRuleException(paymentBlockedMessage(order));
     }
     order.setStatus(OrderStatus.PAYMENT_PENDING);
     order.setPaymentMethod(paymentMethod);
     order.setFailureReason(null);
     return orderRepository.save(order);
+  }
+
+  /**
+   * A generic "must be verified before payment" is only accurate for OPEN/PENDING_CONFIRMATION -
+   * for the other non-CONFIRMED statuses it's actively misleading (e.g. telling staff to verify an
+   * order that's already PAID, when the real problem is someone else already paid it - a real race
+   * between two POS terminals hitting Pay around the same time).
+   */
+  private String paymentBlockedMessage(Order order) {
+    String reason =
+        switch (order.getStatus()) {
+          case PAID -> "Order is already paid";
+          case PAYMENT_PENDING -> "Payment is already in progress";
+          case CANCELLED -> "Cannot pay a cancelled order";
+          default -> "Order must be verified before payment";
+        };
+    return reason + ": " + order.getId();
   }
 
   /**
@@ -225,7 +264,8 @@ public class OrderService {
 
   private void requireOpen(Order order) {
     if (order.getStatus() != OrderStatus.OPEN) {
-      throw new BusinessRuleException("Order is not open: " + order.getId());
+      throw new BusinessRuleException(
+          "Order cannot be checked out from status " + order.getStatus() + ": " + order.getId());
     }
   }
 }

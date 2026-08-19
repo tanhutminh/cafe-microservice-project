@@ -97,13 +97,14 @@
     "emptyCart": "Chưa có món nào trong đơn.",
     "grandTotal": "Tổng cộng",
     "cancelOrder": "Hủy đơn",
-    "verify": "Xác thực",
+    "confirm": "Xác nhận",
     "payCash": "Thanh toán tiền mặt",
     "payCard": "Thanh toán thẻ",
     "processingPayment": "Đang xử lý thanh toán...",
     "paid": "Đã thanh toán",
     "moveTable": "Đổi bàn",
     "moveTableHint": "Chọn một bàn trống để chuyển đơn tới.",
-    "releaseTable": "Bàn đã trống / Giải phóng bàn"
+    "releaseTable": "Bàn đã trống / Giải phóng bàn",
+    "actionFailedGeneric": "Đã có lỗi xảy ra - vui lòng thử lại."
   }
 }

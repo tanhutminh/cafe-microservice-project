@@ -1,4 +1,5 @@
-export type OrderStatus = 'OPEN' | 'PENDING_CONFIRMATION' | 'CONFIRMED' | 'PAYMENT_PENDING' | 'PAID' | 'CANCELLED';
+export type OrderStatus =
+  'OPEN' | 'PENDING_CONFIRMATION' | 'CONFIRMED' | 'PAYMENT_PENDING' | 'PAID' | 'CANCELLED';
 
 export interface OrderItem {
   id: number;
@@ -21,8 +22,15 @@ export interface Order {
   closedAt: string | null;
 }
 
-export interface CreateOrderRequest {
-  tableId: number;
+/**
+ * A locally-picked line item, before it's ever been sent to the server - same shape as OrderItem
+ * minus `id`, since a draft item has no order-item id until Confirm actually persists it.
+ */
+export interface DraftItem {
+  menuItemId: number;
+  name: string;
+  price: number;
+  quantity: number;
 }
 
 export interface AddOrderItemRequest {
@@ -30,8 +38,13 @@ export interface AddOrderItemRequest {
   quantity: number;
 }
 
-export interface UpdateOrderItemQuantityRequest {
-  quantity: number;
+export interface CreateOrderRequest {
+  tableId: number;
+  items: AddOrderItemRequest[];
+}
+
+export interface CheckoutRequest {
+  items: AddOrderItemRequest[];
 }
 
 export interface PayRequest {
