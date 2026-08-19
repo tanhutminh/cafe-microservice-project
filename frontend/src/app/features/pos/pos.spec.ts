@@ -1,7 +1,7 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { Category } from '../../core/models/category.model';
 import { DiningTable } from '../../core/models/dining-table.model';
 import { MenuItem } from '../../core/models/menu-item.model';
@@ -20,6 +20,7 @@ describe('Pos', () => {
     active: true,
   };
   const occupiedTable: DiningTable = { ...availableTable, status: 'OCCUPIED' };
+  const anotherAvailableTable: DiningTable = { ...availableTable, id: 5, tableNumber: 'T5' };
   const category: Category = { id: 1, name: 'Coffee', displayOrder: 1, active: true };
   const menuItem: MenuItem = {
     id: 7,
@@ -127,6 +128,78 @@ describe('Pos', () => {
 
       expect(component.draftItems()).toEqual([]);
     });
+
+    it('increases quantity without adding a new line', () => {
+      const component = createComponent();
+      component.addToDraft(menuItem);
+
+      component.increaseDraftQuantity(menuItem.id);
+
+      expect(component.draftItems()).toEqual([
+        { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
+      ]);
+    });
+
+    it('decreases quantity without removing the line when more than 1 remains', () => {
+      const component = createComponent();
+      component.addToDraft(menuItem);
+      component.increaseDraftQuantity(menuItem.id);
+      component.increaseDraftQuantity(menuItem.id);
+
+      component.decreaseDraftQuantity(menuItem.id);
+
+      expect(component.draftItems()).toEqual([
+        { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
+      ]);
+    });
+  });
+
+  describe('canEdit()', () => {
+    it('is true when there is no current order', () => {
+      const component = createComponent();
+
+      expect(component.canEdit()).toBe(true);
+    });
+
+    it('is true for an OPEN order', () => {
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+
+      expect(component.canEdit()).toBe(true);
+    });
+
+    it('is false once the order has moved past OPEN', () => {
+      const component = createComponent();
+      component.currentOrder.set({ ...openOrder, status: 'CONFIRMED' });
+
+      expect(component.canEdit()).toBe(false);
+    });
+  });
+
+  describe('grandTotal()', () => {
+    it('sums the draft when there is no order yet', () => {
+      const component = createComponent();
+
+      component.addToDraft(menuItem);
+      component.increaseDraftQuantity(menuItem.id);
+
+      expect(component.grandTotal()).toBe(90000);
+    });
+
+    it("sums the draft while editing an OPEN order, ignoring the order's own grandTotal", () => {
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+      component.draftItems.set([{ menuItemId: 7, name: 'Latte', price: 45000, quantity: 1 }]);
+
+      expect(component.grandTotal()).toBe(45000);
+    });
+
+    it("uses the order's grandTotal once it can no longer be edited", () => {
+      const component = createComponent();
+      component.currentOrder.set({ ...openOrder, status: 'CONFIRMED', grandTotal: 90000 });
+
+      expect(component.grandTotal()).toBe(90000);
+    });
   });
 
   describe('selectTable()', () => {
@@ -186,6 +259,123 @@ describe('Pos', () => {
 
       expect(component.selectedTable()).toBeNull();
     });
+
+    it('releases the previous table if nothing was ever confirmed on it, when switching to a different table', () => {
+      const component = createComponent();
+      component.selectTable(availableTable);
+      orderApi.releaseTable.mockClear();
+
+      component.selectTable(anotherAvailableTable);
+
+      expect(orderApi.releaseTable).toHaveBeenCalledWith(3);
+      expect(orderApi.occupyTable).toHaveBeenCalledWith(5);
+      expect(component.selectedTable()).toEqual(anotherAvailableTable);
+    });
+
+    it('reloads the table list exactly once, only after both the release and the occupy settle, regardless of which settles first', () => {
+      const component = createComponent();
+      component.selectTable(availableTable);
+      orderApi.listTables.mockClear();
+      // Fresh Subjects, assigned only now - the first selectTable() above must keep using the
+      // default synchronous mocks, or it would pick up these Subjects too and leave a stray
+      // subscription that fires reloadTables() a second time when they later emit.
+      const release$ = new Subject<DiningTable>();
+      const occupy$ = new Subject<DiningTable>();
+      orderApi.releaseTable.mockReturnValue(release$);
+      orderApi.occupyTable.mockReturnValue(occupy$);
+
+      component.selectTable(anotherAvailableTable);
+      expect(orderApi.listTables).not.toHaveBeenCalled();
+
+      release$.next(availableTable);
+      release$.complete();
+      expect(orderApi.listTables).not.toHaveBeenCalled();
+
+      occupy$.next(anotherAvailableTable);
+      occupy$.complete();
+      expect(orderApi.listTables).toHaveBeenCalledTimes(1);
+    });
+
+    it('reloads the table list exactly once even when occupy settles before the release of the abandoned table', () => {
+      const component = createComponent();
+      component.selectTable(availableTable);
+      orderApi.listTables.mockClear();
+      const release$ = new Subject<DiningTable>();
+      const occupy$ = new Subject<DiningTable>();
+      orderApi.releaseTable.mockReturnValue(release$);
+      orderApi.occupyTable.mockReturnValue(occupy$);
+
+      component.selectTable(anotherAvailableTable);
+
+      occupy$.next(anotherAvailableTable);
+      occupy$.complete();
+      expect(orderApi.listTables).not.toHaveBeenCalled();
+
+      release$.next(availableTable);
+      release$.complete();
+      expect(orderApi.listTables).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not release the previous table when it already has a real order, and still switches to the new one', () => {
+      const component = createComponent();
+      component.selectTable(occupiedTable);
+      orderApi.releaseTable.mockClear();
+
+      component.selectTable(anotherAvailableTable);
+
+      expect(orderApi.releaseTable).not.toHaveBeenCalled();
+      expect(orderApi.occupyTable).toHaveBeenCalledWith(5);
+      expect(component.selectedTable()).toEqual(anotherAvailableTable);
+    });
+
+    it('releases the previous table when switching away from one reached via the 404 (no order yet) path', () => {
+      orderApi.getCurrentOrderForTable.mockReturnValue(
+        throwError(() => new HttpErrorResponse({ status: 404 })),
+      );
+      const component = createComponent();
+      component.selectTable(occupiedTable);
+      orderApi.releaseTable.mockClear();
+
+      component.selectTable(anotherAvailableTable);
+
+      expect(orderApi.releaseTable).toHaveBeenCalledWith(3);
+      expect(orderApi.occupyTable).toHaveBeenCalledWith(5);
+      expect(component.selectedTable()).toEqual(anotherAvailableTable);
+    });
+
+    it('does nothing when re-selecting the already-selected AVAILABLE table, preserving the draft', () => {
+      const component = createComponent();
+      component.selectTable(availableTable);
+      component.addToDraft(menuItem);
+      orderApi.occupyTable.mockClear();
+      orderApi.releaseTable.mockClear();
+
+      component.selectTable(availableTable);
+
+      expect(orderApi.occupyTable).not.toHaveBeenCalled();
+      expect(orderApi.releaseTable).not.toHaveBeenCalled();
+      expect(component.draftItems()).toEqual([
+        { menuItemId: 7, name: 'Latte', price: 45000, quantity: 1 },
+      ]);
+    });
+
+    it('does nothing when re-selecting the already-selected OCCUPIED table, preserving the loaded order', () => {
+      const component = createComponent();
+      component.selectTable(occupiedTable);
+      orderApi.getCurrentOrderForTable.mockClear();
+      orderApi.occupyTable.mockClear();
+      orderApi.releaseTable.mockClear();
+
+      component.selectTable(occupiedTable);
+
+      expect(orderApi.getCurrentOrderForTable).not.toHaveBeenCalled();
+      expect(orderApi.occupyTable).not.toHaveBeenCalled();
+      expect(orderApi.releaseTable).not.toHaveBeenCalled();
+      expect(component.currentOrder()).toEqual(openOrder);
+      expect(component.draftItems()).toEqual([
+        { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
+      ]);
+    });
   });
 
   describe('closeOrderPanel()', () => {
@@ -196,6 +386,17 @@ describe('Pos', () => {
       component.closeOrderPanel();
 
       expect(orderApi.releaseTable).toHaveBeenCalledWith(3);
+    });
+
+    it('clears a leftover action error from a previous confirm()/pay() failure', () => {
+      const component = createComponent();
+      component.selectedTable.set(occupiedTable);
+      component.currentOrder.set(openOrder);
+      component.actionError.set('Menu item is not available: Latte');
+
+      component.closeOrderPanel();
+
+      expect(component.actionError()).toBeNull();
     });
 
     it('still reloads tables when releasing fails, so the list reflects the real state', () => {
@@ -237,16 +438,16 @@ describe('Pos', () => {
       expect(component.confirmEnabled()).toBe(true);
     });
 
-    it('is false once the draft matches the current order exactly', () => {
+    it('stays true even when the draft exactly matches an OPEN order - it was never actually verified, so resubmitting as-is must still be possible', () => {
       const component = createComponent();
       component.currentOrder.set(openOrder);
 
       component.draftItems.set([{ menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 }]);
 
-      expect(component.confirmEnabled()).toBe(false);
+      expect(component.confirmEnabled()).toBe(true);
     });
 
-    it('is true once the draft differs from the current order', () => {
+    it('is true once the draft differs from the current order too', () => {
       const component = createComponent();
       component.currentOrder.set(openOrder);
 
@@ -285,7 +486,7 @@ describe('Pos', () => {
       expect(orderApi.createOrder).not.toHaveBeenCalled();
     });
 
-    it('does nothing when the draft has no pending change', () => {
+    it('still calls checkout when the draft exactly matches an unverified OPEN order', () => {
       const component = createComponent();
       component.selectedTable.set(occupiedTable);
       component.currentOrder.set(openOrder);
@@ -293,11 +494,12 @@ describe('Pos', () => {
 
       component.confirm();
 
-      expect(orderApi.createOrder).not.toHaveBeenCalled();
-      expect(orderApi.checkout).not.toHaveBeenCalled();
+      expect(orderApi.checkout).toHaveBeenCalledWith(101, {
+        items: [{ menuItemId: 7, quantity: 2 }],
+      });
     });
 
-    it('stops the spinner when the request errors', () => {
+    it('stops the spinner and shows a generic message when the request errors with no server message', () => {
       orderApi.createOrder.mockReturnValue(throwError(() => new Error('fail')));
       const component = createComponent();
       component.selectedTable.set(availableTable);
@@ -306,20 +508,41 @@ describe('Pos', () => {
       component.confirm();
 
       expect(component.checkingOut()).toBe(false);
+      expect(component.actionError()).toBeTruthy();
     });
-  });
 
-  describe('confirmEnabled() length mismatch', () => {
-    it('is true when the draft has a different number of items than the current order', () => {
+    it('surfaces the backend error message when the order was never touched (e.g. table taken, item unavailable)', () => {
+      orderApi.createOrder.mockReturnValue(
+        throwError(
+          () =>
+            new HttpErrorResponse({
+              status: 409,
+              error: { message: 'Menu item is not available: Latte' },
+            }),
+        ),
+      );
       const component = createComponent();
-      component.currentOrder.set(openOrder);
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
 
-      component.draftItems.set([
-        { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
-        { menuItemId: 9, name: 'Mocha', price: 50000, quantity: 1 },
-      ]);
+      component.confirm();
 
-      expect(component.confirmEnabled()).toBe(true);
+      expect(component.actionError()).toBe('Menu item is not available: Latte');
+    });
+
+    it('clears a previous error once a retry is attempted', () => {
+      orderApi.createOrder.mockReturnValueOnce(
+        throwError(() => new HttpErrorResponse({ status: 500, error: { message: 'boom' } })),
+      );
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+      component.confirm();
+      expect(component.actionError()).toBe('boom');
+
+      component.confirm();
+
+      expect(component.actionError()).toBeNull();
     });
   });
 
@@ -349,6 +572,20 @@ describe('Pos', () => {
       expect(orderApi.moveTable).toHaveBeenCalledWith(101, { tableId: 5 });
       expect(component.currentOrder()).toEqual(movedOrder);
       expect(component.movingTable()).toBe(false);
+    });
+
+    it('clears a leftover action error from a previous confirm()/pay() failure on a successful move', () => {
+      const movedOrder: Order = { ...openOrder, tableId: 5, tableNumber: 'T5' };
+      orderApi.moveTable.mockReturnValue(of(movedOrder));
+      const availableTarget: DiningTable = { ...availableTable, id: 5, tableNumber: 'T5' };
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+      component.movingTable.set(true);
+      component.actionError.set('Order is already paid: 101');
+
+      component.selectTable(availableTarget);
+
+      expect(component.actionError()).toBeNull();
     });
 
     it('does nothing when the move target is OCCUPIED', () => {
@@ -383,6 +620,29 @@ describe('Pos', () => {
 
       expect(component.movingTable()).toBe(false);
       expect(orderApi.listTables).toHaveBeenCalled();
+    });
+
+    it('surfaces the real reason when the move itself fails, replacing any leftover action error', () => {
+      orderApi.moveTable.mockReturnValue(
+        throwError(
+          () =>
+            new HttpErrorResponse({
+              status: 409,
+              error: { message: 'Cannot move table while a saga step is in progress: 101' },
+            }),
+        ),
+      );
+      const availableTarget: DiningTable = { ...availableTable, id: 5, tableNumber: 'T5' };
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+      component.movingTable.set(true);
+      component.actionError.set('Order is already paid: 101');
+
+      component.selectTable(availableTarget);
+
+      expect(component.actionError()).toBe(
+        'Cannot move table while a saga step is in progress: 101',
+      );
     });
   });
 
@@ -477,7 +737,7 @@ describe('Pos', () => {
       expect(orderApi.pay).not.toHaveBeenCalled();
     });
 
-    it('stops the spinner when the request errors', () => {
+    it('stops the spinner and shows a generic message when the request errors with no server message', () => {
       orderApi.pay.mockReturnValue(throwError(() => new Error('fail')));
       const component = createComponent();
       component.currentOrder.set({ ...openOrder, status: 'CONFIRMED' });
@@ -485,6 +745,25 @@ describe('Pos', () => {
       component.pay('CASH');
 
       expect(component.checkingOut()).toBe(false);
+      expect(component.actionError()).toBeTruthy();
+    });
+
+    it('surfaces the backend error message when payment fails', () => {
+      orderApi.pay.mockReturnValue(
+        throwError(
+          () =>
+            new HttpErrorResponse({
+              status: 409,
+              error: { message: 'Order must be verified before payment: 101' },
+            }),
+        ),
+      );
+      const component = createComponent();
+      component.currentOrder.set({ ...openOrder, status: 'CONFIRMED' });
+
+      component.pay('CASH');
+
+      expect(component.actionError()).toBe('Order must be verified before payment: 101');
     });
   });
 

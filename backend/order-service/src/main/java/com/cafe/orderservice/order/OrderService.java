@@ -9,7 +9,9 @@ import com.cafe.orderservice.table.DiningTable;
 import com.cafe.orderservice.table.DiningTableService;
 import com.cafe.orderservice.table.TableStatus;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -61,7 +63,9 @@ public class OrderService {
   /**
    * Requires the table to already be OCCUPIED (see {@link DiningTableService#occupy}) — this method
    * never itself transitions table status, only verifies it. Also throws if another order is
-   * already in progress on the table.
+   * already in progress on the table. Same caveat as {@link DiningTableService#occupy}: this
+   * in-progress check-then-insert has no row version/lock guarding it yet, so it narrows but
+   * doesn't fully close the window for two near-simultaneous requests on the same table.
    */
   @Transactional
   public Order createOrderWithItems(Long tableId, List<OrderLineItem> items) {
@@ -73,7 +77,7 @@ public class OrderService {
       throw new BusinessRuleException("Table is not occupied: " + tableId);
     }
     Order order = Order.builder().table(table).status(OrderStatus.OPEN).build();
-    items.forEach(line -> addResolvedItem(order, line));
+    dedupeLines(items).forEach(line -> addResolvedItem(order, line));
     return orderRepository.save(order);
   }
 
@@ -88,8 +92,21 @@ public class OrderService {
     Order order = getOrder(orderId);
     requireOpen(order);
     order.getItems().clear();
-    newItems.forEach(line -> addResolvedItem(order, line));
+    dedupeLines(newItems).forEach(line -> addResolvedItem(order, line));
     return orderRepository.save(order);
+  }
+
+  /**
+   * Keeps one line per menuItemId - the last occurrence wins, not a sum. The POS draft cart always
+   * merges client-side before submitting, but the server shouldn't rely on that: without this, a
+   * duplicate menuItemId across two lines would create two separate OrderItem rows instead of one.
+   */
+  private List<OrderLineItem> dedupeLines(List<OrderLineItem> lines) {
+    Map<Long, Integer> quantityByMenuItemId = new LinkedHashMap<>();
+    lines.forEach(line -> quantityByMenuItemId.put(line.menuItemId(), line.quantity()));
+    return quantityByMenuItemId.entrySet().stream()
+        .map(entry -> new OrderLineItem(entry.getKey(), entry.getValue()))
+        .toList();
   }
 
   private void addResolvedItem(Order order, OrderLineItem line) {
@@ -184,12 +201,29 @@ public class OrderService {
   public Order startPayment(Long orderId, String paymentMethod) {
     Order order = getOrder(orderId);
     if (order.getStatus() != OrderStatus.CONFIRMED) {
-      throw new BusinessRuleException("Order must be verified before payment: " + orderId);
+      throw new BusinessRuleException(paymentBlockedMessage(order));
     }
     order.setStatus(OrderStatus.PAYMENT_PENDING);
     order.setPaymentMethod(paymentMethod);
     order.setFailureReason(null);
     return orderRepository.save(order);
+  }
+
+  /**
+   * A generic "must be verified before payment" is only accurate for OPEN/PENDING_CONFIRMATION -
+   * for the other non-CONFIRMED statuses it's actively misleading (e.g. telling staff to verify an
+   * order that's already PAID, when the real problem is someone else already paid it - a real race
+   * between two POS terminals hitting Pay around the same time).
+   */
+  private String paymentBlockedMessage(Order order) {
+    String reason =
+        switch (order.getStatus()) {
+          case PAID -> "Order is already paid";
+          case PAYMENT_PENDING -> "Payment is already in progress";
+          case CANCELLED -> "Cannot pay a cancelled order";
+          default -> "Order must be verified before payment";
+        };
+    return reason + ": " + order.getId();
   }
 
   /**
@@ -230,7 +264,8 @@ public class OrderService {
 
   private void requireOpen(Order order) {
     if (order.getStatus() != OrderStatus.OPEN) {
-      throw new BusinessRuleException("Order is not open: " + order.getId());
+      throw new BusinessRuleException(
+          "Order cannot be checked out from status " + order.getStatus() + ": " + order.getId());
     }
   }
 }

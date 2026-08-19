@@ -2,6 +2,7 @@ package com.cafe.orderservice.order;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -22,11 +23,14 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -89,6 +93,21 @@ class OrderServiceTest {
     verify(diningTableService, never()).occupy(anyLong());
     assertThat(result.getItems()).hasSize(1);
     assertThat(result.getItems().get(0).getQuantity()).isEqualTo(2);
+  }
+
+  @Test
+  void createOrderWithItems_duplicateMenuItemId_keepsOneLineWithTheLastQuantity() {
+    when(diningTableService.findById(TABLE_ID)).thenReturn(table());
+    when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+    when(orderRepository.save(any(Order.class)))
+        .thenAnswer(invocation -> invocation.getArgument(0));
+
+    Order result =
+        orderService.createOrderWithItems(
+            TABLE_ID, List.of(new OrderLineItem(9L, 2), new OrderLineItem(9L, 5)));
+
+    assertThat(result.getItems()).hasSize(1);
+    assertThat(result.getItems().get(0).getQuantity()).isEqualTo(5);
   }
 
   private static final Set<OrderStatus> IN_PROGRESS_STATUSES =
@@ -190,7 +209,8 @@ class OrderServiceTest {
     } else {
       assertThatThrownBy(
               () -> orderService.replaceItems(ORDER_ID, List.of(new OrderLineItem(9L, 1))))
-          .isInstanceOf(BusinessRuleException.class);
+          .isInstanceOf(BusinessRuleException.class)
+          .hasMessage("Order cannot be checked out from status " + status + ": " + ORDER_ID);
       verify(orderRepository, never()).save(any(Order.class));
     }
   }
@@ -217,5 +237,63 @@ class OrderServiceTest {
     List<OrderItem> savedItems = captor.getValue().getItems();
     assertThat(savedItems).hasSize(1);
     assertThat(savedItems.get(0).getMenuItemId()).isEqualTo(9L);
+  }
+
+  @Test
+  void replaceItems_duplicateMenuItemId_keepsOneLineWithTheLastQuantity() {
+    when(orderRepository.findByIdWithDetails(ORDER_ID))
+        .thenReturn(Optional.of(order(OrderStatus.OPEN)));
+    when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+    when(orderRepository.save(any(Order.class)))
+        .thenAnswer(invocation -> invocation.getArgument(0));
+
+    Order result =
+        orderService.replaceItems(
+            ORDER_ID, List.of(new OrderLineItem(9L, 2), new OrderLineItem(9L, 5)));
+
+    assertThat(result.getItems()).hasSize(1);
+    assertThat(result.getItems().get(0).getQuantity()).isEqualTo(5);
+  }
+
+  @Test
+  void startPayment_fromConfirmed_startsPaymentPending() {
+    when(orderRepository.findByIdWithDetails(ORDER_ID))
+        .thenReturn(Optional.of(order(OrderStatus.CONFIRMED)));
+    when(orderRepository.save(any(Order.class)))
+        .thenAnswer(invocation -> invocation.getArgument(0));
+
+    Order result = orderService.startPayment(ORDER_ID, "CASH");
+
+    assertAll(
+        () -> assertThat(result.getStatus()).isEqualTo(OrderStatus.PAYMENT_PENDING),
+        () -> assertThat(result.getPaymentMethod()).isEqualTo("CASH"));
+  }
+
+  /**
+   * Reproduces a real race (two POS terminals hitting Pay on the same order): the message must name
+   * the *actual* reason, not a one-size-fits-all "must be verified" that's actively wrong for an
+   * order that was already paid, or whose payment is already in flight.
+   */
+  private static Stream<Arguments> startPaymentBlockedMessages() {
+    return Stream.of(
+        Arguments.of(OrderStatus.OPEN, "Order must be verified before payment: " + ORDER_ID),
+        Arguments.of(
+            OrderStatus.PENDING_CONFIRMATION, "Order must be verified before payment: " + ORDER_ID),
+        Arguments.of(OrderStatus.PAYMENT_PENDING, "Payment is already in progress: " + ORDER_ID),
+        Arguments.of(OrderStatus.PAID, "Order is already paid: " + ORDER_ID),
+        Arguments.of(OrderStatus.CANCELLED, "Cannot pay a cancelled order: " + ORDER_ID));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("startPaymentBlockedMessages")
+  void startPayment_notConfirmed_throwsWithStatusSpecificMessage(
+      OrderStatus status, String expectedMessage) {
+    when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(order(status)));
+
+    assertThatThrownBy(() -> orderService.startPayment(ORDER_ID, "CASH"))
+        .isInstanceOf(BusinessRuleException.class)
+        .hasMessage(expectedMessage);
+
+    verify(orderRepository, never()).save(any(Order.class));
   }
 }

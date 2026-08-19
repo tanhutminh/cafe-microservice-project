@@ -70,7 +70,9 @@
         </button>
       </div>
 
-      @if (currentOrder()?.failureReason) {
+      @if (actionError(); as message) {
+        <div class="error-banner">{{ message }}</div>
+      } @else if (currentOrder()?.failureReason) {
         <div class="error-banner">{{ currentOrder()?.failureReason }}</div>
       }
 
@@ -139,7 +141,7 @@
             [disabled]="!confirmEnabled()"
             (click)="confirm()"
           >
-            {{ 'pos.verify' | transloco }}
+            {{ 'pos.confirm' | transloco }}
           </button>
         </div>
       } @else if (status === 'CONFIRMED') {

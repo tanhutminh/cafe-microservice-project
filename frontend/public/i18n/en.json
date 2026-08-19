@@ -97,13 +97,14 @@
     "emptyCart": "No items in this order yet.",
     "grandTotal": "Grand total",
     "cancelOrder": "Cancel order",
-    "verify": "Verify",
+    "confirm": "Confirm",
     "payCash": "Pay cash",
     "payCard": "Pay card",
     "processingPayment": "Processing payment...",
     "paid": "Paid",
     "moveTable": "Move table",
     "moveTableHint": "Pick an available table to move this order to.",
-    "releaseTable": "Table is empty / Release table"
+    "releaseTable": "Table is empty / Release table",
+    "actionFailedGeneric": "Something went wrong - please try again."
   }
 }

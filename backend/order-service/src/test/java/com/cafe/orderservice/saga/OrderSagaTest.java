@@ -263,7 +263,6 @@ class OrderSagaTest {
   @Test
   void startCheckout_fromOpen_replacesItemsAndQueuesFullReservation() {
     List<OrderLineItem> newItems = List.of(new OrderLineItem(11L, 3));
-    when(orderService.getOrder(ORDER_ID)).thenReturn(order(OrderStatus.OPEN));
     Order pendingOrder = order(OrderStatus.PENDING_CONFIRMATION);
     when(orderService.checkout(ORDER_ID)).thenReturn(pendingOrder);
 
@@ -280,12 +279,18 @@ class OrderSagaTest {
   @ParameterizedTest
   @EnumSource(value = OrderStatus.class, names = "OPEN", mode = EnumSource.Mode.EXCLUDE)
   void startCheckout_fromDisallowedStatus_throws(OrderStatus status) {
-    when(orderService.getOrder(ORDER_ID)).thenReturn(order(status));
+    // replaceItems() is OrderService's own guard against a non-OPEN order - startCheckout(id,
+    // items) no longer duplicates that check itself, so simulate what replaceItems() would really
+    // do here instead of pre-empting it with a separate fetch+check.
+    when(orderService.replaceItems(eq(ORDER_ID), any()))
+        .thenThrow(
+            new BusinessRuleException(
+                "Order cannot be checked out from status " + status + ": " + ORDER_ID));
 
     assertThatThrownBy(() -> saga.startCheckout(ORDER_ID, List.of(new OrderLineItem(9L, 1))))
         .isInstanceOf(BusinessRuleException.class);
 
-    verify(orderService, never()).replaceItems(anyLong(), any());
+    verify(orderService, never()).checkout(anyLong());
   }
 
   @Test

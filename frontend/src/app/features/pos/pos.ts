@@ -5,7 +5,8 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { RouterLink } from '@angular/router';
-import { TranslocoModule } from '@jsverse/transloco';
+import { TranslocoModule, TranslocoService } from '@jsverse/transloco';
+import { Observable, catchError, forkJoin, of, tap } from 'rxjs';
 import { MenuApiService } from '../../core/menu/menu-api.service';
 import { Category } from '../../core/models/category.model';
 import { DiningTable } from '../../core/models/dining-table.model';
@@ -35,6 +36,7 @@ const POLL_MAX_ATTEMPTS = 10;
 export class Pos {
   private readonly orderApi = inject(OrderApiService);
   private readonly menuApi = inject(MenuApiService);
+  private readonly transloco = inject(TranslocoService);
 
   readonly tables = signal<DiningTable[]>([]);
   readonly categories = signal<Category[]>([]);
@@ -44,6 +46,7 @@ export class Pos {
   readonly draftItems = signal<DraftItem[]>([]);
   readonly checkingOut = signal(false);
   readonly movingTable = signal(false);
+  readonly actionError = signal<string | null>(null);
 
   constructor() {
     this.reloadTables();
@@ -67,14 +70,13 @@ export class Pos {
     return !order || order.status === 'OPEN';
   }
 
-  /** Enabled once there's something to submit and it actually differs from what the order already holds. */
+  /**
+   * Enabled once there's something to submit - whether that's a brand-new order, a retry of a
+   * failed one, or the same items an OPEN order already holds (it was never actually verified,
+   * so resubmitting as-is must stay possible, not just after an edit).
+   */
   confirmEnabled(): boolean {
-    const items = this.draftItems();
-    if (items.length === 0) {
-      return false;
-    }
-    const order = this.currentOrder();
-    return !order || this.draftDiffersFromOrder(items, order.items);
+    return this.draftItems().length > 0;
   }
 
   grandTotal(): number {
@@ -82,14 +84,6 @@ export class Pos {
       return this.draftItems().reduce((sum, item) => sum + item.price * item.quantity, 0);
     }
     return this.currentOrder()?.grandTotal ?? 0;
-  }
-
-  private draftDiffersFromOrder(draft: DraftItem[], orderItems: OrderItem[]): boolean {
-    if (draft.length !== orderItems.length) {
-      return true;
-    }
-    const quantityByMenuItemId = new Map(draft.map((item) => [item.menuItemId, item.quantity]));
-    return orderItems.some((item) => quantityByMenuItemId.get(item.menuItemId) !== item.quantity);
   }
 
   private toDraftItems(items: OrderItem[]): DraftItem[] {
@@ -108,20 +102,36 @@ export class Pos {
       }
       return;
     }
+    if (this.selectedTable()?.id === table.id) {
+      return;
+    }
+    const release$ = this.releaseAbandonedDraftRequest();
     this.selectedTable.set(table);
     this.currentOrder.set(null);
     this.draftItems.set([]);
+    this.actionError.set(null);
     if (table.status === 'AVAILABLE') {
-      this.orderApi.occupyTable(table.id).subscribe({
-        next: () => this.reloadTables(),
-        error: () => {
-          // Someone else already occupied it (or another failure) - back out of the selection
-          // instead of leaving a draft cart open on a table we don't actually hold.
-          this.selectedTable.set(null);
-          this.reloadTables();
-        },
-      });
+      const occupy$ = this.orderApi.occupyTable(table.id).pipe(
+        tap({
+          error: () => {
+            // Someone else already occupied it (or another failure) - back out of the selection
+            // instead of leaving a draft cart open on a table we don't actually hold.
+            this.selectedTable.set(null);
+          },
+        }),
+        catchError(() => of(null)),
+      );
+      // Wait for both the old table's release (if any) and the new table's occupy to settle
+      // before reloading, rather than reloading once per request - reloading as soon as just one
+      // of them lands can hit the backend before the other has committed, showing a table's old
+      // status instead of its new one.
+      if (release$) {
+        forkJoin([release$, occupy$]).subscribe(() => this.reloadTables());
+      } else {
+        occupy$.subscribe(() => this.reloadTables());
+      }
     } else {
+      release$?.subscribe(() => this.reloadTables());
       this.orderApi.getCurrentOrderForTable(table.id).subscribe({
         next: (order) => {
           this.currentOrder.set(order);
@@ -141,21 +151,28 @@ export class Pos {
   }
 
   closeOrderPanel(): void {
-    const table = this.selectedTable();
-    const hadNoOrder = table && !this.currentOrder();
+    this.releaseAbandonedDraftRequest()?.subscribe(() => this.reloadTables());
     this.selectedTable.set(null);
     this.currentOrder.set(null);
     this.draftItems.set([]);
     this.movingTable.set(false);
-    if (hadNoOrder) {
-      // Nothing was ever confirmed on this table - closing the panel abandons the draft, so free
-      // the table back up rather than leaving it OCCUPIED with nothing to show for it. Reload
-      // either way on failure too, so the table list reflects whatever the server actually has.
-      this.orderApi.releaseTable(table.id).subscribe({
-        next: () => this.reloadTables(),
-        error: () => this.reloadTables(),
-      });
+    this.actionError.set(null);
+  }
+
+  /**
+   * The release request for the currently selected table if nothing was ever confirmed on it -
+   * `null` if there's nothing to release. A draft cart is local-only, so leaving it (via the
+   * close button, or by picking a different table before confirming) must not leave the table
+   * OCCUPIED with nothing to show for it. Returns the request itself rather than firing it
+   * eagerly, since callers that are also about to fire another request (e.g. switching tables
+   * also occupies the new one) need to combine both before reloading the table list once.
+   */
+  private releaseAbandonedDraftRequest(): Observable<unknown> | null {
+    const table = this.selectedTable();
+    if (!table || this.currentOrder()) {
+      return null;
     }
+    return this.orderApi.releaseTable(table.id).pipe(catchError(() => of(null)));
   }
 
   startMoveTable(): void {
@@ -177,10 +194,12 @@ export class Pos {
         this.currentOrder.set(updated);
         this.selectedTable.set(table);
         this.movingTable.set(false);
+        this.actionError.set(null);
         this.reloadTables();
       },
-      error: () => {
+      error: (error: unknown) => {
         this.movingTable.set(false);
+        this.actionError.set(this.extractErrorMessage(error));
         this.reloadTables();
       },
     });
@@ -258,6 +277,7 @@ export class Pos {
       quantity: item.quantity,
     }));
     this.checkingOut.set(true);
+    this.actionError.set(null);
     const request = order
       ? this.orderApi.checkout(order.id, { items })
       : this.orderApi.createOrder({ tableId: table.id, items });
@@ -267,7 +287,10 @@ export class Pos {
         this.draftItems.set(this.toDraftItems(updated.items));
         this.pollUntilSettled(updated.id, 0);
       },
-      error: () => this.checkingOut.set(false),
+      error: (error: unknown) => {
+        this.checkingOut.set(false);
+        this.actionError.set(this.extractErrorMessage(error));
+      },
     });
   }
 
@@ -277,13 +300,31 @@ export class Pos {
       return;
     }
     this.checkingOut.set(true);
+    this.actionError.set(null);
     this.orderApi.pay(order.id, { paymentMethod }).subscribe({
       next: (updated) => {
         this.currentOrder.set(updated);
         this.pollUntilSettled(updated.id, 0);
       },
-      error: () => this.checkingOut.set(false),
+      error: (error: unknown) => {
+        this.checkingOut.set(false);
+        this.actionError.set(this.extractErrorMessage(error));
+      },
     });
+  }
+
+  /**
+   * confirm()/pay() can fail for reasons that never touch the order (e.g. the table got taken by
+   * someone else, or a picked item was 86'd between loading the menu and hitting Confirm) - there's
+   * no `failureReason` on the order to show for those, since it was never persisted or never
+   * changed. Backend errors carry a human-readable `message` (see ApiError); anything else (a
+   * network failure with no response body) falls back to a generic message.
+   */
+  private extractErrorMessage(error: unknown): string {
+    if (error instanceof HttpErrorResponse && typeof error.error?.message === 'string') {
+      return error.error.message;
+    }
+    return this.transloco.translate('pos.actionFailedGeneric');
   }
 
   private pollUntilSettled(orderId: number, attempt: number): void {

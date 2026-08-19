@@ -7,7 +7,6 @@ import com.cafe.common.event.InventoryStockCommitReply;
 import com.cafe.common.event.InventoryStockReservationReply;
 import com.cafe.common.event.OrderLineItem;
 import com.cafe.common.event.OrderPaidEvent;
-import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.orderservice.order.Order;
 import com.cafe.orderservice.order.OrderService;
 import com.cafe.orderservice.order.OrderStatus;
@@ -113,15 +112,12 @@ public class OrderSaga {
   /**
    * Re-submits a full item list for an order that failed a previous checkout attempt (status OPEN,
    * failureReason set) and re-runs checkout from scratch. Only OPEN is a legal starting point today
-   * — every other status, including CONFIRMED, is rejected.
+   * — every other status, including CONFIRMED, is rejected. No separate status check here:
+   * replaceItems() already guards this (and checkout() guards it again below), so a third redundant
+   * fetch+check would just be extra work for no extra safety.
    */
   @Transactional
   public Order startCheckout(Long orderId, List<OrderLineItem> newItems) {
-    Order existing = orderService.getOrder(orderId);
-    if (existing.getStatus() != OrderStatus.OPEN) {
-      throw new BusinessRuleException(
-          "Order cannot be checked out from status " + existing.getStatus() + ": " + orderId);
-    }
     orderService.replaceItems(orderId, newItems);
     return startCheckout(orderId);
   }
