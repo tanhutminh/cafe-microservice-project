@@ -100,6 +100,7 @@
     "confirm": "Xác nhận",
     "payCash": "Thanh toán tiền mặt",
     "payCard": "Thanh toán thẻ",
+    "processingConfirmation": "Đang xử lý xác nhận...",
     "processingPayment": "Đang xử lý thanh toán...",
     "paid": "Đã thanh toán",
     "moveTable": "Đổi bàn",

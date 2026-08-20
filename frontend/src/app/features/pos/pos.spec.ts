@@ -376,6 +376,64 @@ describe('Pos', () => {
         { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
       ]);
     });
+
+    it('clears loadingOrder once the current order fetch settles', () => {
+      const component = createComponent();
+
+      component.selectTable(occupiedTable);
+
+      expect(component.loadingOrder()).toBe(false);
+    });
+
+    it('ignores a stale occupyTable error for a table the user has since switched away from', () => {
+      const occupyA$ = new Subject<DiningTable>();
+      orderApi.occupyTable.mockReturnValueOnce(occupyA$);
+      const component = createComponent();
+
+      component.selectTable(availableTable);
+      expect(component.selectedTable()).toEqual(availableTable);
+
+      // Switches to a different table before A's occupy request resolves, then A's occupy
+      // fails (someone else took it) well after the user has moved on to B - the failure
+      // must not affect B.
+      component.selectTable(anotherAvailableTable);
+      expect(component.selectedTable()).toEqual(anotherAvailableTable);
+
+      occupyA$.error(new HttpErrorResponse({ status: 409 }));
+
+      expect(component.selectedTable()).toEqual(anotherAvailableTable);
+    });
+
+    it('ignores a stale getCurrentOrderForTable response for a table the user has since switched away from', () => {
+      const getOrderA$ = new Subject<Order>();
+      orderApi.getCurrentOrderForTable.mockReturnValueOnce(getOrderA$);
+      const component = createComponent();
+
+      component.selectTable(occupiedTable);
+      component.selectTable(anotherAvailableTable);
+
+      getOrderA$.next(openOrder);
+      getOrderA$.complete();
+
+      expect(component.currentOrder()).toBeNull();
+    });
+
+    it('does not release the previous table while its order is still being fetched', () => {
+      const getOrderA$ = new Subject<Order>();
+      orderApi.getCurrentOrderForTable.mockReturnValueOnce(getOrderA$);
+      const component = createComponent();
+
+      component.selectTable(occupiedTable);
+      expect(component.loadingOrder()).toBe(true);
+
+      // Switching away while A's fetch is still in flight must NOT be treated as "nothing was
+      // ever confirmed on A": currentOrder() reads null here not because A has no order, but
+      // because the fetch hasn't landed yet, so releasing A would risk releasing a table that
+      // actually has a real CONFIRMED order.
+      component.selectTable(anotherAvailableTable);
+
+      expect(orderApi.releaseTable).not.toHaveBeenCalled();
+    });
   });
 
   describe('closeOrderPanel()', () => {
@@ -544,6 +602,36 @@ describe('Pos', () => {
 
       expect(component.actionError()).toBeNull();
     });
+
+    it('resets checkingOut when the user switches tables before the request resolves, instead of leaving the spinner stuck for an order nobody is waiting on', () => {
+      const createOrder$ = new Subject<Order>();
+      orderApi.createOrder.mockReturnValueOnce(createOrder$);
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+
+      component.confirm();
+      expect(component.checkingOut()).toBe(true);
+
+      component.selectTable(anotherAvailableTable);
+
+      expect(component.checkingOut()).toBe(false);
+      expect(component.processingAction()).toBeNull();
+      expect(component.currentOrder()).toBeNull();
+      expect(orderApi.getOrder).not.toHaveBeenCalled();
+    });
+
+    it('sets processingAction to confirm while checking out', () => {
+      const createOrder$ = new Subject<Order>();
+      orderApi.createOrder.mockReturnValueOnce(createOrder$);
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+
+      component.confirm();
+
+      expect(component.processingAction()).toBe('confirm');
+    });
   });
 
   describe('startMoveTable() / cancelMoveTable()', () => {
@@ -572,6 +660,28 @@ describe('Pos', () => {
       expect(orderApi.moveTable).toHaveBeenCalledWith(101, { tableId: 5 });
       expect(component.currentOrder()).toEqual(movedOrder);
       expect(component.movingTable()).toBe(false);
+    });
+
+    it('ignores a stale move response for a destination the user has since picked a different table over', () => {
+      const destinationA: DiningTable = { ...availableTable, id: 6, tableNumber: 'T6' };
+      const destinationB: DiningTable = { ...availableTable, id: 8, tableNumber: 'T8' };
+      const moveToA$ = new Subject<Order>();
+      const movedToB: Order = { ...openOrder, tableId: 8, tableNumber: 'T8' };
+      orderApi.moveTable.mockReturnValueOnce(moveToA$).mockReturnValueOnce(of(movedToB));
+      const component = createComponent();
+      component.currentOrder.set(openOrder);
+      component.movingTable.set(true);
+
+      component.selectTable(destinationA);
+      component.selectTable(destinationB);
+
+      expect(component.currentOrder()).toEqual(movedToB);
+      expect(component.movingTable()).toBe(false);
+
+      moveToA$.next({ ...openOrder, tableId: 6, tableNumber: 'T6' });
+      moveToA$.complete();
+
+      expect(component.currentOrder()).toEqual(movedToB);
     });
 
     it('clears a leftover action error from a previous confirm()/pay() failure on a successful move', () => {
@@ -765,9 +875,36 @@ describe('Pos', () => {
 
       expect(component.actionError()).toBe('Order must be verified before payment: 101');
     });
+
+    it('resets checkingOut when the user closes the panel before the payment request resolves, instead of leaving the spinner stuck for an order nobody is waiting on', () => {
+      const pay$ = new Subject<Order>();
+      orderApi.pay.mockReturnValueOnce(pay$);
+      const component = createComponent();
+      component.currentOrder.set({ ...openOrder, status: 'CONFIRMED' });
+
+      component.pay('CASH');
+      expect(component.checkingOut()).toBe(true);
+
+      component.closeOrderPanel();
+
+      expect(component.checkingOut()).toBe(false);
+      expect(component.processingAction()).toBeNull();
+      expect(orderApi.getOrder).not.toHaveBeenCalled();
+    });
+
+    it('sets processingAction to pay while checking out', () => {
+      const pay$ = new Subject<Order>();
+      orderApi.pay.mockReturnValueOnce(pay$);
+      const component = createComponent();
+      component.currentOrder.set({ ...openOrder, status: 'CONFIRMED' });
+
+      component.pay('CASH');
+
+      expect(component.processingAction()).toBe('pay');
+    });
   });
 
-  describe('pollUntilSettled (driven via confirm())', () => {
+  describe('startPolling (driven via confirm())', () => {
     beforeEach(() => {
       vi.useFakeTimers();
     });
@@ -811,6 +948,46 @@ describe('Pos', () => {
 
       expect(orderApi.getOrder).toHaveBeenCalledTimes(10);
       expect(component.checkingOut()).toBe(false);
+    });
+
+    it('stops polling and resets checkingOut immediately when the user switches tables mid-poll, instead of letting a later poll response overwrite the new table', async () => {
+      const pending: Order = { ...openOrder, status: 'PENDING_CONFIRMATION' };
+      const confirmed: Order = { ...openOrder, status: 'CONFIRMED' };
+      orderApi.createOrder.mockReturnValue(of(pending));
+      orderApi.getOrder.mockReturnValue(of(confirmed));
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+
+      component.confirm();
+      expect(component.checkingOut()).toBe(true);
+
+      // Switches away (to a different AVAILABLE table) before the first poll tick fires; the old
+      // table's poll result must not show up under the newly-selected table.
+      component.selectTable(anotherAvailableTable);
+      expect(component.checkingOut()).toBe(false);
+
+      orderApi.getOrder.mockClear();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(orderApi.getOrder).not.toHaveBeenCalled();
+      expect(component.currentOrder()).toBeNull();
+    });
+
+    it('resets checkingOut and surfaces an error message when a poll request fails, instead of leaving the spinner stuck forever', async () => {
+      const pending: Order = { ...openOrder, status: 'PENDING_CONFIRMATION' };
+      orderApi.createOrder.mockReturnValue(of(pending));
+      orderApi.getOrder.mockReturnValue(throwError(() => new HttpErrorResponse({ status: 500 })));
+      const component = createComponent();
+      component.selectedTable.set(availableTable);
+      component.addToDraft(menuItem);
+
+      component.confirm();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(component.checkingOut()).toBe(false);
+      expect(component.processingAction()).toBeNull();
+      expect(component.actionError()).toBeTruthy();
     });
   });
 });

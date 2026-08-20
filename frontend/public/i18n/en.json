@@ -100,6 +100,7 @@
     "confirm": "Confirm",
     "payCash": "Pay cash",
     "payCard": "Pay card",
+    "processingConfirmation": "Processing confirmation...",
     "processingPayment": "Processing payment...",
     "paid": "Paid",
     "moveTable": "Move table",
