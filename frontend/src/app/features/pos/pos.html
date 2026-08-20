@@ -123,7 +123,14 @@
       @if (checkingOut()) {
         <div class="processing">
           <mat-spinner diameter="32"></mat-spinner>
-          <p>{{ 'pos.processingPayment' | transloco }}</p>
+          <p>
+            {{
+              (processingAction() === 'pay'
+                ? 'pos.processingPayment'
+                : 'pos.processingConfirmation'
+              ) | transloco
+            }}
+          </p>
         </div>
       } @else if (canEdit()) {
         <div class="actions">
