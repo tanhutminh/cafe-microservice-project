@@ -19,10 +19,8 @@ import com.cafe.orderservice.table.DiningTableService;
 import com.cafe.orderservice.table.TableStatus;
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,6 +44,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 class OrderServiceTest {
 
   private static final Long TABLE_ID = 3L;
+  private static final Long NEW_TABLE_ID = 4L;
   private static final Long ORDER_ID = 42L;
 
   @Mock private OrderRepository orderRepository;
@@ -65,6 +64,15 @@ class OrderServiceTest {
 
   private DiningTable table(TableStatus status) {
     return DiningTable.builder().id(TABLE_ID).tableNumber("T3").capacity(4).status(status).build();
+  }
+
+  private DiningTable newTable(TableStatus status) {
+    return DiningTable.builder()
+        .id(NEW_TABLE_ID)
+        .tableNumber("T4")
+        .capacity(4)
+        .status(status)
+        .build();
   }
 
   private Order order(OrderStatus status) {
@@ -110,13 +118,6 @@ class OrderServiceTest {
     assertThat(result.getItems().get(0).getQuantity()).isEqualTo(5);
   }
 
-  private static final Set<OrderStatus> IN_PROGRESS_STATUSES =
-      EnumSet.of(
-          OrderStatus.OPEN,
-          OrderStatus.PENDING_CONFIRMATION,
-          OrderStatus.CONFIRMED,
-          OrderStatus.PAYMENT_PENDING);
-
   /**
    * Every OrderStatus, not just a representative pair: an order in progress (OPEN through
    * PAYMENT_PENDING) must block a second order on the table, but PAID and CANCELLED must not - a
@@ -126,15 +127,11 @@ class OrderServiceTest {
   @ParameterizedTest
   @EnumSource(OrderStatus.class)
   void createOrderWithItems_statusGuard(OrderStatus existingOrderStatus) {
-    // Matches on tableId only, not the exact status collection: OrderService.IN_PROGRESS_STATUSES
-    // is a List, this test's own set is an EnumSet, and List.equals(Set) is always false per the
-    // Collections contract regardless of shared elements - asserting the real call site passes
-    // the right statuses isn't this test's job anyway, just that the guard branches correctly on
-    // whatever the repository reports.
+    boolean tableHasOrderInProgress = OrderStatus.NON_CLOSED_STATUSES.contains(existingOrderStatus);
     when(orderRepository.existsByTable_IdAndStatusIn(eq(TABLE_ID), any()))
-        .thenReturn(IN_PROGRESS_STATUSES.contains(existingOrderStatus));
+        .thenReturn(tableHasOrderInProgress);
 
-    if (IN_PROGRESS_STATUSES.contains(existingOrderStatus)) {
+    if (tableHasOrderInProgress) {
       assertThatThrownBy(
               () -> orderService.createOrderWithItems(TABLE_ID, List.of(new OrderLineItem(9L, 1))))
           .isInstanceOf(BusinessRuleException.class);
@@ -295,5 +292,76 @@ class OrderServiceTest {
         .hasMessage(expectedMessage);
 
     verify(orderRepository, never()).save(any(Order.class));
+  }
+
+  /**
+   * Every OrderStatus: PENDING_CONFIRMATION/PAYMENT_PENDING block while a saga leg is in flight
+   * (the saga tracks the order, not the table), CANCELLED blocks a cancelled order, everything else
+   * succeeds - including PAID, since pay-first-then-dine means a paid-but-not-yet-released order
+   * can still legitimately move tables.
+   */
+  @ParameterizedTest
+  @EnumSource(OrderStatus.class)
+  void moveTable_statusGuard(OrderStatus status) {
+    when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(order(status)));
+
+    if (status == OrderStatus.PENDING_CONFIRMATION || status == OrderStatus.PAYMENT_PENDING) {
+      assertThatThrownBy(() -> orderService.moveTable(ORDER_ID, NEW_TABLE_ID))
+          .isInstanceOf(BusinessRuleException.class)
+          .hasMessage("Cannot move table while a saga step is in progress: " + ORDER_ID);
+      verify(diningTableService, never()).occupy(anyLong());
+    } else if (status == OrderStatus.CANCELLED) {
+      assertThatThrownBy(() -> orderService.moveTable(ORDER_ID, NEW_TABLE_ID))
+          .isInstanceOf(BusinessRuleException.class)
+          .hasMessage("Cannot move a cancelled order: " + ORDER_ID);
+      verify(diningTableService, never()).occupy(anyLong());
+    } else {
+      when(diningTableService.findById(NEW_TABLE_ID)).thenReturn(newTable(TableStatus.AVAILABLE));
+      when(orderRepository.save(any(Order.class)))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+
+      Order result = orderService.moveTable(ORDER_ID, NEW_TABLE_ID);
+
+      assertAll(
+          () -> assertThat(result.getTable().getId()).isEqualTo(NEW_TABLE_ID),
+          () -> verify(diningTableService).occupy(NEW_TABLE_ID),
+          () -> verify(diningTableService).release(TABLE_ID));
+    }
+  }
+
+  @Test
+  void moveTable_sameTable_returnsWithoutSideEffects() {
+    Order order = order(OrderStatus.OPEN);
+    when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(order));
+
+    Order result = orderService.moveTable(ORDER_ID, TABLE_ID);
+
+    assertAll(
+        () -> assertThat(result).isSameAs(order),
+        () -> verify(diningTableService, never()).occupy(anyLong()),
+        () -> verify(diningTableService, never()).release(anyLong()),
+        () -> verify(orderRepository, never()).save(any(Order.class)));
+  }
+
+  /**
+   * Regression test for a bug where moveTable returned the pre-save Order reference instead of
+   * orderRepository.save()'s result: occupy()'s underlying query clears the persistence context
+   * (see DiningTableRepository#occupyIfAvailable), detaching order, so save() merges it into a
+   * separate managed instance rather than mutating it in place - returning the stale reference
+   * would silently drop anything JPA computes only on that managed copy (e.g. @PreUpdate
+   * timestamps).
+   */
+  @Test
+  void moveTable_returnsTheSavedInstance_notTheStaleReferenceBeforeSave() {
+    Order original = order(OrderStatus.OPEN);
+    Order saved = order(OrderStatus.OPEN);
+    when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(original));
+    when(diningTableService.findById(NEW_TABLE_ID)).thenReturn(newTable(TableStatus.AVAILABLE));
+    when(orderRepository.save(original)).thenReturn(saved);
+
+    Order result = orderService.moveTable(ORDER_ID, NEW_TABLE_ID);
+
+    assertAll(
+        () -> assertThat(result).isSameAs(saved), () -> assertThat(result).isNotSameAs(original));
   }
 }

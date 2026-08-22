@@ -234,6 +234,8 @@ The two state machines above move together but aren't the same thing: `Order.sta
 
 Two things worth knowing that aren't obvious from the table alone: `shouldIgnoreReply` (see Idempotent Consumer below) treats `COMPLETED`, `COMPENSATED`, **and** the `CONFIRMED` step as terminal/idle for reply-matching purposes — a reply arriving in any of those is necessarily a stale redelivery, since the only thing that could produce a fresh one while at `CONFIRMED` (a commit-stock reply) is never sent until `startPayment` has already moved the step past it. And `SagaStep` also declares a `COMPENSATING` value that no code path currently assigns — it's not part of the live flow, just reserved for a future in-flight compensation state if one is ever needed.
 
+Releasing a table is gated by more than its current order's status: `POST /api/tables/{id}/release` only succeeds once *every* order ever tied to that table is `CANCELLED` or `PAID` — every other status in the table above (`OPEN`, `PENDING_CONFIRMATION`, `CONFIRMED`, `PAYMENT_PENDING`) blocks it, since releasing mid-lifecycle would let a second order start on a table an earlier one still has a real claim on. The release check and the mirror-image check `OrderService` runs to refuse a second order on a table that already has one in progress test the same invariant from opposite ends of a table's lifecycle, expressed via the exact-complement sets `OrderStatus.CLOSED_STATUSES`/`NON_CLOSED_STATUSES` — defined once rather than as two independently-maintained lists.
+
 ## Auth flow
 
 1. Client logs in via `POST /api/auth/login` (public, no token required) — auth-service checks credentials and issues an RS256-signed JWT.
@@ -243,7 +245,7 @@ Two things worth knowing that aren't obvious from the table alone: `shouldIgnore
 
 ## Patterns in use
 
-Since this project's purpose is to practice canonical patterns, worth calling out explicitly which ones are implemented so far, grouped by what problem they solve rather than by when they were added. Names follow the common catalog (Chris Richardson's [microservices.io](https://microservices.io/patterns/index.html) covers all of these except Circuit Breaker/Retry, which is Enterprise Integration Patterns territory) — worth looking up the canonical definition first if a name is unfamiliar, then coming back to see how this codebase applies it.
+Since this project's purpose is to practice canonical patterns, worth calling out explicitly which ones are implemented so far, grouped by what problem they solve rather than by when they were added. Names follow the common catalog (Chris Richardson's [microservices.io](https://microservices.io/patterns/index.html) covers all of these except Circuit Breaker/Retry, which is Enterprise Integration Patterns territory, and Optimistic Concurrency Control, a general transaction-processing pattern predating microservices) — worth looking up the canonical definition first if a name is unfamiliar, then coming back to see how this codebase applies it.
 
 ### Platform
 
@@ -261,6 +263,7 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 
 - **Orchestrated Saga** — order-service's checkout flow drives a state machine (`OrderSaga`) with two legs: verify (soft-reserve stock, `OPEN`→`CONFIRMED`) and pay (commit the hold, `CONFIRMED`→`PAID`), each its own Kafka round trip that commits or compensates based on the reply; see [Business flow: checkout and payment saga](#business-flow-checkout-and-payment-saga)
 - **Try-Confirm/Cancel-style stock reservation** — inventory-service never deducts `currentStock` directly from a checkout attempt. Verifying *tries* a hold (`reservedQuantity`), paying *confirms* it into a real deduction, cancelling a `CONFIRMED` order *cancels* the hold — the same three-step shape as the classic TCC pattern, layered on top of the saga above rather than replacing it
+- **Optimistic Concurrency Control** — `DiningTableService.occupy()`/`release()` each guard a table with a single atomic conditional `UPDATE ... WHERE` statement (`DiningTableRepository.occupyIfAvailable`/`releaseIfAllOrdersClosed`) instead of a separate read-then-write. `occupy()`'s `WHERE` checks the table's own status, so two near-simultaneous `occupy()` calls for the same table can't both succeed. `release()`'s `WHERE` checks (via a subquery) that no order tied to the table is still non-closed — closing the race between releasing and an order reaching a non-closed status in between, not a race between two `release()` calls themselves (those would just both harmlessly succeed). A single-row race either way, not saga/TCC's cross-service coordination — a different consistency risk, addressed here with a different technique
 
 ### Messaging reliability
 
@@ -605,6 +608,8 @@ Hai state machine trên di chuyển song song nhưng không phải là một: `O
 
 Hai điều đáng biết mà bảng trên không tự nói lên: `shouldIgnoreReply` (xem Idempotent Consumer bên dưới) coi `COMPLETED`, `COMPENSATED`, **và** step `CONFIRMED` là terminal/rảnh khi khớp reply — 1 reply tới trong bất kỳ trạng thái nào ở trên chắc chắn là gửi lại của 1 cái đã xử lý, vì thứ duy nhất có thể tạo ra reply mới lúc đang ở `CONFIRMED` (reply của commit-stock) chỉ được gửi sau khi `startPayment` đã chuyển step qua khỏi đó. Và `SagaStep` cũng khai báo thêm giá trị `COMPENSATING` mà hiện chưa có đoạn code nào gán tới — nó không nằm trong luồng chạy thật, chỉ đang được để dành cho 1 trạng thái compensation đang-chạy-dở nếu sau này cần tới.
 
+Release 1 bàn bị chặn bởi nhiều hơn chỉ status của đơn hàng hiện tại: `POST /api/tables/{id}/release` chỉ thành công khi *mọi* đơn hàng từng gắn với bàn đó đều đã `CANCELLED` hoặc `PAID` — mọi status khác trong bảng trên (`OPEN`, `PENDING_CONFIRMATION`, `CONFIRMED`, `PAYMENT_PENDING`) đều chặn release, vì release giữa chừng sẽ cho phép 1 đơn hàng thứ 2 bắt đầu trên 1 bàn mà đơn hàng trước vẫn còn claim thật sự. Điều kiện check ở release và điều kiện đối xứng mà `OrderService` dùng để chặn đơn hàng thứ 2 trên 1 bàn đã có đơn hàng đang xử lý cùng kiểm tra 1 invariant từ 2 đầu khác nhau của vòng đời 1 bàn, biểu diễn qua cặp set phần-bù-chính-xác `OrderStatus.CLOSED_STATUSES`/`NON_CLOSED_STATUSES` — chỉ định nghĩa 1 lần duy nhất thay vì 2 danh sách duy trì độc lập.
+
 ## Luồng xác thực
 
 1. Client đăng nhập qua `POST /api/auth/login` (public, không cần token) — auth-service kiểm tra thông tin đăng nhập và cấp JWT ký bằng RS256.
@@ -614,7 +619,7 @@ Hai điều đáng biết mà bảng trên không tự nói lên: `shouldIgnoreR
 
 ## Các pattern đã áp dụng
 
-Vì mục đích của dự án là luyện tập các pattern kinh điển, nên liệt kê rõ những pattern nào đã được áp dụng tính tới thời điểm hiện tại, nhóm theo vấn đề chúng giải quyết thay vì theo thứ tự implement. Tên pattern theo đúng catalog phổ biến (bộ [microservices.io](https://microservices.io/patterns/index.html) của Chris Richardson bao phủ hết các pattern dưới đây, trừ Circuit Breaker/Retry thuộc Enterprise Integration Patterns) — nên tra định nghĩa gốc trước nếu chưa quen tên, rồi quay lại xem codebase này áp dụng nó thế nào.
+Vì mục đích của dự án là luyện tập các pattern kinh điển, nên liệt kê rõ những pattern nào đã được áp dụng tính tới thời điểm hiện tại, nhóm theo vấn đề chúng giải quyết thay vì theo thứ tự implement. Tên pattern theo đúng catalog phổ biến (bộ [microservices.io](https://microservices.io/patterns/index.html) của Chris Richardson bao phủ hết các pattern dưới đây, trừ Circuit Breaker/Retry thuộc Enterprise Integration Patterns, và Optimistic Concurrency Control — 1 pattern kinh điển của transaction-processing, có trước cả microservices) — nên tra định nghĩa gốc trước nếu chưa quen tên, rồi quay lại xem codebase này áp dụng nó thế nào.
 
 ### Nền tảng (Platform)
 
@@ -632,6 +637,7 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 
 - **Orchestrated Saga** — luồng checkout của order-service điều khiển một state machine (`OrderSaga`) gồm 2 chặng: Xác thực (giữ chỗ mềm tồn kho, `OPEN`→`CONFIRMED`) và Thanh toán (commit chỗ đã giữ, `CONFIRMED`→`PAID`), mỗi chặng là 1 vòng round-trip Kafka riêng, tự commit hoặc compensate dựa theo reply nhận được; xem mục "Luồng nghiệp vụ: saga xác thực và thanh toán" bên trên
 - **Giữ chỗ tồn kho kiểu Try-Confirm/Cancel (TCC)** — inventory-service không bao giờ trừ thẳng `currentStock` ngay khi checkout. Xác thực là bước *Try* (giữ chỗ vào `reservedQuantity`), thanh toán là bước *Confirm* (biến chỗ giữ thành trừ kho thật), hủy đơn `CONFIRMED` là bước *Cancel* (trả lại chỗ giữ) — đúng 3 bước kinh điển của pattern TCC, đặt chồng lên trên saga ở trên chứ không thay thế nó
+- **Optimistic Concurrency Control** — `DiningTableService.occupy()`/`release()` mỗi hàm tự bảo vệ 1 bàn bằng 1 câu lệnh `UPDATE ... WHERE` có điều kiện duy nhất (`DiningTableRepository.occupyIfAvailable`/`releaseIfAllOrdersClosed`) thay vì đọc-rồi-ghi tách rời. `WHERE` của `occupy()` check status của chính bàn đó, nên 2 lần gọi `occupy()` gần như đồng thời trên cùng 1 bàn không thể cùng thành công. `WHERE` của `release()` check (qua subquery) rằng không còn đơn hàng nào gắn với bàn đó ở status non-closed — đóng đúng race giữa việc release và 1 đơn hàng chuyển sang status non-closed ngay giữa chừng, chứ không phải race giữa 2 lần gọi `release()` với nhau (2 lần đó thì cứ thành công vô hại cả 2). Dù cách nào thì cũng là race trên 1 dòng dữ liệu, khác với việc điều phối xuyên service của saga/TCC — 1 rủi ro nhất quán khác, xử lý bằng 1 kỹ thuật khác
 
 ### Độ tin cậy khi truyền message (Messaging reliability)
 

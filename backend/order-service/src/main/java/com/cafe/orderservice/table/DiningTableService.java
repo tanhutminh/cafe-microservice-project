@@ -2,7 +2,6 @@ package com.cafe.orderservice.table;
 
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
-import com.cafe.orderservice.order.OrderRepository;
 import com.cafe.orderservice.order.OrderStatus;
 import com.cafe.orderservice.table.dto.DiningTableRequest;
 import java.util.List;
@@ -12,16 +11,10 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class DiningTableService {
 
-  private static final List<OrderStatus> ACTIVE_ORDER_STATUSES =
-      List.of(OrderStatus.OPEN, OrderStatus.PENDING_CONFIRMATION);
-
   private final DiningTableRepository diningTableRepository;
-  private final OrderRepository orderRepository;
 
-  public DiningTableService(
-      DiningTableRepository diningTableRepository, OrderRepository orderRepository) {
+  public DiningTableService(DiningTableRepository diningTableRepository) {
     this.diningTableRepository = diningTableRepository;
-    this.orderRepository = orderRepository;
   }
 
   public List<DiningTable> findAll() {
@@ -63,33 +56,31 @@ public class DiningTableService {
   }
 
   /**
-   * Called by DiningTableController when staff pick an AVAILABLE table to start building an order
-   * on it, before any Order row exists. Also called by OrderService.moveTable for the destination
-   * table.
+   * Marks an AVAILABLE table OCCUPIED - the first step of starting an order on it, before any Order
+   * row exists yet. See {@link DiningTableRepository#occupyIfAvailable} for the atomic guarantee
+   * this relies on: at most one of two near-simultaneous calls for the same table can succeed.
    */
   @Transactional
   public void occupy(Long id) {
-    DiningTable table = findById(id);
-    if (table.getStatus() == TableStatus.OCCUPIED) {
+    findById(id);
+    if (diningTableRepository.occupyIfAvailable(id) == 0) {
       throw new BusinessRuleException("Table is already occupied: " + id);
     }
-    table.setStatus(TableStatus.OCCUPIED);
-    diningTableRepository.save(table);
   }
 
   /**
    * Frees a table — called when an order is cancelled, when a table is moved off it, or by staff
    * explicitly marking it empty (e.g. a customer paid but is still sitting, or has now left).
-   * Refuses while an OPEN/PENDING_CONFIRMATION order still claims the table, since two active
-   * orders on the same table would break the one-active-order-per-table invariant.
+   * Refuses while any order still tied to the table has a non-closed {@link OrderStatus} (see
+   * {@link OrderStatus#NON_CLOSED_STATUSES}), since two non-closed orders on the same table would
+   * break the one-order-per-table invariant. See {@link
+   * DiningTableRepository#releaseIfAllOrdersClosed} for the atomic guarantee this relies on.
    */
   @Transactional
   public void release(Long id) {
-    DiningTable table = findById(id);
-    if (orderRepository.existsByTable_IdAndStatusIn(id, ACTIVE_ORDER_STATUSES)) {
+    findById(id);
+    if (diningTableRepository.releaseIfAllOrdersClosed(id, OrderStatus.CLOSED_STATUSES) == 0) {
       throw new BusinessRuleException("Cannot release table with an active order: " + id);
     }
-    table.setStatus(TableStatus.AVAILABLE);
-    diningTableRepository.save(table);
   }
 }

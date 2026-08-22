@@ -5,23 +5,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
-import com.cafe.orderservice.order.OrderRepository;
 import com.cafe.orderservice.order.OrderStatus;
 import com.cafe.orderservice.table.dto.DiningTableRequest;
-import java.util.EnumSet;
 import java.util.Optional;
-import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -30,7 +26,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
  * Unit coverage for DiningTableService's own logic. DiningTableControllerTest's MockMvc slice stubs
  * this service out entirely (@MockitoBean), so none of its branches ever execute there - this class
  * is where that coverage actually lives, mirroring OrderServiceTest's plain-Mockito style rather
- * than @DataJpaTest, since nothing here needs a real database.
+ * than @DataJpaTest, since nothing here needs a real database. occupy()/release()'s own status
+ * matching lives inside a single conditional-UPDATE query (DiningTableRepository), not branching
+ * Java code, so its correctness can only be verified against a real database, outside the scope of
+ * this Mockito-based class - what's tested here is that the service correctly turns the query's
+ * affected-row-count into either a no-op success or a BusinessRuleException.
  */
 @ExtendWith(MockitoExtension.class)
 class DiningTableServiceTest {
@@ -38,13 +38,12 @@ class DiningTableServiceTest {
   private static final Long TABLE_ID = 3L;
 
   @Mock private DiningTableRepository diningTableRepository;
-  @Mock private OrderRepository orderRepository;
 
   private DiningTableService diningTableService;
 
   @BeforeEach
   void setUp() {
-    diningTableService = new DiningTableService(diningTableRepository, orderRepository);
+    diningTableService = new DiningTableService(diningTableRepository);
   }
 
   private DiningTable table(TableStatus status) {
@@ -112,58 +111,50 @@ class DiningTableServiceTest {
         () -> assertThat(captor.getValue().getStatus()).isEqualTo(TableStatus.AVAILABLE));
   }
 
-  /** Every TableStatus: only AVAILABLE may transition to OCCUPIED. */
+  /**
+   * The conditional-UPDATE's affected-row-count is the only thing this service branches on: 1 row
+   * means the table was AVAILABLE at write time and now isn't; 0 rows means it wasn't AVAILABLE at
+   * write time - either it was already OCCUPIED, or (the case a plain read-then-write couldn't
+   * catch) someone else's occupy() won a race that landed between this call's own read and write.
+   */
   @ParameterizedTest
-  @EnumSource(TableStatus.class)
-  void occupy_statusGuard(TableStatus status) {
-    when(diningTableRepository.findById(TABLE_ID)).thenReturn(Optional.of(table(status)));
+  @ValueSource(ints = {0, 1})
+  void occupy_turnsConditionalUpdateResultIntoSuccessOrBusinessRule(int rowsUpdated) {
+    when(diningTableRepository.findById(TABLE_ID))
+        .thenReturn(Optional.of(table(TableStatus.AVAILABLE)));
+    when(diningTableRepository.occupyIfAvailable(TABLE_ID)).thenReturn(rowsUpdated);
 
-    if (status == TableStatus.OCCUPIED) {
+    if (rowsUpdated == 1) {
+      diningTableService.occupy(TABLE_ID);
+      verify(diningTableRepository).occupyIfAvailable(TABLE_ID);
+    } else {
       assertThatThrownBy(() -> diningTableService.occupy(TABLE_ID))
           .isInstanceOf(BusinessRuleException.class)
           .hasMessage("Table is already occupied: " + TABLE_ID);
-      verify(diningTableRepository, never()).save(any(DiningTable.class));
-    } else {
-      ArgumentCaptor<DiningTable> captor = ArgumentCaptor.forClass(DiningTable.class);
-      when(diningTableRepository.save(captor.capture()))
-          .thenAnswer(invocation -> invocation.getArgument(0));
-
-      diningTableService.occupy(TABLE_ID);
-
-      assertThat(captor.getValue().getStatus()).isEqualTo(TableStatus.OCCUPIED);
     }
   }
 
-  private static final Set<OrderStatus> ACTIVE_ORDER_STATUSES =
-      EnumSet.of(OrderStatus.OPEN, OrderStatus.PENDING_CONFIRMATION);
-
   /**
-   * Every OrderStatus, not just a representative pair: a table may only be released while no
-   * OPEN/PENDING_CONFIRMATION order still claims it - PAID and CANCELLED (and the rest) must not
-   * block release, since a paid-but-not-yet-released table or an abandoned cancelled attempt are
-   * both legitimately free to release.
+   * Same shape as the occupy() case above: 1 row means every order tied to the table was closed at
+   * write time; 0 rows means some order still tied to the table isn't CANCELLED/PAID - either a
+   * plain read would have caught it too, or (the race a plain read-then-write couldn't catch) an
+   * order reached a non-closed status between this call's own check and write.
    */
   @ParameterizedTest
-  @EnumSource(OrderStatus.class)
-  void release_activeOrderGuard(OrderStatus existingOrderStatus) {
+  @ValueSource(ints = {0, 1})
+  void release_turnsConditionalUpdateResultIntoSuccessOrBusinessRule(int rowsUpdated) {
     when(diningTableRepository.findById(TABLE_ID))
         .thenReturn(Optional.of(table(TableStatus.OCCUPIED)));
-    when(orderRepository.existsByTable_IdAndStatusIn(eq(TABLE_ID), any()))
-        .thenReturn(ACTIVE_ORDER_STATUSES.contains(existingOrderStatus));
+    when(diningTableRepository.releaseIfAllOrdersClosed(eq(TABLE_ID), any()))
+        .thenReturn(rowsUpdated);
 
-    if (ACTIVE_ORDER_STATUSES.contains(existingOrderStatus)) {
+    if (rowsUpdated == 1) {
+      diningTableService.release(TABLE_ID);
+      verify(diningTableRepository).releaseIfAllOrdersClosed(TABLE_ID, OrderStatus.CLOSED_STATUSES);
+    } else {
       assertThatThrownBy(() -> diningTableService.release(TABLE_ID))
           .isInstanceOf(BusinessRuleException.class)
           .hasMessage("Cannot release table with an active order: " + TABLE_ID);
-      verify(diningTableRepository, never()).save(any(DiningTable.class));
-    } else {
-      ArgumentCaptor<DiningTable> captor = ArgumentCaptor.forClass(DiningTable.class);
-      when(diningTableRepository.save(captor.capture()))
-          .thenAnswer(invocation -> invocation.getArgument(0));
-
-      diningTableService.release(TABLE_ID);
-
-      assertThat(captor.getValue().getStatus()).isEqualTo(TableStatus.AVAILABLE);
     }
   }
 }
