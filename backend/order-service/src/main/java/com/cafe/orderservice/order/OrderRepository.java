@@ -11,11 +11,6 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
   @Query("SELECT o FROM Order o JOIN FETCH o.table LEFT JOIN FETCH o.items WHERE o.id = :id")
   Optional<Order> findByIdWithDetails(@Param("id") Long id);
 
-  /**
-   * Used to guard both table release/move (a narrower OPEN/PENDING_CONFIRMATION-only check) and
-   * order creation (a wider set — see {@link OrderService#createOrderWithItems} — which also treats
-   * CONFIRMED/PAYMENT_PENDING as in progress).
-   */
   boolean existsByTable_IdAndStatusIn(Long tableId, Collection<OrderStatus> statuses);
 
   /**

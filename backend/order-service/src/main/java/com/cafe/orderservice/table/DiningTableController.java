@@ -56,7 +56,8 @@ public class DiningTableController {
       description =
           "A manual staff action, independent of order/payment status - since an "
               + "order can be PAID while the guest is still seated, the table doesn't "
-              + "auto-release on payment. Blocked if the table still has an active (non-CANCELLED) order.")
+              + "auto-release on payment. Blocked unless every order ever tied to the table is "
+              + "CANCELLED or PAID.")
   public DiningTableResponse release(
       @Parameter(description = "The table's id", example = "3") @PathVariable @Positive Long id) {
     diningTableService.release(id);
@@ -70,9 +71,9 @@ public class DiningTableController {
           "Called the moment staff pick an AVAILABLE table to start building an order on it, "
               + "before any Order row exists - items are picked in a local draft cart on the POS screen "
               + "and only sent to the server as a whole when the order is confirmed. Occupying up front "
-              + "narrows the window where two staff members could both start building an order on the "
-              + "same table - it does not fully close it, since this check-then-set has no row "
-              + "version/lock guarding it yet.")
+              + "closes the window where two staff members could both start building an order on the "
+              + "same table: the status check and the write are one atomic conditional UPDATE, so at "
+              + "most one of two near-simultaneous requests can succeed.")
   public DiningTableResponse occupy(
       @Parameter(description = "The table's id", example = "3") @PathVariable @Positive Long id) {
     diningTableService.occupy(id);

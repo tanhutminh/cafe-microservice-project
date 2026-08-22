@@ -18,19 +18,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class OrderService {
 
-  /**
-   * Statuses that mean a customer is actively being served on the table right now — blocks creating
-   * a second order there. Wider than {@link DiningTableService}'s own ACTIVE_ORDER_STATUSES (which
-   * only guards releasing/moving a table): PAID is deliberately excluded here too, same as there,
-   * since a paid-but-not-yet-released table is free to start a new order on (pay-first-then-dine).
-   */
-  private static final List<OrderStatus> IN_PROGRESS_STATUSES =
-      List.of(
-          OrderStatus.OPEN,
-          OrderStatus.PENDING_CONFIRMATION,
-          OrderStatus.CONFIRMED,
-          OrderStatus.PAYMENT_PENDING);
-
   private final OrderRepository orderRepository;
   private final DiningTableService diningTableService;
   private final MenuServiceClient menuServiceClient;
@@ -63,13 +50,15 @@ public class OrderService {
   /**
    * Requires the table to already be OCCUPIED (see {@link DiningTableService#occupy}) — this method
    * never itself transitions table status, only verifies it. Also throws if another order is
-   * already in progress on the table. Same caveat as {@link DiningTableService#occupy}: this
-   * in-progress check-then-insert has no row version/lock guarding it yet, so it narrows but
-   * doesn't fully close the window for two near-simultaneous requests on the same table.
+   * already in progress on the table, but this in-progress check-then-insert has no row
+   * version/lock guarding it yet, so it narrows but doesn't fully close the window for two
+   * near-simultaneous requests on the same table.
    */
   @Transactional
   public Order createOrderWithItems(Long tableId, List<OrderLineItem> items) {
-    if (orderRepository.existsByTable_IdAndStatusIn(tableId, IN_PROGRESS_STATUSES)) {
+    // PAID is not a blocking status here: a paid-but-not-yet-released table (pay-first-then-dine)
+    // is free to start a new order on.
+    if (orderRepository.existsByTable_IdAndStatusIn(tableId, OrderStatus.NON_CLOSED_STATUSES)) {
       throw new BusinessRuleException("Table already has an order in progress: " + tableId);
     }
     DiningTable table = diningTableService.findById(tableId);
@@ -162,9 +151,17 @@ public class OrderService {
       return order;
     }
     DiningTable newTable = diningTableService.findById(newTableId);
+    // occupy()/release() must stay @Transactional(REQUIRED) (the default, not overridden anywhere
+    // in that call chain) so both join this method's own transaction - if either's conditional
+    // UPDATE finds a stale row, the whole move (both table writes plus the order's reassignment)
+    // rolls back together, not just the one call that failed.
     diningTableService.occupy(newTableId);
+    // occupy()'s underlying query clears the persistence context (see
+    // DiningTableRepository#occupyIfAvailable), which detaches every entity loaded above,
+    // including order and newTable - the explicit save() below is required because dirty-checking
+    // on a detached order would silently do nothing; save() instead merges it back in.
     order.setTable(newTable);
-    orderRepository.save(order);
+    order = orderRepository.save(order);
     diningTableService.release(oldTableId);
     return order;
   }
