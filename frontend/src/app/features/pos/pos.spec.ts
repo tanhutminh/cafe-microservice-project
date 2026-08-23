@@ -558,6 +558,23 @@ describe('Pos', () => {
       expect(orderApi.createOrder).not.toHaveBeenCalled();
     });
 
+    it.each<Order['status']>(['CONFIRMED', 'PENDING_CONFIRMATION', 'PAYMENT_PENDING', 'PAID'])(
+      'does nothing when the order status is %s, not OPEN',
+      (status) => {
+        const component = createComponent();
+        component.selectedTable.set(occupiedTable);
+        component.currentOrder.set({ ...openOrder, status });
+        component.draftItems.set([{ menuItemId: 7, name: 'Latte', price: 45000, quantity: 1 }]);
+
+        component.confirm();
+
+        expect(orderApi.createOrder).not.toHaveBeenCalled();
+        expect(orderApi.checkout).not.toHaveBeenCalled();
+        expect(component.checkingOut()).toBe(false);
+        expect(component.actionError()).toBeNull();
+      },
+    );
+
     it('still calls checkout when the draft exactly matches an unverified OPEN order', () => {
       const component = createComponent();
       component.selectedTable.set(occupiedTable);
@@ -860,6 +877,20 @@ describe('Pos', () => {
 
       expect(orderApi.pay).not.toHaveBeenCalled();
     });
+
+    it.each<Order['status']>(['OPEN', 'PENDING_CONFIRMATION', 'PAYMENT_PENDING', 'PAID'])(
+      'does nothing when the order status is %s, not CONFIRMED',
+      (status) => {
+        const component = createComponent();
+        component.currentOrder.set({ ...openOrder, status });
+
+        component.pay('CASH');
+
+        expect(orderApi.pay).not.toHaveBeenCalled();
+        expect(component.checkingOut()).toBe(false);
+        expect(component.actionError()).toBeNull();
+      },
+    );
 
     it('stops the spinner and shows a generic message when the request errors with no server message', () => {
       orderApi.pay.mockReturnValue(throwError(() => new Error('fail')));
