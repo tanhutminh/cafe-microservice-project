@@ -151,7 +151,7 @@
             {{ 'pos.confirm' | transloco }}
           </button>
         </div>
-      } @else if (status === 'CONFIRMED') {
+      } @else if (canPay()) {
         <div class="actions">
           <button mat-stroked-button (click)="cancelOrder()">
             {{ 'pos.cancelOrder' | transloco }}

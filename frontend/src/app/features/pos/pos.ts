@@ -103,6 +103,11 @@ export class Pos {
     return !order || order.status === 'OPEN';
   }
 
+  /** Payment can only be taken once the saga's verify leg has reserved stock (order status CONFIRMED). */
+  canPay(): boolean {
+    return this.currentOrder()?.status === 'CONFIRMED';
+  }
+
   /**
    * Enabled once there's something to submit - whether that's a brand-new order, a retry of a
    * failed one, or the same items an OPEN order already holds (it was never actually verified,
@@ -341,7 +346,7 @@ export class Pos {
   confirm(): void {
     const table = this.selectedTable();
     const order = this.currentOrder();
-    if (!table || !this.confirmEnabled()) {
+    if (!table || !this.confirmEnabled() || !this.canEdit()) {
       return;
     }
     const items = this.draftItems().map((item) => ({
@@ -363,7 +368,7 @@ export class Pos {
 
   pay(paymentMethod: string): void {
     const order = this.currentOrder();
-    if (!order) {
+    if (!order || !this.canPay()) {
       return;
     }
     this.checkingOut.set(true);
