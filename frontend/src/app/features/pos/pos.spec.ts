@@ -120,6 +120,20 @@ describe('Pos', () => {
       ]);
     });
 
+    it('adding an existing item leaves other lines untouched', () => {
+      const anotherMenuItem: MenuItem = { ...menuItem, id: 9, name: 'Espresso', price: 30000 };
+      const component = createComponent();
+      component.addToDraft(menuItem);
+      component.addToDraft(anotherMenuItem);
+
+      component.addToDraft(menuItem);
+
+      expect(component.draftItems()).toEqual([
+        { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
+        { menuItemId: 9, name: 'Espresso', price: 30000, quantity: 1 },
+      ]);
+    });
+
     it('removes the line once quantity is decreased past 1', () => {
       const component = createComponent();
       component.addToDraft(menuItem);

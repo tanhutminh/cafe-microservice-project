@@ -293,13 +293,14 @@ export class Pos {
     });
   }
 
+  private increaseQuantity(items: DraftItem[], menuItemId: number): DraftItem[] {
+    return items.map((i) => (i.menuItemId === menuItemId ? { ...i, quantity: i.quantity + 1 } : i));
+  }
+
   addToDraft(item: MenuItem): void {
     this.draftItems.update((items) => {
-      const existing = items.find((i) => i.menuItemId === item.id);
-      if (existing) {
-        return items.map((i) =>
-          i.menuItemId === item.id ? { ...i, quantity: i.quantity + 1 } : i,
-        );
+      if (items.some((i) => i.menuItemId === item.id)) {
+        return this.increaseQuantity(items, item.id);
       }
       return [...items, { menuItemId: item.id, name: item.name, price: item.price, quantity: 1 }];
     });
@@ -310,9 +311,7 @@ export class Pos {
   }
 
   increaseDraftQuantity(menuItemId: number): void {
-    this.draftItems.update((items) =>
-      items.map((i) => (i.menuItemId === menuItemId ? { ...i, quantity: i.quantity + 1 } : i)),
-    );
+    this.draftItems.update((items) => this.increaseQuantity(items, menuItemId));
   }
 
   /** Decreasing past 1 removes the line entirely rather than allowing a 0 (or negative) quantity. */
