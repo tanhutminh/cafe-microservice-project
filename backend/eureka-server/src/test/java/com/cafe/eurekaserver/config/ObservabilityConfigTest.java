@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationPredicate;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.stream.Stream;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -19,7 +20,7 @@ class ObservabilityConfigTest {
 
   /**
    * Every case also checked against a second, unrelated observation name - the predicate must match
-   * purely on the context's path pattern, not the shared "http.server.requests" name every HTTP
+   * purely on the carrier request's raw URI, not the shared "http.server.requests" name every HTTP
    * request uses.
    */
   @ParameterizedTest
@@ -34,15 +35,23 @@ class ObservabilityConfigTest {
   }
 
   private static Stream<Arguments> healthCheckPredicateCases() {
+    HttpServletRequest healthCheckRequest = requestWithUri("/actuator/health");
     ServerRequestObservationContext healthCheck = mock(ServerRequestObservationContext.class);
-    when(healthCheck.getPathPattern()).thenReturn("/actuator/health");
+    when(healthCheck.getCarrier()).thenReturn(healthCheckRequest);
 
+    HttpServletRequest otherRequest = requestWithUri("/eureka/apps");
     ServerRequestObservationContext otherEndpoint = mock(ServerRequestObservationContext.class);
-    when(otherEndpoint.getPathPattern()).thenReturn("/eureka/apps");
+    when(otherEndpoint.getCarrier()).thenReturn(otherRequest);
 
     return Stream.of(
         Arguments.of(healthCheck, false),
         Arguments.of(otherEndpoint, true),
         Arguments.of(new Observation.Context(), true));
+  }
+
+  private static HttpServletRequest requestWithUri(String uri) {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getRequestURI()).thenReturn(uri);
+    return request;
   }
 }

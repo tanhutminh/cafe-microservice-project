@@ -1,41 +1,36 @@
 package com.cafe.inventoryservice.config;
 
+import com.cafe.common.observability.HealthCheckMarkingFilter;
+import com.cafe.common.observability.HealthCheckObservationPredicates;
+import com.cafe.common.observability.ScheduledPollerObservationPredicates;
 import com.cafe.inventoryservice.inbox.InboxPoller;
 import com.cafe.inventoryservice.outbox.OutboxPoller;
 import io.micrometer.observation.ObservationPredicate;
 import java.util.Set;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.server.observation.ServerRequestObservationContext;
-import org.springframework.scheduling.support.ScheduledTaskObservationContext;
+import org.springframework.core.Ordered;
 
 @Configuration
 public class ObservabilityConfig {
 
-  /**
-   * Excludes the health-check endpoint from tracing - matched by its own exact path pattern, not
-   * the observation name, since every HTTP server request shares the single name
-   * "http.server.requests" and filtering by name would suppress tracing for every endpoint. Assumes
-   * the default actuator base path ("/actuator"); changing management.endpoints.web.base-path would
-   * silently stop this from matching.
-   */
   @Bean
   public ObservationPredicate healthCheckObservationPredicate() {
-    return (name, context) ->
-        !(context instanceof ServerRequestObservationContext serverContext
-            && "/actuator/health".equals(serverContext.getPathPattern()));
+    return HealthCheckObservationPredicates.excludingMarkedRequests();
   }
 
-  /**
-   * Excludes this service's own recurring pollers from tracing - matched by the observation's
-   * target class, not the shared "tasks.scheduled.execution" name every {@code @Scheduled} method
-   * uses, so adding a new scheduled method elsewhere doesn't silently lose tracing too.
-   */
   @Bean
   public ObservationPredicate scheduledPollerObservationPredicate() {
-    Set<Class<?>> excludedTargets = Set.of(OutboxPoller.class, InboxPoller.class);
-    return (name, context) ->
-        !(context instanceof ScheduledTaskObservationContext taskContext
-            && excludedTargets.contains(taskContext.getTargetClass()));
+    return ScheduledPollerObservationPredicates.excludingTargets(
+        Set.of(OutboxPoller.class, InboxPoller.class));
+  }
+
+  @Bean
+  public FilterRegistrationBean<HealthCheckMarkingFilter> healthCheckMarkingFilter() {
+    FilterRegistrationBean<HealthCheckMarkingFilter> registration =
+        new FilterRegistrationBean<>(new HealthCheckMarkingFilter());
+    registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
+    return registration;
   }
 }

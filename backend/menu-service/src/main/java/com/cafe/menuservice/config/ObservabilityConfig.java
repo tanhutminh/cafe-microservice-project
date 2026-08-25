@@ -1,24 +1,26 @@
 package com.cafe.menuservice.config;
 
+import com.cafe.common.observability.HealthCheckMarkingFilter;
+import com.cafe.common.observability.HealthCheckObservationPredicates;
 import io.micrometer.observation.ObservationPredicate;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.server.observation.ServerRequestObservationContext;
+import org.springframework.core.Ordered;
 
 @Configuration
 public class ObservabilityConfig {
 
-  /**
-   * Excludes the health-check endpoint from tracing - matched by its own exact path pattern, not
-   * the observation name, since every HTTP server request shares the single name
-   * "http.server.requests" and filtering by name would suppress tracing for every endpoint. Assumes
-   * the default actuator base path ("/actuator"); changing management.endpoints.web.base-path would
-   * silently stop this from matching.
-   */
   @Bean
   public ObservationPredicate healthCheckObservationPredicate() {
-    return (name, context) ->
-        !(context instanceof ServerRequestObservationContext serverContext
-            && "/actuator/health".equals(serverContext.getPathPattern()));
+    return HealthCheckObservationPredicates.excludingMarkedRequests();
+  }
+
+  @Bean
+  public FilterRegistrationBean<HealthCheckMarkingFilter> healthCheckMarkingFilter() {
+    FilterRegistrationBean<HealthCheckMarkingFilter> registration =
+        new FilterRegistrationBean<>(new HealthCheckMarkingFilter());
+    registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
+    return registration;
   }
 }
