@@ -114,6 +114,17 @@
     </dependencies>
   </dependencyManagement>
 
+  <!-- Every module needs the same test framework the same way (test scope, version from the
+       Spring Boot BOM) - an actual inherited dependency here, not just dependencyManagement,
+       so no module has to declare or can forget it. -->
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
   <build>
     <pluginManagement>
       <plugins>
