@@ -66,7 +66,9 @@ public class OrderService {
       throw new BusinessRuleException("Table is not occupied: " + tableId);
     }
     Order order = Order.builder().table(table).status(OrderStatus.OPEN).build();
-    dedupeLines(items).forEach(line -> addResolvedItem(order, line));
+    List<OrderLineItem> lines = dedupeLines(items);
+    Map<Long, MenuItemDetails> detailsByMenuItemId = resolveMenuItems(lines);
+    lines.forEach(line -> addResolvedItem(order, line, detailsByMenuItemId));
     return orderRepository.save(order);
   }
 
@@ -81,7 +83,9 @@ public class OrderService {
     Order order = getOrder(orderId);
     requireOpen(order);
     order.getItems().clear();
-    dedupeLines(newItems).forEach(line -> addResolvedItem(order, line));
+    List<OrderLineItem> lines = dedupeLines(newItems);
+    Map<Long, MenuItemDetails> detailsByMenuItemId = resolveMenuItems(lines);
+    lines.forEach(line -> addResolvedItem(order, line, detailsByMenuItemId));
     return orderRepository.save(order);
   }
 
@@ -98,8 +102,18 @@ public class OrderService {
         .toList();
   }
 
-  private void addResolvedItem(Order order, OrderLineItem line) {
-    MenuItemDetails details = menuServiceClient.findMenuItem(line.menuItemId());
+  /** Empty input never reaches menu-service - an empty {@code lines} needs no HTTP call at all. */
+  private Map<Long, MenuItemDetails> resolveMenuItems(List<OrderLineItem> lines) {
+    if (lines.isEmpty()) {
+      return Map.of();
+    }
+    return menuServiceClient.findMenuItemsAsMap(
+        lines.stream().map(OrderLineItem::menuItemId).toList());
+  }
+
+  private void addResolvedItem(
+      Order order, OrderLineItem line, Map<Long, MenuItemDetails> detailsByMenuItemId) {
+    MenuItemDetails details = detailsByMenuItemId.get(line.menuItemId());
     if (!details.available()) {
       throw new BusinessRuleException("Menu item is not available: " + details.name());
     }

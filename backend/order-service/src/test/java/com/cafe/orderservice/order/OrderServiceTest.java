@@ -7,11 +7,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.cafe.common.event.OrderLineItem;
 import com.cafe.common.exception.BusinessRuleException;
+import com.cafe.common.exception.ResourceNotFoundException;
 import com.cafe.orderservice.client.MenuServiceClient;
 import com.cafe.orderservice.client.dto.MenuItemDetails;
 import com.cafe.orderservice.table.DiningTable;
@@ -20,6 +22,7 @@ import com.cafe.orderservice.table.TableStatus;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
@@ -92,7 +95,7 @@ class OrderServiceTest {
   @Test
   void createOrderWithItems_doesNotCallOccupy() {
     when(diningTableService.findById(TABLE_ID)).thenReturn(table());
-    when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+    when(menuServiceClient.findMenuItemsAsMap(List.of(9L))).thenReturn(Map.of(9L, available(9L)));
     when(orderRepository.save(any(Order.class)))
         .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -106,7 +109,7 @@ class OrderServiceTest {
   @Test
   void createOrderWithItems_duplicateMenuItemId_keepsOneLineWithTheLastQuantity() {
     when(diningTableService.findById(TABLE_ID)).thenReturn(table());
-    when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+    when(menuServiceClient.findMenuItemsAsMap(List.of(9L))).thenReturn(Map.of(9L, available(9L)));
     when(orderRepository.save(any(Order.class)))
         .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -139,7 +142,7 @@ class OrderServiceTest {
       verify(orderRepository, never()).save(any(Order.class));
     } else {
       when(diningTableService.findById(TABLE_ID)).thenReturn(table());
-      when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+      when(menuServiceClient.findMenuItemsAsMap(List.of(9L))).thenReturn(Map.of(9L, available(9L)));
       when(orderRepository.save(any(Order.class)))
           .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -162,7 +165,7 @@ class OrderServiceTest {
     when(diningTableService.findById(TABLE_ID)).thenReturn(table(status));
 
     if (status == TableStatus.OCCUPIED) {
-      when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+      when(menuServiceClient.findMenuItemsAsMap(List.of(9L))).thenReturn(Map.of(9L, available(9L)));
       when(orderRepository.save(any(Order.class)))
           .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -178,10 +181,65 @@ class OrderServiceTest {
   }
 
   @Test
+  void createOrderWithItems_emptyItems_neverCallsMenuService() {
+    when(diningTableService.findById(TABLE_ID)).thenReturn(table());
+    when(orderRepository.save(any(Order.class)))
+        .thenAnswer(invocation -> invocation.getArgument(0));
+
+    Order result = orderService.createOrderWithItems(TABLE_ID, List.of());
+
+    assertAll(
+        () -> assertThat(result.getItems()).isEmpty(),
+        () -> verify(menuServiceClient, never()).findMenuItemsAsMap(any()));
+  }
+
+  /**
+   * Guards against reintroducing the N+1: with two distinct line items, menu-service should be
+   * asked once for both ids together, not once per line.
+   */
+  @Test
+  void createOrderWithItems_resolvesAllLinesInOneBatchCall() {
+    when(diningTableService.findById(TABLE_ID)).thenReturn(table());
+    when(menuServiceClient.findMenuItemsAsMap(List.of(9L, 10L)))
+        .thenReturn(Map.of(9L, available(9L), 10L, available(10L)));
+    when(orderRepository.save(any(Order.class)))
+        .thenAnswer(invocation -> invocation.getArgument(0));
+
+    Order result =
+        orderService.createOrderWithItems(
+            TABLE_ID, List.of(new OrderLineItem(9L, 1), new OrderLineItem(10L, 2)));
+
+    assertAll(
+        () -> assertThat(result.getItems()).hasSize(2),
+        () -> verify(menuServiceClient, times(1)).findMenuItemsAsMap(any()));
+  }
+
+  /**
+   * MenuServiceClient#findMenuItemsAsMap validates every requested id exists before this method's
+   * loop ever reaches a per-line availability check - so a missing id surfaces as
+   * ResourceNotFoundException even when an earlier line in the same request also has its own
+   * problem (e.g. unavailable), since the batch call itself fails first.
+   */
+  @Test
+  void createOrderWithItems_missingMenuItem_failsBeforeAnyAvailabilityCheck() {
+    when(diningTableService.findById(TABLE_ID)).thenReturn(table());
+    when(menuServiceClient.findMenuItemsAsMap(List.of(9L, 99L)))
+        .thenThrow(ResourceNotFoundException.of("MenuItem", 99L));
+
+    assertThatThrownBy(
+            () ->
+                orderService.createOrderWithItems(
+                    TABLE_ID, List.of(new OrderLineItem(9L, 1), new OrderLineItem(99L, 1))))
+        .isInstanceOf(ResourceNotFoundException.class);
+
+    verify(orderRepository, never()).save(any(Order.class));
+  }
+
+  @Test
   void createOrderWithItems_resolvesEachLineViaMenuService_rejectsUnavailableItem() {
     when(diningTableService.findById(TABLE_ID)).thenReturn(table());
-    when(menuServiceClient.findMenuItem(9L))
-        .thenReturn(new MenuItemDetails(9L, "Sold-out Cake", BigDecimal.TEN, false));
+    when(menuServiceClient.findMenuItemsAsMap(List.of(9L)))
+        .thenReturn(Map.of(9L, new MenuItemDetails(9L, "Sold-out Cake", BigDecimal.TEN, false)));
 
     assertThatThrownBy(
             () -> orderService.createOrderWithItems(TABLE_ID, List.of(new OrderLineItem(9L, 1))))
@@ -196,7 +254,7 @@ class OrderServiceTest {
     when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(order(status)));
 
     if (status == OrderStatus.OPEN) {
-      when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+      when(menuServiceClient.findMenuItemsAsMap(List.of(9L))).thenReturn(Map.of(9L, available(9L)));
       when(orderRepository.save(any(Order.class)))
           .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -224,7 +282,7 @@ class OrderServiceTest {
             .quantity(1)
             .build());
     when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(existing));
-    when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+    when(menuServiceClient.findMenuItemsAsMap(List.of(9L))).thenReturn(Map.of(9L, available(9L)));
     ArgumentCaptor<Order> captor = ArgumentCaptor.forClass(Order.class);
     when(orderRepository.save(captor.capture()))
         .thenAnswer(invocation -> invocation.getArgument(0));
@@ -240,7 +298,7 @@ class OrderServiceTest {
   void replaceItems_duplicateMenuItemId_keepsOneLineWithTheLastQuantity() {
     when(orderRepository.findByIdWithDetails(ORDER_ID))
         .thenReturn(Optional.of(order(OrderStatus.OPEN)));
-    when(menuServiceClient.findMenuItem(9L)).thenReturn(available(9L));
+    when(menuServiceClient.findMenuItemsAsMap(List.of(9L))).thenReturn(Map.of(9L, available(9L)));
     when(orderRepository.save(any(Order.class)))
         .thenAnswer(invocation -> invocation.getArgument(0));
 

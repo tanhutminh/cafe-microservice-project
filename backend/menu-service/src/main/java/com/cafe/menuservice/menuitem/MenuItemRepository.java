@@ -27,4 +27,8 @@ public interface MenuItemRepository extends JpaRepository<MenuItem, Long> {
 
   @Query("SELECT m FROM MenuItem m JOIN FETCH m.category WHERE m.id = :id")
   Optional<MenuItem> findByIdWithCategory(@Param("id") Long id);
+
+  /** Batch equivalent of {@link #findByIdWithCategory(Long)} - one query covering every id. */
+  @Query("SELECT m FROM MenuItem m JOIN FETCH m.category WHERE m.id IN :ids")
+  List<MenuItem> findAllByIdWithCategory(@Param("ids") List<Long> ids);
 }

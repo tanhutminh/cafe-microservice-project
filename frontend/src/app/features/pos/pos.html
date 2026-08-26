@@ -44,13 +44,21 @@
       } @else if (status === 'PAID') {
         <p class="hint">{{ 'pos.orderPaidHint' | transloco }}</p>
       } @else if (canEdit()) {
+        @if (isCartFull()) {
+          <p class="hint">{{ 'pos.cartFull' | transloco: { max: maxDraftItems } }}</p>
+        }
         @for (category of categories(); track category.id) {
           @if (itemsByCategory(category.id).length > 0) {
             <div class="category-block">
               <h4>{{ category.name }}</h4>
               <div class="item-grid">
                 @for (item of itemsByCategory(category.id); track item.id) {
-                  <button type="button" class="menu-item-tile" (click)="addToDraft(item)">
+                  <button
+                    type="button"
+                    class="menu-item-tile"
+                    [disabled]="!canAddToDraft(item)"
+                    (click)="addToDraft(item)"
+                  >
                     <span>{{ item.name }}</span>
                     <span class="price">{{ item.price }}</span>
                   </button>
