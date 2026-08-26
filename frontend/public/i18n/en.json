@@ -106,6 +106,7 @@
     "moveTable": "Move table",
     "moveTableHint": "Pick an available table to move this order to.",
     "releaseTable": "Table is empty / Release table",
-    "actionFailedGeneric": "Something went wrong - please try again."
+    "actionFailedGeneric": "Something went wrong - please try again.",
+    "cartFull": "Order is full - each order can hold at most {{max}} distinct items."
   }
 }

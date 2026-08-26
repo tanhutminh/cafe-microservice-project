@@ -30,6 +30,8 @@ import { LanguageSwitcher } from '../../shared/language-switcher/language-switch
 
 const POLL_INTERVAL_MS = 1000;
 const POLL_MAX_ATTEMPTS = 10;
+/** Mirrors order-service's @Size(max = 50) on CreateOrderRequest/CheckoutRequest.items. */
+const MAX_DRAFT_ITEMS = 50;
 
 @Component({
   selector: 'app-pos',
@@ -65,6 +67,7 @@ export class Pos {
   readonly actionError = signal<string | null>(null);
   /** True while fetching the selected table's current order - see releaseAbandonedDraftRequest(). */
   readonly loadingOrder = signal(false);
+  readonly maxDraftItems = MAX_DRAFT_ITEMS;
 
   /**
    * Emits whenever the user moves on from whatever table/order they were looking at (switching
@@ -302,7 +305,20 @@ export class Pos {
     return items.map((i) => (i.menuItemId === menuItemId ? { ...i, quantity: i.quantity + 1 } : i));
   }
 
+  /** True once the draft cart already holds maxDraftItems distinct lines. */
+  isCartFull(): boolean {
+    return this.draftItems().length >= this.maxDraftItems;
+  }
+
+  /** A line already in the cart can always have its quantity bumped, even once the cart is full. */
+  canAddToDraft(item: MenuItem): boolean {
+    return !this.isCartFull() || this.draftItems().some((i) => i.menuItemId === item.id);
+  }
+
   addToDraft(item: MenuItem): void {
+    if (!this.canAddToDraft(item)) {
+      return;
+    }
     this.draftItems.update((items) => {
       if (items.some((i) => i.menuItemId === item.id)) {
         return this.increaseQuantity(items, item.id);

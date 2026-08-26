@@ -21,6 +21,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -152,6 +154,24 @@ class OrderControllerTest {
             "items",
             "must not be empty"),
         Arguments.of(
+            "createOrder_tooManyItems",
+            (Supplier<MockHttpServletRequestBuilder>)
+                () ->
+                    post("/api/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tableId\":3,\"items\":" + tooManyItemsJson() + "}"),
+            "items",
+            "size must be between 0 and 50"),
+        Arguments.of(
+            "checkout_tooManyItems",
+            (Supplier<MockHttpServletRequestBuilder>)
+                () ->
+                    post("/api/orders/101/checkout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"items\":" + tooManyItemsJson() + "}"),
+            "items",
+            "size must be between 0 and 50"),
+        Arguments.of(
             "moveTable_missingTableId",
             (Supplier<MockHttpServletRequestBuilder>)
                 () ->
@@ -198,6 +218,12 @@ class OrderControllerTest {
                         .content("{\"paymentMethod\":\"BITCOIN\"}"),
             "paymentMethod",
             "must match \"CASH|CARD\""));
+  }
+
+  private static String tooManyItemsJson() {
+    return IntStream.rangeClosed(1, 51)
+        .mapToObj(i -> "{\"menuItemId\":" + i + ",\"quantity\":1}")
+        .collect(Collectors.joining(",", "[", "]"));
   }
 
   @ParameterizedTest(name = "{0}")

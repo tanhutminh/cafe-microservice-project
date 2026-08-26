@@ -106,6 +106,7 @@
     "moveTable": "Đổi bàn",
     "moveTableHint": "Chọn một bàn trống để chuyển đơn tới.",
     "releaseTable": "Bàn đã trống / Giải phóng bàn",
-    "actionFailedGeneric": "Đã có lỗi xảy ra - vui lòng thử lại."
+    "actionFailedGeneric": "Đã có lỗi xảy ra - vui lòng thử lại.",
+    "cartFull": "Đơn đã đầy - mỗi đơn chỉ chứa được tối đa {{max}} món khác nhau."
   }
 }

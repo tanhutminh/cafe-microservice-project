@@ -166,6 +166,83 @@ describe('Pos', () => {
         { menuItemId: 7, name: 'Latte', price: 45000, quantity: 2 },
       ]);
     });
+
+    it('blocks adding a distinct item once the cart holds maxDraftItems lines', () => {
+      const component = createComponent();
+      for (let id = 1; id <= component.maxDraftItems; id++) {
+        component.addToDraft({ ...menuItem, id });
+      }
+
+      component.addToDraft({ ...menuItem, id: component.maxDraftItems + 1 });
+
+      expect(component.draftItems()).toHaveLength(component.maxDraftItems);
+    });
+
+    it('still allows bumping an existing line once the cart is full', () => {
+      const component = createComponent();
+      for (let id = 1; id <= component.maxDraftItems; id++) {
+        component.addToDraft({ ...menuItem, id });
+      }
+
+      component.addToDraft({ ...menuItem, id: 1 });
+
+      expect(component.draftItems().find((i) => i.menuItemId === 1)?.quantity).toBe(2);
+    });
+  });
+
+  describe('canAddToDraft()', () => {
+    it('is true when the cart has room', () => {
+      const component = createComponent();
+
+      expect(component.canAddToDraft(menuItem)).toBe(true);
+    });
+
+    it('is false for a new item once the cart is full', () => {
+      const component = createComponent();
+      for (let id = 1; id <= component.maxDraftItems; id++) {
+        component.addToDraft({ ...menuItem, id });
+      }
+
+      expect(component.canAddToDraft({ ...menuItem, id: component.maxDraftItems + 1 })).toBe(false);
+    });
+
+    it('is true for an item already in the cart even when full', () => {
+      const component = createComponent();
+      for (let id = 1; id <= component.maxDraftItems; id++) {
+        component.addToDraft({ ...menuItem, id });
+      }
+
+      expect(component.canAddToDraft({ ...menuItem, id: 1 })).toBe(true);
+    });
+  });
+
+  describe('isCartFull()', () => {
+    it('is false below the limit', () => {
+      const component = createComponent();
+      component.addToDraft(menuItem);
+
+      expect(component.isCartFull()).toBe(false);
+    });
+
+    it('is true once the cart reaches maxDraftItems distinct lines', () => {
+      const component = createComponent();
+      for (let id = 1; id <= component.maxDraftItems; id++) {
+        component.addToDraft({ ...menuItem, id });
+      }
+
+      expect(component.isCartFull()).toBe(true);
+    });
+
+    it('becomes false again after a line is removed', () => {
+      const component = createComponent();
+      for (let id = 1; id <= component.maxDraftItems; id++) {
+        component.addToDraft({ ...menuItem, id });
+      }
+
+      component.removeFromDraft(1);
+
+      expect(component.isCartFull()).toBe(false);
+    });
   });
 
   describe('canEdit()', () => {
