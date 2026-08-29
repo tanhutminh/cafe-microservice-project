@@ -13,7 +13,15 @@ COPY report-service/pom.xml report-service/pom.xml
 RUN mvn -q -N install
 COPY common-lib common-lib
 COPY order-service order-service
-RUN mvn -q -pl order-service -am package
+# -DexcludedGroups=testcontainers: OrderRepositoryTest needs a real Docker daemon (to start a
+# Postgres container) that this build stage has no access to, so it can never pass here regardless
+# of whether the test itself is correct - it's tagged @Tag("testcontainers") specifically so it can
+# be excluded here, leaving every other (Docker-independent) test still running as part of this
+# build. The real gate for that one tagged test is `mvn test` run directly on the host (or CI, once
+# that exists) where Docker is reachable. Note this property is reactor-wide (the -am build also
+# includes common-lib), not scoped to order-service alone - harmless today since common-lib has no
+# testcontainers-tagged test, but worth remembering if one is ever added there.
+RUN mvn -q -pl order-service -am package -DexcludedGroups=testcontainers
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app

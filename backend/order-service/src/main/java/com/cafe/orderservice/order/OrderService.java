@@ -136,12 +136,19 @@ public class OrderService {
         || order.getStatus() == OrderStatus.PAYMENT_PENDING) {
       throw new BusinessRuleException("Cannot cancel while a saga step is in progress: " + orderId);
     }
+    if (order.getStatus() == OrderStatus.CANCELLED) {
+      throw new BusinessRuleException("Cannot cancel a cancelled order: " + orderId);
+    }
     Long tableId = order.getTable().getId();
     order.setStatus(OrderStatus.CANCELLED);
     order.setClosedAt(Instant.now());
     orderRepository.save(order);
     diningTableService.release(tableId);
-    return order;
+    // release()'s underlying markReleased bulk-update writes releasedAt/updatedAt straight to the
+    // row, bypassing this in-memory order entirely - it stays stale (releasedAt still null) unless
+    // re-fetched. (order.getTable() was already JOIN FETCH-ed at getOrder() and never reassigned
+    // since, so unlike moveTable()'s lazy-proxy issue, it was never actually unsafe to use here.)
+    return getOrder(orderId);
   }
 
   /**
@@ -175,9 +182,14 @@ public class OrderService {
     // including order and newTable - the explicit save() below is required because dirty-checking
     // on a detached order would silently do nothing; save() instead merges it back in.
     order.setTable(newTable);
-    order = orderRepository.save(order);
+    orderRepository.save(order);
     diningTableService.release(oldTableId);
-    return order;
+    // By this point order's table association is an uninitialized lazy proxy: merging a detached
+    // entity re-associates a to-one relation by id only, with no cascade = MERGE to carry over the
+    // full object, and release()'s own underlying updates clear the persistence context again
+    // right after - so nothing above this line still has a session available to resolve it lazily.
+    // getOrder()'s JOIN FETCH hydrates it fresh instead.
+    return getOrder(orderId);
   }
 
   /**

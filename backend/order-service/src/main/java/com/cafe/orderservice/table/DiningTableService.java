@@ -2,6 +2,7 @@ package com.cafe.orderservice.table;
 
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
+import com.cafe.orderservice.order.OrderRepository;
 import com.cafe.orderservice.order.OrderStatus;
 import com.cafe.orderservice.table.dto.DiningTableRequest;
 import java.util.List;
@@ -12,9 +13,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class DiningTableService {
 
   private final DiningTableRepository diningTableRepository;
+  private final OrderRepository orderRepository;
 
-  public DiningTableService(DiningTableRepository diningTableRepository) {
+  public DiningTableService(
+      DiningTableRepository diningTableRepository, OrderRepository orderRepository) {
     this.diningTableRepository = diningTableRepository;
+    this.orderRepository = orderRepository;
   }
 
   public List<DiningTable> findAll() {
@@ -75,6 +79,11 @@ public class DiningTableService {
    * {@link OrderStatus#NON_CLOSED_STATUSES}), since two non-closed orders on the same table would
    * break the one-order-per-table invariant. See {@link
    * DiningTableRepository#releaseIfAllOrdersClosed} for the atomic guarantee this relies on.
+   *
+   * <p>Also marks every order still tied to the table as released (see {@link
+   * OrderRepository#markReleased}) - a deliberate, table-package-reaches-into-order-package
+   * exception, since every code path that frees a table must also release its lingering orders, and
+   * centralizing that here guarantees no direct caller of this method can forget it.
    */
   @Transactional
   public void release(Long id) {
@@ -82,5 +91,6 @@ public class DiningTableService {
     if (diningTableRepository.releaseIfAllOrdersClosed(id, OrderStatus.CLOSED_STATUSES) == 0) {
       throw new BusinessRuleException("Cannot release table with an active order: " + id);
     }
+    orderRepository.markReleased(id);
   }
 }
