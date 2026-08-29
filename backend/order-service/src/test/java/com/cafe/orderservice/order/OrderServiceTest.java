@@ -101,9 +101,10 @@ class OrderServiceTest {
 
     Order result = orderService.createOrderWithItems(TABLE_ID, List.of(new OrderLineItem(9L, 2)));
 
-    verify(diningTableService, never()).occupy(anyLong());
-    assertThat(result.getItems()).hasSize(1);
-    assertThat(result.getItems().get(0).getQuantity()).isEqualTo(2);
+    assertAll(
+        () -> assertThat(result.getItems()).hasSize(1),
+        () -> assertThat(result.getItems().get(0).getQuantity()).isEqualTo(2),
+        () -> verify(diningTableService, never()).occupy(anyLong()));
   }
 
   @Test
@@ -117,8 +118,9 @@ class OrderServiceTest {
         orderService.createOrderWithItems(
             TABLE_ID, List.of(new OrderLineItem(9L, 2), new OrderLineItem(9L, 5)));
 
-    assertThat(result.getItems()).hasSize(1);
-    assertThat(result.getItems().get(0).getQuantity()).isEqualTo(5);
+    assertAll(
+        () -> assertThat(result.getItems()).hasSize(1),
+        () -> assertThat(result.getItems().get(0).getQuantity()).isEqualTo(5));
   }
 
   /**
@@ -290,8 +292,9 @@ class OrderServiceTest {
     orderService.replaceItems(ORDER_ID, List.of(new OrderLineItem(9L, 3)));
 
     List<OrderItem> savedItems = captor.getValue().getItems();
-    assertThat(savedItems).hasSize(1);
-    assertThat(savedItems.get(0).getMenuItemId()).isEqualTo(9L);
+    assertAll(
+        () -> assertThat(savedItems).hasSize(1),
+        () -> assertThat(savedItems.get(0).getMenuItemId()).isEqualTo(9L));
   }
 
   @Test
@@ -306,8 +309,9 @@ class OrderServiceTest {
         orderService.replaceItems(
             ORDER_ID, List.of(new OrderLineItem(9L, 2), new OrderLineItem(9L, 5)));
 
-    assertThat(result.getItems()).hasSize(1);
-    assertThat(result.getItems().get(0).getQuantity()).isEqualTo(5);
+    assertAll(
+        () -> assertThat(result.getItems()).hasSize(1),
+        () -> assertThat(result.getItems().get(0).getQuantity()).isEqualTo(5));
   }
 
   @Test
@@ -353,6 +357,74 @@ class OrderServiceTest {
   }
 
   /**
+   * Every OrderStatus: PAID blocks (already settled, nothing left to cancel),
+   * PENDING_CONFIRMATION/PAYMENT_PENDING block while a saga leg is in flight, CANCELLED blocks a
+   * cancelled order, everything else succeeds.
+   */
+  @ParameterizedTest
+  @EnumSource(OrderStatus.class)
+  void cancel_statusGuard(OrderStatus status) {
+    when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(order(status)));
+
+    if (status == OrderStatus.PAID) {
+      assertThatThrownBy(() -> orderService.cancel(ORDER_ID))
+          .isInstanceOf(BusinessRuleException.class)
+          .hasMessage("Cannot cancel a paid order: " + ORDER_ID);
+      verify(orderRepository, never()).save(any(Order.class));
+      verify(diningTableService, never()).release(anyLong());
+    } else if (status == OrderStatus.PENDING_CONFIRMATION
+        || status == OrderStatus.PAYMENT_PENDING) {
+      assertThatThrownBy(() -> orderService.cancel(ORDER_ID))
+          .isInstanceOf(BusinessRuleException.class)
+          .hasMessage("Cannot cancel while a saga step is in progress: " + ORDER_ID);
+      verify(orderRepository, never()).save(any(Order.class));
+      verify(diningTableService, never()).release(anyLong());
+    } else if (status == OrderStatus.CANCELLED) {
+      assertThatThrownBy(() -> orderService.cancel(ORDER_ID))
+          .isInstanceOf(BusinessRuleException.class)
+          .hasMessage("Cannot cancel a cancelled order: " + ORDER_ID);
+      verify(orderRepository, never()).save(any(Order.class));
+      verify(diningTableService, never()).release(anyLong());
+    } else {
+      when(orderRepository.save(any(Order.class)))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+
+      Order result = orderService.cancel(ORDER_ID);
+
+      assertAll(
+          () -> assertThat(result.getStatus()).isEqualTo(OrderStatus.CANCELLED),
+          () -> assertThat(result.getClosedAt()).isNotNull(),
+          () -> verify(orderRepository).save(any(Order.class)),
+          () -> verify(diningTableService).release(TABLE_ID),
+          () -> verify(orderRepository, times(2)).findByIdWithDetails(ORDER_ID));
+    }
+  }
+
+  /**
+   * Regression test: release()'s underlying markReleased bulk-update writes releasedAt/updatedAt
+   * straight to the row, bypassing whatever Order this method already has loaded - so cancel() must
+   * return a freshly re-fetched order, not the pre-release reference (which cancel() also builds by
+   * mutating and saving in place, unlike moveTable()'s merge-into-a-new-instance case, but the
+   * stale result is the same: an in-memory releasedAt/updatedAt that no longer matches the row).
+   */
+  @Test
+  void cancel_returnsAFreshlyRefetchedOrder_notTheStaleReferenceBeforeRelease() {
+    Order original = order(OrderStatus.OPEN);
+    Order refetched = order(OrderStatus.OPEN);
+    when(orderRepository.findByIdWithDetails(ORDER_ID))
+        .thenReturn(Optional.of(original), Optional.of(refetched));
+
+    Order result = orderService.cancel(ORDER_ID);
+
+    assertAll(
+        () -> assertThat(result).isSameAs(refetched),
+        () -> assertThat(result).isNotSameAs(original),
+        () -> verify(orderRepository, times(2)).findByIdWithDetails(ORDER_ID),
+        () -> verify(orderRepository).save(original),
+        () -> verify(diningTableService).release(TABLE_ID));
+  }
+
+  /**
    * Every OrderStatus: PENDING_CONFIRMATION/PAYMENT_PENDING block while a saga leg is in flight
    * (the saga tracks the order, not the table), CANCELLED blocks a cancelled order, everything else
    * succeeds - including PAID, since pay-first-then-dine means a paid-but-not-yet-released order
@@ -368,11 +440,15 @@ class OrderServiceTest {
           .isInstanceOf(BusinessRuleException.class)
           .hasMessage("Cannot move table while a saga step is in progress: " + ORDER_ID);
       verify(diningTableService, never()).occupy(anyLong());
+      verify(orderRepository, never()).save(any(Order.class));
+      verify(diningTableService, never()).release(anyLong());
     } else if (status == OrderStatus.CANCELLED) {
       assertThatThrownBy(() -> orderService.moveTable(ORDER_ID, NEW_TABLE_ID))
           .isInstanceOf(BusinessRuleException.class)
           .hasMessage("Cannot move a cancelled order: " + ORDER_ID);
       verify(diningTableService, never()).occupy(anyLong());
+      verify(orderRepository, never()).save(any(Order.class));
+      verify(diningTableService, never()).release(anyLong());
     } else {
       when(diningTableService.findById(NEW_TABLE_ID)).thenReturn(newTable(TableStatus.AVAILABLE));
       when(orderRepository.save(any(Order.class)))
@@ -382,8 +458,11 @@ class OrderServiceTest {
 
       assertAll(
           () -> assertThat(result.getTable().getId()).isEqualTo(NEW_TABLE_ID),
+          () -> verify(diningTableService).findById(NEW_TABLE_ID),
           () -> verify(diningTableService).occupy(NEW_TABLE_ID),
-          () -> verify(diningTableService).release(TABLE_ID));
+          () -> verify(diningTableService).release(TABLE_ID),
+          () -> verify(orderRepository).save(any(Order.class)),
+          () -> verify(orderRepository, times(2)).findByIdWithDetails(ORDER_ID));
     }
   }
 
@@ -402,24 +481,31 @@ class OrderServiceTest {
   }
 
   /**
-   * Regression test for a bug where moveTable returned the pre-save Order reference instead of
-   * orderRepository.save()'s result: occupy()'s underlying query clears the persistence context
-   * (see DiningTableRepository#occupyIfAvailable), detaching order, so save() merges it into a
-   * separate managed instance rather than mutating it in place - returning the stale reference
-   * would silently drop anything JPA computes only on that managed copy (e.g. @PreUpdate
-   * timestamps).
+   * Regression test for a LazyInitializationException: release()'s underlying bulk updates clear
+   * the persistence context, and save()'s merge re-associates a detached order's table by id as an
+   * uninitialized lazy proxy (no cascade = MERGE on that association) - so returning save()'s
+   * result (or the pre-save reference) risks handing the caller an order whose table can no longer
+   * be lazily loaded once the session is gone. moveTable() instead re-fetches via getOrder() (JOIN
+   * FETCH-ing the table) as the last step, after every clear has already happened.
    */
   @Test
-  void moveTable_returnsTheSavedInstance_notTheStaleReferenceBeforeSave() {
+  void moveTable_returnsAFreshlyRefetchedOrder_notTheStaleReferenceBeforeSave() {
     Order original = order(OrderStatus.OPEN);
     Order saved = order(OrderStatus.OPEN);
-    when(orderRepository.findByIdWithDetails(ORDER_ID)).thenReturn(Optional.of(original));
+    Order refetched = order(OrderStatus.OPEN);
+    when(orderRepository.findByIdWithDetails(ORDER_ID))
+        .thenReturn(Optional.of(original), Optional.of(refetched));
     when(diningTableService.findById(NEW_TABLE_ID)).thenReturn(newTable(TableStatus.AVAILABLE));
     when(orderRepository.save(original)).thenReturn(saved);
 
     Order result = orderService.moveTable(ORDER_ID, NEW_TABLE_ID);
 
     assertAll(
-        () -> assertThat(result).isSameAs(saved), () -> assertThat(result).isNotSameAs(original));
+        () -> assertThat(result).isSameAs(refetched),
+        () -> assertThat(result).isNotSameAs(saved),
+        () -> assertThat(result).isNotSameAs(original),
+        () -> verify(orderRepository, times(2)).findByIdWithDetails(ORDER_ID),
+        () -> verify(orderRepository).save(original),
+        () -> verify(diningTableService).release(TABLE_ID));
   }
 }

@@ -5,11 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.cafe.common.exception.BusinessRuleException;
 import com.cafe.common.exception.ResourceNotFoundException;
+import com.cafe.orderservice.order.OrderRepository;
 import com.cafe.orderservice.order.OrderStatus;
 import com.cafe.orderservice.table.dto.DiningTableRequest;
 import java.util.Optional;
@@ -38,12 +40,13 @@ class DiningTableServiceTest {
   private static final Long TABLE_ID = 3L;
 
   @Mock private DiningTableRepository diningTableRepository;
+  @Mock private OrderRepository orderRepository;
 
   private DiningTableService diningTableService;
 
   @BeforeEach
   void setUp() {
-    diningTableService = new DiningTableService(diningTableRepository);
+    diningTableService = new DiningTableService(diningTableRepository, orderRepository);
   }
 
   private DiningTable table(TableStatus status) {
@@ -150,11 +153,16 @@ class DiningTableServiceTest {
 
     if (rowsUpdated == 1) {
       diningTableService.release(TABLE_ID);
-      verify(diningTableRepository).releaseIfAllOrdersClosed(TABLE_ID, OrderStatus.CLOSED_STATUSES);
+      assertAll(
+          () ->
+              verify(diningTableRepository)
+                  .releaseIfAllOrdersClosed(TABLE_ID, OrderStatus.CLOSED_STATUSES),
+          () -> verify(orderRepository).markReleased(TABLE_ID));
     } else {
       assertThatThrownBy(() -> diningTableService.release(TABLE_ID))
           .isInstanceOf(BusinessRuleException.class)
           .hasMessage("Cannot release table with an active order: " + TABLE_ID);
+      verify(orderRepository, never()).markReleased(any());
     }
   }
 }
