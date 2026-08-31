@@ -14,6 +14,28 @@
   <packaging>jar</packaging>
   <name>inventory-service</name>
 
+  <!--
+    spring-boot-dependencies imports testcontainers-bom internally, but Maven doesn't flatten a
+    BOM's own nested `import`-scoped entries into whatever imports *it* - only its own directly
+    declared dependencyManagement entries propagate. So org.testcontainers:testcontainers-postgresql
+    /testcontainers-junit-jupiter (below) need this import repeated here to pick up a version at
+    all. The version (`testcontainers-bom.version` in the parent's `<properties>`) is set to the
+    value spring-boot-dependencies:4.1.0 itself pins testcontainers-bom to (its own
+    testcontainers.version property, which - same reason - isn't visible here either) - keep that
+    property in sync if spring-boot-dependencies' pin changes.
+  -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers-bom.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <dependency>
       <groupId>com.cafe</groupId>
@@ -101,6 +123,26 @@
       <artifactId>spring-boot-security-test</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-data-jpa-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
@@ -112,6 +154,25 @@
       <plugin>
         <groupId>org.jacoco</groupId>
         <artifactId>jacoco-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!--
+            The Postgres JDBC driver asks the server to SET TIME ZONE to the JVM's default one on
+            connect - on a machine whose OS reports "Asia/Saigon" (the old IANA alias for what's now
+            "Asia/Ho_Chi_Minh"), the Testcontainers postgres:16 image's bundled tzdata doesn't
+            recognize it and refuses the connection outright. Forcing UTC here sidesteps needing
+            every dev machine's OS-level timezone name to be one this exact Postgres image accepts.
+            @{argLine} (not a literal value) carries forward whatever jacoco-maven-plugin's own
+            prepare-agent goal already put into the argLine property (the -javaagent flag it needs
+            to collect coverage) - a literal <argLine> here would silently replace that instead of
+            adding to it, since Surefire only auto-merges with Jacoco's property when nothing else
+            sets argLine explicitly.
+          -->
+          <argLine>@{argLine} -Duser.timezone=UTC</argLine>
+        </configuration>
       </plugin>
     </plugins>
   </build>
