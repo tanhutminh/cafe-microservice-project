@@ -15,9 +15,9 @@ import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.boot.jpa.test.autoconfigure.TestEntityManager;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Runs against a real Postgres container (not an embedded substitute), since {@link
@@ -37,7 +37,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class OrderRepositoryTest {
 
   @Container @ServiceConnection
-  static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+  static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
 
   @Autowired private TestEntityManager entityManager;
   @Autowired private OrderRepository orderRepository;
