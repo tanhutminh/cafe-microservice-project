@@ -106,6 +106,6 @@ public class IngredientService {
 
   public List<StockMovement> findMovements(Long id) {
     findById(id);
-    return stockMovementRepository.findByIngredientIdOrderByCreatedAtDesc(id);
+    return stockMovementRepository.findAllByIngredientIdOrderByCreatedAtDesc(id);
   }
 }

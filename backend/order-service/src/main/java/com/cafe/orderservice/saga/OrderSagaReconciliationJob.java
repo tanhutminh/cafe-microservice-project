@@ -43,7 +43,7 @@ public class OrderSagaReconciliationJob {
   public void sweep() {
     Instant threshold = Instant.now().minus(properties.stuckThreshold());
     List<OrderSagaState> stuck =
-        sagaStateRepository.findByStepInAndUpdatedAtBefore(
+        sagaStateRepository.findAllByStepInAndUpdatedAtBefore(
             Set.of(SagaStep.STOCK_RESERVATION_REQUESTED, SagaStep.PAYMENT_REQUESTED), threshold);
 
     if (stuck.isEmpty()) {
