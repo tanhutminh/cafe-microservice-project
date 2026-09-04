@@ -4,65 +4,33 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertAll;
 
 import com.cafe.orderservice.table.DiningTable;
-import com.cafe.orderservice.table.TableStatus;
+import com.cafe.orderservice.testsupport.AbstractPostgresRepositoryTest;
+import com.cafe.orderservice.testsupport.RepositoryTestFixtures;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
-import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.boot.jpa.test.autoconfigure.TestEntityManager;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Runs against a real Postgres container (not an embedded substitute), since {@link
- * OrderRepository#findCurrentByTableId} and {@link OrderRepository#markReleased} depend on JPQL/SQL
- * text whose correctness a Mockito-mocked repository (this codebase's usual test style) is
+ * {@link OrderRepository#findCurrentByTableId} and {@link OrderRepository#markReleased} depend on
+ * JPQL/SQL text whose correctness a Mockito-mocked repository (this codebase's usual test style) is
  * structurally unable to exercise - a mock only verifies a method was called with the right
  * arguments, never what the query text itself actually selects or updates.
- *
- * <p>Tagged {@code testcontainers} so environments without a reachable Docker daemon (e.g. this
- * service's own Docker image build stage - see its Dockerfile) can exclude just this class and
- * still run every other test.
  */
-@Tag("testcontainers")
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Testcontainers
-class OrderRepositoryTest {
-
-  @Container @ServiceConnection
-  static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
+class OrderRepositoryTest extends AbstractPostgresRepositoryTest {
 
   @Autowired private TestEntityManager entityManager;
   @Autowired private OrderRepository orderRepository;
 
   private DiningTable table(String tableNumber) {
-    DiningTable table =
-        DiningTable.builder()
-            .tableNumber(tableNumber)
-            .capacity(4)
-            .status(TableStatus.OCCUPIED)
-            .active(true)
-            .build();
-    return entityManager.persistFlushFind(table);
+    return RepositoryTestFixtures.occupiedTable(entityManager, tableNumber);
   }
 
   private Order order(
       DiningTable table, OrderStatus status, Instant createdAt, Instant releasedAt) {
-    Order order =
-        Order.builder()
-            .table(table)
-            .status(status)
-            .createdAt(createdAt)
-            .releasedAt(releasedAt)
-            .build();
-    return entityManager.persistFlushFind(order);
+    return RepositoryTestFixtures.order(entityManager, table, status, createdAt, releasedAt);
   }
 
   @Test
