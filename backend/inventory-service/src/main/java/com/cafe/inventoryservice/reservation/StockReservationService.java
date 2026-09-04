@@ -135,7 +135,7 @@ public class StockReservationService {
   private Map<Long, BigDecimal> computeRequiredQuantities(List<OrderLineItem> items) {
     List<Long> menuItemIds = items.stream().map(OrderLineItem::menuItemId).toList();
     List<MenuItemIngredient> recipeLines =
-        menuItemIngredientRepository.findByMenuItemIdInWithIngredient(menuItemIds);
+        menuItemIngredientRepository.findAllByMenuItemIdIn(menuItemIds);
     Map<Long, List<MenuItemIngredient>> recipeByMenuItemId =
         recipeLines.stream().collect(Collectors.groupingBy(MenuItemIngredient::getMenuItemId));
 

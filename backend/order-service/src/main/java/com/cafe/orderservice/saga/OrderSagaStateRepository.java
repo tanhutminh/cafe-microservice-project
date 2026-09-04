@@ -7,6 +7,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface OrderSagaStateRepository extends JpaRepository<OrderSagaState, Long> {
 
-  List<OrderSagaState> findByStepInAndUpdatedAtBefore(
+  List<OrderSagaState> findAllByStepInAndUpdatedAtBefore(
       Collection<SagaStep> steps, Instant threshold);
 }

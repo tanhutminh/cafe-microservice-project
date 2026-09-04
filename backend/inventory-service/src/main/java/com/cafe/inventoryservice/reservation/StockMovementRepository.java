@@ -1,10 +1,9 @@
 package com.cafe.inventoryservice.reservation;
 
-import org.springframework.data.jpa.repository.JpaRepository;
-
 import java.util.List;
+import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface StockMovementRepository extends JpaRepository<StockMovement, Long> {
 
-    List<StockMovement> findByIngredientIdOrderByCreatedAtDesc(Long ingredientId);
+  List<StockMovement> findAllByIngredientIdOrderByCreatedAtDesc(Long ingredientId);
 }

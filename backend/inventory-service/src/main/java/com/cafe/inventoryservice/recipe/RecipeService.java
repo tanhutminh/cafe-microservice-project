@@ -21,8 +21,8 @@ public class RecipeService {
     this.ingredientService = ingredientService;
   }
 
-  public List<MenuItemIngredient> findByMenuItemId(Long menuItemId) {
-    return menuItemIngredientRepository.findByMenuItemIdWithIngredient(menuItemId);
+  public List<MenuItemIngredient> findAllByMenuItemId(Long menuItemId) {
+    return menuItemIngredientRepository.findAllByMenuItemIdWithIngredient(menuItemId);
   }
 
   /**
