@@ -14,13 +14,13 @@ RUN mvn -q -N install
 COPY common-lib common-lib
 COPY order-service order-service
 # -DexcludedGroups=testcontainers: tests tagged @Tag("testcontainers") need a real Docker daemon
-# (to start a Postgres container) that this build stage has no access to, so they can never pass
-# here regardless of whether the test itself is correct - they're tagged specifically so they can
-# be excluded here, leaving every other (Docker-independent) test still running as part of this
-# build. The real gate for those tagged tests is `mvn test` run directly on the host (or CI, once
-# that exists) where Docker is reachable. Note this property is reactor-wide (the -am build also
-# includes common-lib), not scoped to order-service alone - harmless today since common-lib has no
-# testcontainers-tagged test, but worth remembering if one is ever added there.
+# (to start a Postgres and/or Kafka container) that this build stage has no access to, so they can
+# never pass here regardless of whether the test itself is correct - they're tagged specifically
+# so they can be excluded here, leaving every other (Docker-independent) test still running as
+# part of this build. The real gate for those tagged tests is `mvn test` run directly on the host
+# (or CI, once that exists) where Docker is reachable. Note this property is reactor-wide (the -am
+# build also includes common-lib), not scoped to order-service alone - harmless today since
+# common-lib has no testcontainers-tagged test, but worth remembering if one is ever added there.
 RUN mvn -q -pl order-service -am package -DexcludedGroups=testcontainers
 
 FROM eclipse-temurin:21-jre-alpine

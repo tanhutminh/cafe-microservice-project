@@ -46,7 +46,7 @@ import org.springframework.transaction.annotation.Transactional;
  * order releases the hold via a third, fire-and-forget command with no reply leg.
  *
  * <p>Every outbound command/event goes through the Transactional Outbox pattern (see the outbox
- * package): each publish method below writes a durable {@link OutboxMessage} row in the same
+ * package): each enqueue method below writes a durable {@link OutboxMessage} row in the same
  * transaction as the local state change it accompanies, instead of calling KafkaTemplate directly.
  * A separate OutboxPoller/OutboxMessagePublisher relays queued rows to Kafka afterward. This closes
  * what used to be a dual-write gap — a crash between the local commit and a live Kafka send could
@@ -132,16 +132,16 @@ public class OrderSaga {
   public Order startCheckout(Long orderId) {
     Order order = orderService.checkout(orderId);
     sagaStateService.start(orderId);
-    publishReservationCommand(order);
+    enqueueReservationCommand(order);
     return order;
   }
 
   /**
    * Queues the reservation command in the outbox and advances the saga step. Not itself
-   * transactional — always called from within an ambient @Transactional (startCheckout or
-   * retryOrCompensate), whose commit is what actually makes the queued row durable.
+   * transactional — always called from within an ambient @Transactional, whose commit is what
+   * actually makes the queued row durable.
    */
-  public void publishReservationCommand(Order order) {
+  public void enqueueReservationCommand(Order order) {
     String correlationId = sagaStateService.getCurrentCorrelationId(order.getId());
     enqueue(
         OutboxMessageType.RESERVE_STOCK,
@@ -193,15 +193,15 @@ public class OrderSaga {
   public Order startPayment(Long orderId, String paymentMethod) {
     Order order = orderService.startPayment(orderId, paymentMethod);
     sagaStateService.startPaymentAttempt(orderId);
-    publishCommitCommand(order);
+    enqueueCommitCommand(order);
     return order;
   }
 
   /**
    * Queues the commit command in the outbox and advances the saga step — same shape as
-   * publishReservationCommand, see its Javadoc for the transactional-boundary reasoning.
+   * enqueueReservationCommand, see its Javadoc for the transactional-boundary reasoning.
    */
-  public void publishCommitCommand(Order order) {
+  public void enqueueCommitCommand(Order order) {
     String correlationId = sagaStateService.getCurrentCorrelationId(order.getId());
     enqueue(
         OutboxMessageType.COMMIT_STOCK,
@@ -233,7 +233,7 @@ public class OrderSaga {
     if (reply.success()) {
       Order order = orderService.markPaid(reply.orderId());
       sagaStateService.markCompleted(reply.orderId());
-      publishOrderPaid(order, correlationId);
+      enqueueOrderPaid(order, correlationId);
       log.info("Order saga: order {} PAID", reply.orderId());
     } else {
       orderService.revertToConfirmed(reply.orderId(), reply.reason());
@@ -256,17 +256,16 @@ public class OrderSaga {
     boolean wasConfirmed = order.getStatus() == OrderStatus.CONFIRMED;
     Order cancelled = orderService.cancel(orderId);
     if (wasConfirmed) {
-      releaseReservedStock(cancelled);
+      enqueueReleaseCommand(cancelled);
     }
     return cancelled;
   }
 
   /**
    * Fire-and-forget: queues release of a stock hold that was never committed. No reply, no saga
-   * state change (order is already CANCELLED). Always called from within an ambient @Transactional
-   * (cancelOrder).
+   * state change (order is already CANCELLED). Always called from within an ambient @Transactional.
    */
-  public void releaseReservedStock(Order order) {
+  public void enqueueReleaseCommand(Order order) {
     String correlationId = UUID.randomUUID().toString();
     enqueue(
         OutboxMessageType.RELEASE_STOCK,
@@ -282,10 +281,10 @@ public class OrderSaga {
   // ---- Reconciliation ----
 
   /**
-   * Called by OrderSagaReconciliationJob for a saga the sweep found stuck past
-   * app.saga-reconciliation.stuck-threshold on either leg - the Reconciliation pattern's response
-   * to a lost/undelivered reply that shouldIgnoreReply's redelivery/staleness guards were never
-   * designed to detect (there's no message to receive at all).
+   * Safe-to-retry recovery entry point for a saga stuck on either leg past
+   * app.saga-reconciliation.stuck-threshold - the Reconciliation pattern's response to a
+   * lost/undelivered reply that shouldIgnoreReply's redelivery/staleness guards were never designed
+   * to detect (there's no message to receive at all).
    *
    * <p>Re-checks the step fresh inside this transaction first: the sweep's query and this call
    * aren't atomic, so a real reply may have arrived and already settled the saga in between - in
@@ -316,9 +315,9 @@ public class OrderSaga {
       sagaStateService.incrementRetryCount(orderId);
       Order order = orderService.getOrder(orderId);
       if (step == SagaStep.STOCK_RESERVATION_REQUESTED) {
-        publishReservationCommand(order);
+        enqueueReservationCommand(order);
       } else {
-        publishCommitCommand(order);
+        enqueueCommitCommand(order);
       }
       log.info(
           "Order saga: reconciliation re-queued {} for order {} (attempt {})",
@@ -346,7 +345,7 @@ public class OrderSaga {
     }
   }
 
-  private void publishOrderPaid(Order order, String correlationId) {
+  private void enqueueOrderPaid(Order order, String correlationId) {
     BigDecimal grandTotal =
         order.getItems().stream()
             .map(item -> item.getPriceSnapshot().multiply(BigDecimal.valueOf(item.getQuantity())))
@@ -393,12 +392,10 @@ public class OrderSaga {
   }
 
   /**
-   * Captures the current W3C traceparent string so {@link
-   * com.cafe.orderservice.outbox.OutboxMessagePublisher} can restore it into a child span on the
-   * poller thread, which has no live trace context of its own - see that class's Javadoc for the
-   * full distributed-tracing picture. Null when there's no live span (e.g. a scheduler-thread
-   * caller like OrderSagaReconciliationJob); publishOne() then just starts a fresh root span
-   * instead of erroring.
+   * Captures the current W3C traceparent string so a later relay step - running on the poller
+   * thread with no live trace context of its own - can restore it into a child span. Null when
+   * there's no live span (e.g. a scheduler-driven call path with no active trace context); the
+   * relay then just starts a fresh root span instead of erroring.
    */
   private String captureTraceParent() {
     Span current = tracer.currentSpan();

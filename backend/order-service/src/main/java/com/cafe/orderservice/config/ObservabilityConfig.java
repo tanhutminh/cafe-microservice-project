@@ -2,8 +2,6 @@ package com.cafe.orderservice.config;
 
 import com.cafe.common.observability.HealthCheckMarkingFilter;
 import com.cafe.common.observability.HealthCheckObservationPredicates;
-import com.cafe.common.observability.ScheduledPollerObservationPredicates;
-import com.cafe.orderservice.outbox.OutboxPoller;
 import com.cafe.orderservice.saga.OrderSagaReconciliationJob;
 import io.micrometer.observation.ObservationPredicate;
 import java.util.Set;
@@ -23,7 +21,7 @@ public class ObservabilityConfig {
   @Bean
   public ObservationPredicate scheduledPollerObservationPredicate() {
     return ScheduledPollerObservationPredicates.excludingTargets(
-        Set.of(OutboxPoller.class, OrderSagaReconciliationJob.class));
+        Set.of(OrderSagaReconciliationJob.class));
   }
 
   @Bean

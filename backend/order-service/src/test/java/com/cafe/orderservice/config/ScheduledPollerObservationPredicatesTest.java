@@ -1,4 +1,4 @@
-package com.cafe.common.observability;
+package com.cafe.orderservice.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertAll;

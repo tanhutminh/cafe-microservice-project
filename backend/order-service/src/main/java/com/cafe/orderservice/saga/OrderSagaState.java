@@ -50,7 +50,7 @@ public class OrderSagaState {
   @Column(name = "updated_at", nullable = false)
   private Instant updatedAt;
 
-  /** How many times OrderSagaReconciliationJob has re-published the command for this saga. */
+  /** How many times the command for this saga has been re-enqueued during reconciliation. */
   @Column(name = "retry_count", nullable = false)
   private int retryCount;
 
