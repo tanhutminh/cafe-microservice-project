@@ -21,15 +21,19 @@ spring:
 
 app:
   saga-reconciliation:
-    # How long a saga can sit at STOCK_RESERVATION_REQUESTED with no reply before the
-    # sweep treats it as stuck (inventory-service down, message lost, etc).
+    # How long a saga can sit at STOCK_RESERVATION_REQUESTED or PAYMENT_REQUESTED with no
+    # reply before the sweep treats it as stuck (inventory-service down, message lost, etc).
     stuck-threshold: 60s
-    # After this many re-published attempts with still no reply, compensate the order
-    # back to OPEN instead of retrying forever.
+    # After this many re-enqueued attempts with still no reply, compensate the order back
+    # to its pre-attempt state (OPEN for a stuck reservation, CONFIRMED for a stuck
+    # commit) instead of retrying forever.
     max-retries: 3
     # How often OrderSagaReconciliationJob runs its sweep.
     sweep-interval: 30s
   outbox:
+    # Operational pause switch: false disables OutboxPoller's bean registration entirely
+    # (not just its schedule), so nothing relays queued messages until this is flipped back.
+    poll-enabled: true
     # How often OutboxPoller sweeps for PENDING messages to claim and publish.
     poll-interval: 500ms
     # Max PENDING messages claimed per sweep.

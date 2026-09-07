@@ -187,7 +187,7 @@ class OrderSagaTest {
   }
 
   /**
-   * Distributed tracing: proves enqueue() (via startCheckout -> publishReservationCommand) actually
+   * Distributed tracing: proves enqueue() (via startCheckout -> enqueueReservationCommand) actually
    * captures the live current span into the persisted row's traceparent, through Propagator.inject
    * - rather than just not crashing, which is all the Tracer.NOOP-based tests elsewhere in this
    * class prove (NOOP's currentSpan() returns null, so captureTraceParent() harmlessly stores a

@@ -17,10 +17,11 @@
   <!--
     spring-boot-dependencies imports testcontainers-bom internally, but Maven doesn't flatten a
     BOM's own nested `import`-scoped entries into whatever imports *it* - only its own directly
-    declared dependencyManagement entries propagate. So org.testcontainers:testcontainers-postgresql
-    /testcontainers-junit-jupiter (below) need this import repeated here to pick up a version at
-    all. The version (`testcontainers-bom.version` in the parent's `<properties>`) is set to the
-    value spring-boot-dependencies:4.1.0 itself pins testcontainers-bom to (its own
+    declared dependencyManagement entries propagate. So
+    org.testcontainers:testcontainers-postgresql/testcontainers-kafka/testcontainers-junit-jupiter
+    (below) need this import repeated here to pick up a version at all. The version
+    (`testcontainers-bom.version` in the parent's `<properties>`) is set to the value
+    spring-boot-dependencies:4.1.0 itself pins testcontainers-bom to (its own
     testcontainers.version property, which - same reason - isn't visible here either) - keep that
     property in sync if spring-boot-dependencies' pin changes.
   -->
@@ -158,6 +159,11 @@
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-kafka</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>

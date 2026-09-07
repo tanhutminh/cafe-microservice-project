@@ -7,7 +7,6 @@ import static org.mockito.Mockito.mock;
 
 import com.cafe.common.observability.HealthCheckMarkingFilter;
 import com.cafe.common.observability.HealthCheckRequestContext;
-import com.cafe.orderservice.outbox.OutboxPoller;
 import com.cafe.orderservice.saga.OrderSagaReconciliationJob;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationPredicate;
@@ -60,13 +59,13 @@ class ObservabilityConfigTest {
   }
 
   /**
-   * Confirms the bean delegates to the shared factory with the right target classes - exhaustive
+   * Confirms the bean delegates to the shared factory with the right target class - exhaustive
    * edge-case coverage of the predicate's own matching logic lives in
-   * ScheduledPollerObservationPredicatesTest in common-lib.
+   * ScheduledPollerObservationPredicatesTest.
    */
   @ParameterizedTest
   @MethodSource("scheduledPollerPredicateCases")
-  void scheduledPollerObservationPredicate_delegatesWithTheKnownPollers(
+  void scheduledPollerObservationPredicate_delegatesWithTheKnownPoller(
       Observation.Context context, boolean expected) {
     ObservationPredicate predicate = config.scheduledPollerObservationPredicate();
 
@@ -77,7 +76,6 @@ class ObservabilityConfigTest {
 
   private static Stream<Arguments> scheduledPollerPredicateCases() {
     return Stream.of(
-        Arguments.of(taskContextFor(OutboxPoller.class), false),
         Arguments.of(taskContextFor(OrderSagaReconciliationJob.class), false),
         Arguments.of(taskContextFor(ObservabilityConfigTest.class), true));
   }

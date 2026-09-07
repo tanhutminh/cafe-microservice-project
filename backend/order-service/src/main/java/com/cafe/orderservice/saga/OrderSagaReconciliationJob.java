@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * Reconciliation pattern: a periodic sweep that repairs sagas an event-driven exchange alone can't
- * recover from, on either saga leg - order-service published a command (reserve or commit) and is
+ * recover from, on either saga leg - order-service enqueued a command (reserve or commit) and is
  * still waiting on the matching reply, but the reply never came (inventory-service down for a
  * while, the message got lost, etc). Without this, such an order would sit at PENDING_CONFIRMATION
  * or PAYMENT_PENDING forever; the reply handlers' shouldIgnoreReply guards only handle

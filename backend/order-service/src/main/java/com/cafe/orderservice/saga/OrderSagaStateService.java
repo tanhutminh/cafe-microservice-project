@@ -16,8 +16,8 @@ public class OrderSagaStateService {
   }
 
   /**
-   * Starts (or restarts) the saga for an order and returns the fresh correlation id to publish
-   * with.
+   * Starts (or restarts) the saga for an order, generating and persisting a fresh correlation id
+   * for this attempt and returning it.
    */
   @Transactional
   public String start(Long orderId) {
@@ -86,10 +86,6 @@ public class OrderSagaStateService {
     updateStep(orderId, SagaStep.COMPENSATED);
   }
 
-  /**
-   * Read fresh inside OrderSaga.retryOrCompensate's transaction, to guard against a reply arriving
-   * concurrently with the reconciliation sweep (see that method's Javadoc).
-   */
   @Transactional(readOnly = true)
   public SagaStep getCurrentStep(Long orderId) {
     return sagaStateRepository
@@ -125,7 +121,7 @@ public class OrderSagaStateService {
    * terminal for the *saga overall* (payment is still to come). It's reachable exactly two ways - a
    * successful verify leg, or a failed/reverted payment leg - and in both cases it's purely an idle
    * "waiting for the next user action" state: the only command that could produce a fresh reply
-   * while sitting at CONFIRMED would be commit-stock.command, and that's never published until
+   * while sitting at CONFIRMED would be commit-stock.command, and that's never enqueued until
    * startPayment has already moved step to PAYMENT_REQUESTED first. So no legitimate reply is ever
    * expected while step == CONFIRMED - anything that arrives in that state must be a redelivery of
    * one already consumed. If a future change adds a path that legitimately expects a reply while
