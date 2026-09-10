@@ -13,8 +13,8 @@ The full design — domain model, service boundaries, order saga, routing, docke
 
 | Service | Port | Responsibility |
 |---|---|---|
-| eureka-server | 8761 | Service discovery registry |
-| config-server | 8888 | Centralized configuration (Spring Cloud Config, native profile) |
+| ~~eureka-server~~ | — | **Retired 2026-09** — service discovery registry; see [Retired components](#retired-components) |
+| ~~config-server~~ | — | **Retired 2026-09** — centralized configuration (Spring Cloud Config, native profile); see [Retired components](#retired-components) |
 | gateway | 8080 | Single entry point for the frontend — routing, CORS, JWT verification |
 | auth-service | 8081 | User accounts, login, JWT issuance |
 | menu-service | 8082 | Categories & menu items |
@@ -44,7 +44,6 @@ graph TB
     end
 
     subgraph Infra["Infrastructure"]
-        PLATFORM[("Eureka + Config Server")]
         KAFKA[("Kafka :9092")]
     end
 
@@ -65,20 +64,12 @@ graph TB
 
     ORDER -.->|"order.paid, via Kafka (no consumer yet)"| KAFKA
 
-    GW -.->|"discover + fetch config"| PLATFORM
-    AUTH -.->|"discover + fetch config"| PLATFORM
-    MENU -.->|"discover + fetch config"| PLATFORM
-    ORDER -.->|"discover + fetch config"| PLATFORM
-    INV -.->|"discover + fetch config"| PLATFORM
-    REPORT -.->|"discover + fetch config"| PLATFORM
-
     linkStyle 0,1,2,3,4,5 stroke:#4C6EF5,color:#4C6EF5
     linkStyle 6 stroke:#F08C00,color:#F08C00
     linkStyle 7,8,9,10,11,12 stroke:#9C36B5,color:#9C36B5
-    linkStyle 13,14,15,16,17,18 stroke:#868E96,color:#868E96
 ```
 
-Edge color marks the kind of communication: 🟦 blue for gateway HTTP routing, 🟧 orange for the direct synchronous service-to-service call, 🟪 purple for Kafka messaging, and ⬜ grey for service discovery/config lookups. Solid arrows carry actual request/business traffic; dashed arrows are infrastructure plumbing or paths that exist but have no consumer/handler yet. Note that `order-service → menu-service` is a direct service-to-service call resolved via Eureka — it bypasses the gateway, since the gateway is only the entry point for frontend traffic. Kafka topics (`reserve-stock.command`, `stock-reservation.reply`, `commit-stock.command`, `stock-commit.reply`, `release-stock.command`, `order.paid`) are drawn as a single edge between publisher and consumer labeled with the topic name, rather than as separate producer→Kafka and Kafka→consumer hops — Kafka is still the broker underneath, this just keeps the diagram from having to route every topic through the `Kafka` node explicitly. The `1.`–`4.` prefixes on the order-service ↔ inventory-service edges are the order they fire in during a normal checkout-then-payment (this diagram is a static topology, not a timeline, so a plain edge can't otherwise convey that); `release-stock.command` is unnumbered since it's a separate branch, only published if a `CONFIRMED` order gets cancelled. For the full step-by-step, including every failure path, see [Business flow: checkout and payment saga](#business-flow-checkout-and-payment-saga) below.
+Edge color marks the kind of communication: 🟦 blue for gateway HTTP routing, 🟧 orange for the direct synchronous service-to-service call, 🟪 purple for Kafka messaging. Solid arrows carry actual request/business traffic; dashed arrows are infrastructure plumbing or paths that exist but have no consumer/handler yet. Note that `order-service → menu-service` is a direct service-to-service call to a fixed host:port — it bypasses the gateway, since the gateway is only the entry point for frontend traffic. (Until 2026-09 this diagram also showed a ⬜ grey "discover + fetch config" edge from every service to a shared Eureka + Config Server node — retired, see [Retired components](#retired-components).) Kafka topics (`reserve-stock.command`, `stock-reservation.reply`, `commit-stock.command`, `stock-commit.reply`, `release-stock.command`, `order.paid`) are drawn as a single edge between publisher and consumer labeled with the topic name, rather than as separate producer→Kafka and Kafka→consumer hops — Kafka is still the broker underneath, this just keeps the diagram from having to route every topic through the `Kafka` node explicitly. The `1.`–`4.` prefixes on the order-service ↔ inventory-service edges are the order they fire in during a normal checkout-then-payment (this diagram is a static topology, not a timeline, so a plain edge can't otherwise convey that); `release-stock.command` is unnumbered since it's a separate branch, only published if a `CONFIRMED` order gets cancelled. For the full step-by-step, including every failure path, see [Business flow: checkout and payment saga](#business-flow-checkout-and-payment-saga) below.
 
 ## Building an order
 
@@ -242,7 +233,7 @@ Releasing a table is gated by more than its current order's status: `POST /api/t
 
 1. Client logs in via `POST /api/auth/login` (public, no token required) — auth-service checks credentials and issues an RS256-signed JWT.
 2. Every other request carries that JWT as `Authorization: Bearer <token>`.
-3. The gateway's `JwtAuthGlobalFilter` is the only place that ever sees or verifies the JWT: it strips any `X-User-*` headers the client tried to set itself (so identity can't be spoofed), verifies the signature with auth-service's public key (fetched from config-server), and — only on success — sets trusted `X-User-Id` / `X-Username` / `X-User-Role` headers from the token's claims.
+3. The gateway's `JwtAuthGlobalFilter` is the only place that ever sees or verifies the JWT: it strips any `X-User-*` headers the client tried to set itself (so identity can't be spoofed), verifies the signature with auth-service's public key (baked into gateway's own `application.yml` — fetched live from config-server until it was retired, see [Retired components](#retired-components)), and — only on success — sets trusted `X-User-Id` / `X-Username` / `X-User-Role` headers from the token's claims.
 4. Downstream services never see the JWT; they trust the gateway's headers via `common-lib`'s `HeaderAuthenticationFilter`. A missing or invalid token gets a `401` at the gateway, before it ever reaches a domain service.
 
 ## Patterns in use
@@ -251,9 +242,9 @@ Since this project's purpose is to practice canonical patterns, worth calling ou
 
 ### Platform
 
-- **Service Discovery** — Eureka (`eureka-server`)
+- ~~**Service Discovery** — Eureka (`eureka-server`)~~ **Retired 2026-09**, see [Retired components](#retired-components)
 - **API Gateway** — Spring Cloud Gateway, single entry point + CORS + routing
-- **Externalized Configuration** — Spring Cloud Config Server, native profile backed by a bind-mounted `config-repo` (see below)
+- ~~**Externalized Configuration** — Spring Cloud Config Server, native profile backed by a bind-mounted `config-repo`~~ **Retired 2026-09**, see [Retired components](#retired-components)
 - **Trusted Header Authentication** — gateway validates the JWT once and forwards identity via `X-User-Id`/`X-Username`/`X-User-Role` headers; downstream services trust the gateway instead of re-validating (`common-lib`'s `TrustedHeaderAuth`)
 - **Database per Service** — separate Postgres database and role per service
 
@@ -294,18 +285,26 @@ These five all defend the same Kafka exchange (the saga above) against the same 
   - The one hop auto-instrumentation can't bridge on its own: the order saga's async relay threads (`OutboxPoller`→`OutboxMessagePublisher`, `InboxPoller`→`InboxMessageProcessor`) run detached from the Kafka consumer thread that received the triggering message, so there's no live span to inherit there. `OutboxMessage`/`InboxMessage` rows carry a `traceparent` column (W3C format): the *enqueuing* code (`OrderSaga.enqueue`, `StockReservationListener.enqueue`, `InboxMessageProcessor.enqueueReply`) captures the currently-active span into that column at write time, and the *relaying* code (`OutboxMessagePublisher.publishOne`, `InboxMessageProcessor.processOne`) restores it into a fresh child span before doing its work — stitching the async gap back into the same trace instead of starting a disconnected one.
   - A row with no stored traceparent (no live span to capture at enqueue time — e.g. `OrderSagaReconciliationJob`'s scheduled sweep re-queuing a stuck saga) falls back to a fresh root span instead of failing; each reconciliation retry is its own complete, freestanding trace rather than a broken link in the original one.
   - Docker's own health-check polling (`GET /actuator/health`, every few seconds per container) is excluded from tracing on every service. `OrderSagaReconciliationJob`'s recurring sweep gets the same treatment on order-service, via an `ObservationPredicate` bean rather than filtering by observation *name* — every `@Scheduled` method shares the single name `tasks.scheduled.execution` (just like every HTTP request shares `http.server.requests`), so filtering by name would silently suppress tracing for every other scheduled method too, not just this one. The scheduled-poller predicate (`ScheduledPollerObservationPredicates`, package-private in order-service's own `config` package) matches on the observation's target class instead — populated only for tasks Spring wraps via its `@Scheduled` machinery (`ScheduledMethodRunnable`). The outbox/inbox pollers (order-service's and inventory-service's `OutboxPoller`, inventory-service's `InboxPoller`) don't need this predicate and aren't in it: they register their fixed delay via `SchedulingConfigurer`/`ScheduledTaskRegistrar.addFixedDelayTask` instead of `@Scheduled`, so each can source its interval from a bound `@ConfigurationProperties` value rather than a second, separately-defaulted placeholder. That registration path also never produces a `tasks.scheduled.execution` observation in the first place, so there's nothing to filter for them.
-  - Excluding the health check by path is less direct than it looks: the predicate runs *before* the request is dispatched to a handler, so `Observation.Context.getPathPattern()` — the resolved route — isn't populated yet at that point and is always `null`. config-server, eureka-server, and gateway (none of which run a Spring Security filter chain) each keep their own local predicate that works around this by matching the *raw* request instead, via `context.getCarrier()` — available immediately, unlike the resolved pattern; gateway's copy is reactive-context-specific and genuinely can't be shared with the other two; config-server's and eureka-server's copies are identical to each other, but deliberately kept unshared too, so neither of these otherwise-`common-lib`-free infrastructure services picks up a dependency on it just for one predicate.
+  - Excluding the health check by path is less direct than it looks: the predicate runs *before* the request is dispatched to a handler, so `Observation.Context.getPathPattern()` — the resolved route — isn't populated yet at that point and is always `null`. gateway (which doesn't run a Spring Security filter chain) keeps its own local predicate that works around this by matching the *raw* request instead, via `context.getCarrier()` — available immediately, unlike the resolved pattern; it's reactive-context-specific and genuinely can't be shared with the servlet-based predicate the other five services use. (Until their 2026-09 retirement, `config-server` and `eureka-server` each carried an identical copy of this same reactive/servlet-agnostic workaround, deliberately kept unshared — see [Retired components](#retired-components).)
   - On the five services that do run a Spring Security filter chain (auth, menu, order, inventory, report), path-based matching alone isn't enough: Spring Security's own filter-chain and authorization observations are a separate `Observation.Context` type with no path or URI field at all, so no predicate can single them out by inspecting the context. Instead, `HealthCheckMarkingFilter` (`common-lib`, registered ahead of every other observation-producing filter) marks the current thread when the request targets `/actuator/health`; `HealthCheckObservationPredicates.excludingMarkedRequests()` then excludes every observation created on a marked thread regardless of its context type — HTTP-level and Spring-Security-level alike — while real requests, whose thread is never marked, keep full tracing depth.
+
+## Retired components
+
+- **Service Discovery (Eureka)** and **Externalized Configuration (Spring Cloud Config Server)** — both retired 2026-09, as the first step of migrating the deployment target from `docker-compose` to Kubernetes (see the [Cafe Roadmap](https://claude.ai/code/artifact/45eea53a-1a1a-4dfe-88bc-f1a1fae63a07?org=ab443343-5dd7-4698-b7cc-00e521059318) for the in-progress migration). Kubernetes provides both concerns natively — Service DNS for discovery, ConfigMap/Secret for config — so the app-level Eureka/`eureka-server` registry and Spring Cloud Config/`config-server` were removed rather than ported.
+- What changed as a result: every inter-service call (gateway's routing table, `order-service`'s call to `menu-service`) now targets a fixed `host:port` instead of a logical name resolved via Eureka; each service's operational config (previously fetched live from `config-server`'s `config-repo`) is now baked directly into that service's own `application.yml`.
+- Local dev impact: `docker compose up` no longer starts an `eureka-server`/`config-server` container — one less moving part, not a regression. Docker Compose's own DNS still resolves a fixed service name (e.g. `http://menu-service:8082`) for any *other container* on the network exactly as before; the one thing that used to come for free via Eureka and now needs a manual one-time step is reaching a service by name from a process running **bare** (e.g. an IDE) alongside the rest in Docker — see [Troubleshooting](#troubleshooting) below.
 
 ## Structure
 
 ```
-backend/    Maven multi-module reactor: 5 domain services + gateway + eureka-server + config-server + common-lib
+backend/    Maven multi-module reactor: 5 domain services + gateway + common-lib
 frontend/   Angular (standalone components)
 docker/     Postgres init scripts
 ```
 
-config-server's native config lives at `backend/config-server/src/main/resources/config-repo/`. It's bind-mounted read-only into the `config-server` container (see `docker-compose.yml`), so editing a `config-repo/*.yml` file only requires `docker compose restart config-server` (plus restarting whichever downstream service reads that config) — no image rebuild.
+(Until 2026-09, `backend/` also had `eureka-server` and `config-server` modules — retired, see [Retired components](#retired-components).)
+
+Until config-server's retirement, its native config lived at `backend/config-server/src/main/resources/config-repo/`, bind-mounted read-only into the `config-server` container so editing a `config-repo/*.yml` file only required a restart, no image rebuild. Each service's operational config now lives directly in that service's own `src/main/resources/application.yml` instead — changing it requires rebuilding that service's image.
 
 ## Prerequisites
 
@@ -320,19 +319,19 @@ docker compose up -d
 cd frontend && ng serve
 ```
 
-`docker compose up -d` starts everything backend-side in one shot — Postgres, Kafka, Kafka UI, Zipkin, config-server, eureka-server, gateway, and all 5 domain services — then the frontend dev server runs separately, outside Compose, with hot reload. Common day-to-day commands beyond the initial start:
+`docker compose up -d` starts everything backend-side in one shot — Postgres, Kafka, Kafka UI, Zipkin, gateway, and all 5 domain services (`eureka-server`/`config-server` no longer part of the stack, see [Retired components](#retired-components)) — then the frontend dev server runs separately, outside Compose, with hot reload. Common day-to-day commands beyond the initial start:
 
 ```bash
 docker compose ps                           # what's running, and its health status
 docker compose logs -f order-service        # tail one service's logs (Ctrl+C to stop)
+docker compose up -d --build                # rebuild + restart all services (mvn package runs its tests first — see Testing below)
 docker compose up -d --build order-service  # rebuild + restart one service after a code change (mvn package runs its tests first — see Testing below)
-docker compose restart order-service        # restart without rebuilding, e.g. after a config-repo change (see Structure above)
+docker compose restart order-service        # restart without rebuilding, e.g. after changing a docker-compose.yml env var, or just to bounce a stuck container
 docker compose down                         # stop and remove all containers; the Postgres volume (postgres-data) survives this
 docker compose down -v                      # same, but also wipes Postgres data — use for a genuinely clean slate
 ```
 
 Gateway (the single entry point for the frontend): http://localhost:8080
-Eureka dashboard: http://localhost:8761
 Kafka UI: http://localhost:8090
 
 There's no self-registration flow — staff accounts are provisioned by an ADMIN. On first boot, auth-service auto-seeds a default admin account (`admin` / `admin123`) if the `users` table is empty, so you have something to log in with. It's dev-only; a real deployment should seed its first admin out-of-band instead. Roles are `ADMIN` and `CASHIER`.
@@ -382,20 +381,19 @@ Both checks run automatically in a `pre-commit` git hook (`.git/hooks/pre-commit
 
 ## Troubleshooting
 
-- **Gateway returns 503 right after restarting a service** — Spring Cloud Gateway's load balancer keeps a short-lived cache of service instances resolved via Eureka; it can go stale for a few seconds after a restart. Retry after ~5s before assuming something's actually broken.
+- *(Historical, applied only while the project used Eureka, retired 2026-09 — see [Retired components](#retired-components))* **Gateway returned 503 right after restarting a service** — Spring Cloud Gateway's load balancer kept a short-lived cache of service instances resolved via Eureka; it could go stale for a few seconds after a restart. Gateway now routes to a fixed `host:port` per service, so this class of staleness can no longer happen.
 - **Docker build cache eating disk space** — repeated `docker compose build` during iterative development leaves old image layers behind indefinitely. Run `docker builder prune -f` periodically to reclaim space, or `docker system df` to check what's actually using it.
 - **Testcontainers-backed tests (order-service's or inventory-service's testcontainers-tagged classes, etc.) fail to connect, complaining about the timezone** — the Postgres JDBC driver asks the server to `SET TIME ZONE` to the JVM's default on connect; on a machine whose OS reports an old IANA alias (e.g. `Asia/Saigon`, superseded by `Asia/Ho_Chi_Minh`), the Testcontainers `postgres:16` image's bundled tzdata doesn't recognize it and refuses the connection outright. Both order-service's and inventory-service's `pom.xml` force `-Duser.timezone=UTC` on their own `maven-surefire-plugin` to sidestep needing every dev machine's OS-level timezone name to be one this exact Postgres image accepts.
 - **Edited an already-applied migration file and startup now fails on a Flyway checksum mismatch** — `validate-on-migrate` is on by default (no override in this project) and checksums every migration file's content the first time it runs, then re-checks that checksum on every later startup; editing an already-applied file afterward — even just a comment — changes its checksum and fails validation against what Postgres already recorded. If you ever need to edit an already-applied migration, don't wipe the database to fix this — recompute the recorded checksum instead, via Flyway's own `repair` operation. No `flyway-maven-plugin` is declared in any `pom.xml` here, so invoke it by its full coordinates from that service's module directory:
   ```bash
   mvn org.flywaydb:flyway-maven-plugin:12.4.0:repair -Dflyway.url=jdbc:postgresql://localhost:5432/<db> -Dflyway.user=<user> -Dflyway.password=<password> -Dflyway.locations=filesystem:src/main/resources/db/migration
   ```
-- **A service can't reach another (Eureka lookups hang or 500) when you run one bare from an IDE alongside the rest in Docker** — every service's `eureka.instance.hostname` defaults to `host.docker.internal` rather than its auto-detected host IP, because on Windows that auto-detected IP can land on a virtual adapter (VPN/WSL/Hyper-V) that Docker containers can't route to. `host.docker.internal` is meant to work both directions — Docker Desktop hairpins a container's own published port back through it, so containers and bare-host processes should be able to reach each other through it uniformly. Fully-dockerized services can instead register by container IP (`docker-compose.yml` sets `EUREKA_INSTANCE_PREFER_IP_ADDRESS=true` for order-service), which is simpler when nothing runs bare.
-
-  If this was working and suddenly isn't — calls from a bare-host process (e.g. order-service run from Eclipse) to `host.docker.internal` start timing out, with nothing else changed — the usual cause is that Docker Desktop periodically rewrites its own entry for `host.docker.internal` in the Windows hosts file (`C:\Windows\System32\drivers\etc\hosts`) to the machine's *current* LAN IP (it changes whenever you switch networks or restart Docker Desktop), and that LAN IP is often unreachable for reasons that have nothing to do with the Windows Firewall. Only the **container** side needs Docker's own `host.docker.internal` resolution (which it manages independently of the Windows hosts file); a **bare-host** process reads the real Windows hosts file, so that entry needs to point at `127.0.0.1` instead — a container's published port is always reachable there regardless of which network the machine is currently on. Fix, as Administrator:
+- *(Historical, applied only while the project used Eureka, retired 2026-09 — see [Retired components](#retired-components))* **A service couldn't reach another (Eureka lookups hang or 500) when running one bare from an IDE alongside the rest in Docker** — every service's `eureka.instance.hostname` used to default to `host.docker.internal` rather than its auto-detected host IP, because on Windows that auto-detected IP can land on a virtual adapter (VPN/WSL/Hyper-V) that Docker containers can't route to. This whole class of issue (including Docker Desktop periodically rewriting its `host.docker.internal` hosts-file entry) no longer applies now that routing doesn't go through Eureka — see the current entry below for what replaced it.
+- **A service can't reach another (connection refused / host not found) when you run one bare from an IDE alongside the rest in Docker** — routes are now fixed hostnames (e.g. `http://menu-service:8082`) instead of Eureka-resolved. Docker Compose's own DNS resolves those names for any *other container* on the network automatically, but a **bare-host** process (e.g. order-service run from Eclipse) isn't on that network, so it can't resolve a plain service name at all. Since Compose already publishes every service's port to the host (`ports:` in `docker-compose.yml`), the fix is a one-time hosts-file alias mapping each service name to `127.0.0.1`, as Administrator:
   ```powershell
-  (Get-Content C:\Windows\System32\drivers\etc\hosts) -replace '^\S+(\s+host\.docker\.internal)$', '127.0.0.1$1' | Set-Content C:\Windows\System32\drivers\etc\hosts -Encoding ASCII
+  Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "127.0.0.1 auth-service menu-service order-service inventory-service report-service"
   ```
-  Expect to need this again after a Docker Desktop restart or a network change — check `Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String host.docker.internal` first if the bare-host connectivity issue resurfaces.
+  After that, a bare-run service resolves any other service's name to `127.0.0.1:<its published port>`, same as another container would.
 
 </details>
 
@@ -410,8 +408,8 @@ Toàn bộ thiết kế — domain model, ranh giới giữa các service, order
 
 | Service | Port | Trách nhiệm |
 |---|---|---|
-| eureka-server | 8761 | Registry cho service discovery |
-| config-server | 8888 | Cấu hình tập trung (Spring Cloud Config, profile native) |
+| ~~eureka-server~~ | — | **Đã retired 2026-09** — registry cho service discovery; xem mục [Thành phần đã retired](#thành-phần-đã-retired) |
+| ~~config-server~~ | — | **Đã retired 2026-09** — cấu hình tập trung (Spring Cloud Config, profile native); xem mục [Thành phần đã retired](#thành-phần-đã-retired) |
 | gateway | 8080 | Cổng vào duy nhất cho frontend — routing, CORS, xác thực JWT |
 | auth-service | 8081 | Tài khoản người dùng, đăng nhập, cấp JWT |
 | menu-service | 8082 | Danh mục & món trong menu |
@@ -441,7 +439,6 @@ graph TB
     end
 
     subgraph Infra["Infrastructure"]
-        PLATFORM[("Eureka + Config Server")]
         KAFKA[("Kafka :9092")]
     end
 
@@ -462,20 +459,12 @@ graph TB
 
     ORDER -.->|"order.paid, via Kafka (no consumer yet)"| KAFKA
 
-    GW -.->|"discover + fetch config"| PLATFORM
-    AUTH -.->|"discover + fetch config"| PLATFORM
-    MENU -.->|"discover + fetch config"| PLATFORM
-    ORDER -.->|"discover + fetch config"| PLATFORM
-    INV -.->|"discover + fetch config"| PLATFORM
-    REPORT -.->|"discover + fetch config"| PLATFORM
-
     linkStyle 0,1,2,3,4,5 stroke:#4C6EF5,color:#4C6EF5
     linkStyle 6 stroke:#F08C00,color:#F08C00
     linkStyle 7,8,9,10,11,12 stroke:#9C36B5,color:#9C36B5
-    linkStyle 13,14,15,16,17,18 stroke:#868E96,color:#868E96
 ```
 
-Màu của đường nối thể hiện loại giao tiếp: 🟦 xanh dương là routing HTTP qua gateway, 🟧 cam là lời gọi đồng bộ trực tiếp giữa 2 service, 🟪 tím là giao tiếp qua Kafka, và ⬜ xám là tra cứu service discovery/config. Đường liền là traffic nghiệp vụ thật; đường đứt là hạ tầng nền (infra plumbing) hoặc đường đi tồn tại nhưng chưa có consumer/handler xử lý. Lưu ý `order-service → menu-service` là lời gọi trực tiếp giữa 2 service, được phân giải qua Eureka — không đi qua gateway, vì gateway chỉ là cổng vào cho traffic từ frontend. Các topic Kafka (`reserve-stock.command`, `stock-reservation.reply`, `commit-stock.command`, `stock-commit.reply`, `release-stock.command`, `order.paid`) được vẽ thành 1 đường nối duy nhất giữa publisher và consumer, ghi tên topic ngay trên đó, thay vì tách thành 2 chặng producer→Kafka và Kafka→consumer riêng biệt — Kafka vẫn là broker đứng bên dưới, cách vẽ này chỉ để khỏi phải dẫn mọi topic qua node `Kafka` một cách tường minh. Số thứ tự `1.`–`4.` trên các cạnh giữa order-service ↔ inventory-service thể hiện đúng trình tự chúng xảy ra trong 1 lượt checkout-rồi-thanh-toán bình thường (sơ đồ này là topology tĩnh, không phải timeline, nên 1 cạnh trơn không tự nói lên được điều đó); `release-stock.command` không đánh số vì nó là 1 nhánh riêng, chỉ publish khi đơn đang `CONFIRMED` bị hủy. Muốn xem đầy đủ từng bước, kể cả mọi nhánh lỗi, xem mục "Luồng nghiệp vụ: saga xác thực và thanh toán" bên dưới.
+Màu của đường nối thể hiện loại giao tiếp: 🟦 xanh dương là routing HTTP qua gateway, 🟧 cam là lời gọi đồng bộ trực tiếp giữa 2 service, 🟪 tím là giao tiếp qua Kafka. Đường liền là traffic nghiệp vụ thật; đường đứt là hạ tầng nền (infra plumbing) hoặc đường đi tồn tại nhưng chưa có consumer/handler xử lý. Lưu ý `order-service → menu-service` là lời gọi trực tiếp giữa 2 service, tới thẳng 1 host:port cố định — không đi qua gateway, vì gateway chỉ là cổng vào cho traffic từ frontend. (Tới trước 2026-09, diagram này còn có 1 đường ⬜ xám "discover + fetch config" từ mỗi service tới 1 node Eureka + Config Server dùng chung — đã retired, xem mục [Thành phần đã retired](#thành-phần-đã-retired).) Các topic Kafka (`reserve-stock.command`, `stock-reservation.reply`, `commit-stock.command`, `stock-commit.reply`, `release-stock.command`, `order.paid`) được vẽ thành 1 đường nối duy nhất giữa publisher và consumer, ghi tên topic ngay trên đó, thay vì tách thành 2 chặng producer→Kafka và Kafka→consumer riêng biệt — Kafka vẫn là broker đứng bên dưới, cách vẽ này chỉ để khỏi phải dẫn mọi topic qua node `Kafka` một cách tường minh. Số thứ tự `1.`–`4.` trên các cạnh giữa order-service ↔ inventory-service thể hiện đúng trình tự chúng xảy ra trong 1 lượt checkout-rồi-thanh-toán bình thường (sơ đồ này là topology tĩnh, không phải timeline, nên 1 cạnh trơn không tự nói lên được điều đó); `release-stock.command` không đánh số vì nó là 1 nhánh riêng, chỉ publish khi đơn đang `CONFIRMED` bị hủy. Muốn xem đầy đủ từng bước, kể cả mọi nhánh lỗi, xem mục "Luồng nghiệp vụ: saga xác thực và thanh toán" bên dưới.
 
 ## Xây dựng đơn hàng
 
@@ -639,7 +628,7 @@ Release 1 bàn bị chặn bởi nhiều hơn chỉ status của đơn hàng hi�
 
 1. Client đăng nhập qua `POST /api/auth/login` (public, không cần token) — auth-service kiểm tra thông tin đăng nhập và cấp JWT ký bằng RS256.
 2. Mọi request sau đó đều mang JWT này qua header `Authorization: Bearer <token>`.
-3. `JwtAuthGlobalFilter` ở gateway là nơi duy nhất từng thấy và xác thực JWT: nó xóa bỏ mọi header `X-User-*` mà client tự gửi lên (để không thể giả mạo danh tính), xác thực chữ ký bằng public key của auth-service (lấy từ config-server), và chỉ khi thành công mới set các header đáng tin cậy `X-User-Id`/`X-Username`/`X-User-Role` dựa trên claim trong token.
+3. `JwtAuthGlobalFilter` ở gateway là nơi duy nhất từng thấy và xác thực JWT: nó xóa bỏ mọi header `X-User-*` mà client tự gửi lên (để không thể giả mạo danh tính), xác thực chữ ký bằng public key của auth-service (nằm sẵn trong `application.yml` của gateway — trước đây lấy runtime từ config-server, tới khi bị retired, xem mục [Thành phần đã retired](#thành-phần-đã-retired)), và chỉ khi thành công mới set các header đáng tin cậy `X-User-Id`/`X-Username`/`X-User-Role` dựa trên claim trong token.
 4. Các service phía sau không bao giờ thấy JWT; chúng tin tưởng header do gateway set, thông qua `HeaderAuthenticationFilter` trong `common-lib`. Token thiếu hoặc không hợp lệ sẽ bị trả về `401` ngay tại gateway, trước khi tới được bất kỳ service nghiệp vụ nào.
 
 ## Các pattern đã áp dụng
@@ -648,9 +637,9 @@ Vì mục đích của dự án là luyện tập các pattern kinh điển, nê
 
 ### Nền tảng (Platform)
 
-- **Service Discovery** — Eureka (`eureka-server`)
+- ~~**Service Discovery** — Eureka (`eureka-server`)~~ **Đã retired 2026-09**, xem mục [Thành phần đã retired](#thành-phần-đã-retired)
 - **API Gateway** — Spring Cloud Gateway, cổng vào duy nhất + CORS + routing
-- **Externalized Configuration** — Spring Cloud Config Server, profile native được backing bởi `config-repo` bind-mount (xem phần bên dưới)
+- ~~**Externalized Configuration** — Spring Cloud Config Server, profile native được backing bởi `config-repo` bind-mount~~ **Đã retired 2026-09**, xem mục [Thành phần đã retired](#thành-phần-đã-retired)
 - **Trusted Header Authentication** — gateway xác thực JWT một lần duy nhất rồi chuyển tiếp danh tính qua header `X-User-Id`/`X-Username`/`X-User-Role`; các service phía sau tin tưởng gateway thay vì tự xác thực lại (`TrustedHeaderAuth` trong `common-lib`)
 - **Database per Service** — mỗi service có 1 database Postgres và 1 role riêng
 
@@ -691,18 +680,26 @@ Cả 5 pattern dưới đây đều bảo vệ cùng 1 luồng trao đổi qua K
   - Có 1 khoảng mà auto-instrumentation không tự nối được: các thread relay bất đồng bộ của saga đơn hàng (`OutboxPoller`→`OutboxMessagePublisher`, `InboxPoller`→`InboxMessageProcessor`) chạy tách rời khỏi thread Kafka consumer đã nhận message kích hoạt, nên không có span nào đang sống để kế thừa ở đó. `OutboxMessage`/`InboxMessage` có thêm cột `traceparent` (định dạng W3C): phía *enqueue* (`OrderSaga.enqueue`, `StockReservationListener.enqueue`, `InboxMessageProcessor.enqueueReply`) chụp lại span đang active vào cột đó lúc ghi, còn phía *relay* (`OutboxMessagePublisher.publishOne`, `InboxMessageProcessor.processOne`) khôi phục nó thành 1 span con mới trước khi làm việc — khâu lại khoảng trống bất đồng bộ vào cùng 1 trace thay vì tạo ra 1 trace rời rạc mới.
   - 1 dòng không có traceparent lưu sẵn (không có span nào đang sống lúc enqueue — ví dụ vòng sweep định kỳ của `OrderSagaReconciliationJob` khi re-queue 1 saga bị kẹt) sẽ rơi về khởi tạo 1 span gốc mới thay vì lỗi; mỗi lần retry của reconciliation là 1 trace hoàn chỉnh, độc lập riêng, chứ không phải 1 liên kết gãy trong trace gốc.
   - Health-check polling của Docker (`GET /actuator/health`, gọi mỗi vài giây/container) bị loại khỏi tracing ở mọi service. Vòng sweep định kỳ của `OrderSagaReconciliationJob` bên order-service cũng bị loại tương tự, qua 1 bean `ObservationPredicate` thay vì lọc theo *tên* observation — mọi method `@Scheduled` dùng chung 1 tên `tasks.scheduled.execution` (giống hệt cách mọi HTTP request dùng chung `http.server.requests`), nên lọc theo tên sẽ âm thầm tắt tracing của mọi scheduled method khác, không chỉ riêng cái này. Predicate scheduled-poller (`ScheduledPollerObservationPredicates`, package-private trong package `config` riêng của order-service) thay vào đó match theo target class của observation — chỉ được điền cho các task Spring bọc qua cơ chế `@Scheduled` (`ScheduledMethodRunnable`). Các poller outbox/inbox (`OutboxPoller` của order-service và inventory-service, `InboxPoller` của inventory-service) không cần predicate này và cũng không nằm trong đó: chúng đăng ký fixed delay qua `SchedulingConfigurer`/`ScheduledTaskRegistrar.addFixedDelayTask` thay vì `@Scheduled`, để mỗi cái lấy interval từ 1 giá trị `@ConfigurationProperties` đã bind thay vì 1 placeholder mặc định riêng dễ lệch. Đường đăng ký đó cũng không bao giờ tạo ra observation `tasks.scheduled.execution` nào cả, nên chẳng có gì để lọc cho chúng.
-  - Loại trừ health-check theo path phức tạp hơn nhìn bề ngoài: predicate chạy *trước khi* request được dispatch tới handler, nên `Observation.Context.getPathPattern()` — route đã resolve — chưa được set tại thời điểm đó, luôn là `null`. config-server, eureka-server, và gateway (cả 3 đều không chạy Spring Security filter chain) mỗi service tự giữ 1 predicate riêng, né vấn đề này bằng cách match trên request thô thay vì path pattern, qua `context.getCarrier()` — có sẵn ngay lập tức, không như pattern đã resolve; bản của gateway dùng context reactive riêng biệt nên thực sự không thể dùng chung với 2 service kia; bản của config-server và eureka-server thì giống hệt nhau, nhưng cố tình không gom vào `common-lib` — để tránh việc phải thêm dependency `common-lib` vào 2 service hạ tầng vốn không hề phụ thuộc nó, chỉ để lấy 1 predicate.
+  - Loại trừ health-check theo path phức tạp hơn nhìn bề ngoài: predicate chạy *trước khi* request được dispatch tới handler, nên `Observation.Context.getPathPattern()` — route đã resolve — chưa được set tại thời điểm đó, luôn là `null`. gateway (không chạy Spring Security filter chain) tự giữ 1 predicate riêng, né vấn đề này bằng cách match trên request thô thay vì path pattern, qua `context.getCarrier()` — có sẵn ngay lập tức, không như pattern đã resolve; bản của gateway dùng context reactive riêng biệt nên thực sự không thể dùng chung với predicate servlet-based mà 5 service kia dùng. (Tới trước khi retired 2026-09, `config-server` và `eureka-server` cũng từng mỗi bên giữ 1 bản giống hệt cách né này, cố tình không gom chung — xem mục [Thành phần đã retired](#thành-phần-đã-retired).)
   - Ở 5 service có chạy Spring Security filter chain (auth, menu, order, inventory, report), chỉ match theo path là chưa đủ: các observation riêng của Spring Security (filter chain, authorization) thuộc 1 loại `Observation.Context` khác hẳn, hoàn toàn không có field path/URI nào — nên không predicate nào có thể nhận diện chúng chỉ bằng cách đọc context. Thay vào đó, `HealthCheckMarkingFilter` (`common-lib`, đăng ký chạy trước mọi filter khác từng tạo observation) đánh dấu thread hiện tại khi request nhắm tới `/actuator/health`; `HealthCheckObservationPredicates.excludingMarkedRequests()` sau đó loại trừ mọi observation được tạo ra trên thread đã đánh dấu, bất kể loại context nào — cả tầng HTTP lẫn tầng Spring Security — trong khi request thật (thread không bao giờ bị đánh dấu) vẫn giữ nguyên độ sâu tracing.
+
+## Thành phần đã retired
+
+- **Service Discovery (Eureka)** và **Externalized Configuration (Spring Cloud Config Server)** — cả 2 đều đã retired 2026-09, như bước đầu tiên của việc chuyển deploy target từ `docker-compose` sang Kubernetes (xem [Cafe Roadmap](https://claude.ai/code/artifact/45eea53a-1a1a-4dfe-88bc-f1a1fae63a07?org=ab443343-5dd7-4698-b7cc-00e521059318) để biết quá trình migration đang diễn ra). Kubernetes tự cung cấp cả 2 nhu cầu này — Service DNS cho discovery, ConfigMap/Secret cho config — nên Eureka/`eureka-server` và Spring Cloud Config/`config-server` ở tầng ứng dụng bị xóa hẳn thay vì port sang.
+- Hệ quả cụ thể: mọi lời gọi giữa các service (bảng route của gateway, lời gọi từ `order-service` sang `menu-service`) giờ trỏ thẳng tới `host:port` cố định thay vì tên logic phân giải qua Eureka; config vận hành của mỗi service (trước đây lấy runtime từ `config-repo` của `config-server`) giờ nằm sẵn trong `application.yml` của chính service đó.
+- Ảnh hưởng tới local dev: `docker compose up` không còn khởi động container `eureka-server`/`config-server` nữa — ít hơn 1 phần phải chạy, không phải regression. DNS nội bộ của Docker Compose vẫn phân giải đúng tên service cố định (vd. `http://menu-service:8082`) cho bất kỳ *container khác* trên cùng network như trước; thứ duy nhất trước đây tự động có sẵn nhờ Eureka mà giờ cần thêm 1 bước thủ công 1 lần là gọi service theo tên từ 1 tiến trình chạy **bare** (vd. từ IDE) cùng lúc với phần còn lại chạy Docker — xem mục [Xử lý sự cố thường gặp](#xử-lý-sự-cố-thường-gặp) bên dưới.
 
 ## Cấu trúc
 
 ```
-backend/    Maven multi-module reactor: 5 domain services + gateway + eureka-server + config-server + common-lib
+backend/    Maven multi-module reactor: 5 domain services + gateway + common-lib
 frontend/   Angular (standalone components)
 docker/     Script khởi tạo Postgres
 ```
 
-Cấu hình native của config-server nằm ở `backend/config-server/src/main/resources/config-repo/`. Thư mục này được bind-mount dạng read-only vào container `config-server` (xem `docker-compose.yml`), nên sửa 1 file `config-repo/*.yml` chỉ cần `docker compose restart config-server` (và restart luôn service nào đang đọc config đó) — không cần rebuild lại image.
+(Tới trước 2026-09, `backend/` còn có thêm module `eureka-server` và `config-server` — đã retired, xem mục [Thành phần đã retired](#thành-phần-đã-retired).)
+
+Tới trước khi config-server bị retired, config native của nó nằm ở `backend/config-server/src/main/resources/config-repo/`, bind-mount dạng read-only vào container `config-server` nên sửa 1 file `config-repo/*.yml` chỉ cần restart, không cần rebuild image. Giờ config vận hành của mỗi service nằm thẳng trong `src/main/resources/application.yml` của chính service đó — muốn đổi thì phải rebuild lại image của service đó.
 
 ## Yêu cầu môi trường
 
@@ -717,19 +714,19 @@ docker compose up -d
 cd frontend && ng serve
 ```
 
-`docker compose up -d` khởi động toàn bộ phần backend cùng lúc — Postgres, Kafka, Kafka UI, Zipkin, config-server, eureka-server, gateway, và cả 5 domain service — sau đó chạy dev server frontend riêng, ngoài Compose, có hot reload. Các lệnh dùng hàng ngày ngoài lệnh khởi động ban đầu:
+`docker compose up -d` khởi động toàn bộ phần backend cùng lúc — Postgres, Kafka, Kafka UI, Zipkin, gateway, và cả 5 domain service (`eureka-server`/`config-server` không còn nằm trong stack nữa, xem mục [Thành phần đã retired](#thành-phần-đã-retired)) — sau đó chạy dev server frontend riêng, ngoài Compose, có hot reload. Các lệnh dùng hàng ngày ngoài lệnh khởi động ban đầu:
 
 ```bash
 docker compose ps                           # xem container nào đang chạy, trạng thái health
 docker compose logs -f order-service        # xem log 1 service theo thời gian thực (Ctrl+C để dừng)
+docker compose up -d --build                # build lại + restart tất cả service (mvn package sẽ chạy test trước — xem mục Kiểm thử bên dưới)
 docker compose up -d --build order-service  # build lại + restart 1 service sau khi sửa code (mvn package sẽ chạy test trước — xem mục Kiểm thử bên dưới)
-docker compose restart order-service        # restart mà không rebuild, vd sau khi sửa config-repo (xem mục Cấu trúc bên trên)
+docker compose restart order-service        # restart mà không rebuild, vd sau khi đổi 1 env var trong docker-compose.yml, hoặc chỉ để khởi động lại container đang treo
 docker compose down                         # dừng và xoá toàn bộ container; volume Postgres (postgres-data) vẫn giữ nguyên
 docker compose down -v                      # như trên, nhưng xoá luôn data Postgres — dùng khi muốn làm sạch hoàn toàn
 ```
 
 Gateway (cổng vào duy nhất cho frontend): http://localhost:8080
-Eureka dashboard: http://localhost:8761
 Kafka UI: http://localhost:8090
 
 Không có flow tự đăng ký — tài khoản nhân viên chỉ được tạo bởi ADMIN. Ở lần khởi động đầu tiên, auth-service tự động seed 1 tài khoản admin mặc định (`admin` / `admin123`) nếu bảng `users` đang rỗng, để có tài khoản đăng nhập ban đầu. Tài khoản này chỉ dùng cho dev; khi triển khai thật cần seed tài khoản admin đầu tiên theo cách khác (out-of-band). Có 2 role: `ADMIN` và `CASHIER`.
@@ -779,19 +776,18 @@ Cả 2 được tự động enforce qua git hook `pre-commit` (`.git/hooks/pre-
 
 ## Xử lý sự cố thường gặp
 
-- **Gateway trả về 503 ngay sau khi restart 1 service** — load balancer của Spring Cloud Gateway giữ cache instance của service (phân giải qua Eureka) trong thời gian ngắn; cache này có thể bị stale vài giây sau khi restart. Thử lại sau ~5s trước khi kết luận là lỗi thật.
+- *(Lịch sử — chỉ áp dụng khi project còn dùng Eureka, đã retired 2026-09, xem mục [Thành phần đã retired](#thành-phần-đã-retired))* **Gateway từng trả về 503 ngay sau khi restart 1 service** — load balancer của Spring Cloud Gateway giữ cache instance của service (phân giải qua Eureka) trong thời gian ngắn; cache này có thể bị stale vài giây sau khi restart. Giờ gateway route thẳng tới `host:port` cố định của từng service, nên loại lỗi này không còn xảy ra được nữa.
 - **Docker build cache chiếm hết dung lượng ổ đĩa** — build đi build lại nhiều lần (`docker compose build`) trong lúc dev để lại các layer image cũ, không tự dọn. Chạy `docker builder prune -f` định kỳ để giải phóng dung lượng, hoặc `docker system df` để xem cái gì đang chiếm chỗ.
 - **1 test dùng Testcontainers (các class gắn tag testcontainers của order-service hoặc inventory-service, v.v.) không kết nối được, báo lỗi timezone** — driver JDBC của Postgres yêu cầu server `SET TIME ZONE` theo múi giờ mặc định của JVM khi kết nối; trên máy mà OS báo 1 tên alias IANA cũ (vd `Asia/Saigon`, đã được thay bằng `Asia/Ho_Chi_Minh`), tzdata đóng gói sẵn trong image Testcontainers `postgres:16` không nhận ra tên đó và từ chối kết nối luôn. `pom.xml` của cả order-service lẫn inventory-service đều ép `-Duser.timezone=UTC` cho riêng `maven-surefire-plugin` của mình để khỏi phải phụ thuộc vào việc tên timezone cấp OS của từng máy dev có được đúng image Postgres này chấp nhận hay không.
 - **Sửa nội dung 1 file migration đã được apply rồi, giờ startup báo lỗi checksum mismatch của Flyway** — `validate-on-migrate` mặc định bật (project này không override) và tính checksum nội dung từng file migration ngay lần chạy đầu tiên, rồi so lại checksum đó ở mỗi lần startup sau. Sửa nội dung 1 file đã apply — kể cả chỉ sửa comment — cũng làm đổi checksum và fail validate so với checksum Postgres đã lưu. Nếu có lúc cần sửa 1 migration đã apply, đừng xóa database để né lỗi này — tính lại checksum đã lưu bằng thao tác `repair` riêng của Flyway. Không có `pom.xml` nào ở đây khai báo `flyway-maven-plugin`, nên phải gọi bằng tọa độ đầy đủ, chạy từ thư mục module của service đó:
   ```bash
   mvn org.flywaydb:flyway-maven-plugin:12.4.0:repair -Dflyway.url=jdbc:postgresql://localhost:5432/<db> -Dflyway.user=<user> -Dflyway.password=<password> -Dflyway.locations=filesystem:src/main/resources/db/migration
   ```
-- **1 service không gọi được service khác (Eureka lookup treo hoặc trả 500) khi chạy 1 service bare từ IDE cùng lúc với phần còn lại đang chạy Docker** — `eureka.instance.hostname` của mỗi service mặc định là `host.docker.internal` thay vì IP tự nhận diện, vì trên Windows, IP tự nhận diện đó có thể rơi vào 1 virtual adapter (VPN/WSL/Hyper-V) mà container Docker không route tới được. `host.docker.internal` về nguyên lý hoạt động theo cả 2 chiều — Docker Desktop "hairpin" cổng của chính container đó vòng qua host, nên cả container lẫn tiến trình chạy bare đều gọi được lẫn nhau qua đường này. Nếu mọi thứ đều chạy trong Docker (không có gì bare) thì có thể đăng ký thẳng bằng IP container cho đơn giản hơn (`docker-compose.yml` đã set `EUREKA_INSTANCE_PREFER_IP_ADDRESS=true` cho order-service).
-
-  Nếu trước đó vẫn chạy bình thường mà tự nhiên hỏng — gọi `host.docker.internal` từ tiến trình chạy bare-host (vd order-service chạy từ Eclipse) bắt đầu bị timeout, trong khi không đổi gì khác — nguyên nhân thường gặp là Docker Desktop định kỳ **tự ghi đè** dòng `host.docker.internal` trong hosts file Windows (`C:\Windows\System32\drivers\etc\hosts`) thành IP LAN *hiện tại* của máy (đổi mỗi khi chuyển mạng hoặc restart Docker Desktop), và IP LAN đó thường không kết nối được vì lý do không liên quan gì tới Windows Firewall. Chỉ phía **container** cần cơ chế phân giải `host.docker.internal` riêng của Docker (Docker tự quản lý, không đọc hosts file Windows) — còn tiến trình chạy trên **host** (đọc đúng hosts file Windows thật) cần dòng đó trỏ về `127.0.0.1`, vì cổng publish của container luôn truy cập được qua đó bất kể máy đang ở mạng nào. Sửa bằng PowerShell **quyền Administrator**:
+- *(Lịch sử — chỉ áp dụng khi project còn dùng Eureka, đã retired 2026-09, xem mục [Thành phần đã retired](#thành-phần-đã-retired))* **1 service từng không gọi được service khác (Eureka lookup treo hoặc trả 500) khi chạy 1 service bare từ IDE cùng lúc với phần còn lại đang chạy Docker** — `eureka.instance.hostname` của mỗi service trước đây mặc định là `host.docker.internal` thay vì IP tự nhận diện, vì trên Windows, IP tự nhận diện đó có thể rơi vào 1 virtual adapter (VPN/WSL/Hyper-V) mà container Docker không route tới được. Toàn bộ nhóm lỗi này (kể cả việc Docker Desktop định kỳ ghi đè dòng `host.docker.internal` trong hosts file) không còn xảy ra nữa vì routing giờ không còn đi qua Eureka — xem mục ngay bên dưới để biết cách thay thế.
+- **1 service không gọi được service khác (connection refused / không tìm thấy host) khi chạy 1 service bare từ IDE cùng lúc với phần còn lại đang chạy Docker** — route giờ là hostname cố định (vd. `http://menu-service:8082`) thay vì phân giải qua Eureka. DNS nội bộ của Docker Compose tự phân giải đúng những tên đó cho bất kỳ *container khác* trên cùng network, nhưng tiến trình chạy **bare-host** (vd order-service chạy từ Eclipse) không nằm trên network đó nên hoàn toàn không resolve được tên service trần. Vì Compose đã publish sẵn port của mọi service ra host (`ports:` trong `docker-compose.yml`), cách sửa là thêm 1 lần duy nhất alias hosts file, trỏ tên từng service về `127.0.0.1`, chạy với quyền Administrator:
   ```powershell
-  (Get-Content C:\Windows\System32\drivers\etc\hosts) -replace '^\S+(\s+host\.docker\.internal)$', '127.0.0.1$1' | Set-Content C:\Windows\System32\drivers\etc\hosts -Encoding ASCII
+  Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "127.0.0.1 auth-service menu-service order-service inventory-service report-service"
   ```
-  Có thể cần làm lại lệnh này sau khi Docker Desktop restart hoặc đổi mạng — kiểm tra trước bằng `Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String host.docker.internal` nếu lỗi kết nối bare-host tái xuất hiện.
+  Sau đó, service chạy bare sẽ resolve tên bất kỳ service nào khác về `127.0.0.1:<port đã publish>`, y hệt như đang gọi 1 container khác.
 
 </details>

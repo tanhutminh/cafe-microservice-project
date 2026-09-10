@@ -20,13 +20,13 @@ import org.springframework.stereotype.Component;
  *
  * <p>Implements {@link SchedulingConfigurer} instead of annotating {@link #poll()} with
  * {@code @Scheduled} so the fixed delay is genuinely sourced from {@link
- * OutboxProperties#pollInterval()} - the same bound, config-server-backed value every other {@code
- * app.outbox.*} tunable already goes through - rather than a second, separately-defaulted {@code
- * ${app.outbox.poll-interval:...}} placeholder that {@code @Scheduled} would otherwise require and
- * that could drift out of sync with it. Trade-off: Spring only wraps {@code @Scheduled}-annotated
- * methods in an observation-aware runnable, so a task registered this way - via {@link
- * ScheduledTaskRegistrar#addFixedDelayTask} - never produces a {@code tasks.scheduled.execution}
- * observation at all, unlike a real {@code @Scheduled} method's.
+ * OutboxProperties#pollInterval()} - the same bound, application.yml-backed value every other
+ * {@code app.outbox.*} tunable already goes through - rather than a second, separately-defaulted
+ * {@code ${app.outbox.poll-interval:...}} placeholder that {@code @Scheduled} would otherwise
+ * require and that could drift out of sync with it. Trade-off: Spring only wraps
+ * {@code @Scheduled}-annotated methods in an observation-aware runnable, so a task registered this
+ * way - via {@link ScheduledTaskRegistrar#addFixedDelayTask} - never produces a {@code
+ * tasks.scheduled.execution} observation at all, unlike a real {@code @Scheduled} method's.
  */
 @Component
 @ConditionalOnProperty(

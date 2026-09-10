@@ -41,13 +41,13 @@ class WebClientConfigTest {
   }
 
   @Test
-  void loadBalancedWebClientBuilder_instrumentsRequestsWithTheGivenRegistry() {
+  void observedWebClientBuilder_instrumentsRequestsWithTheGivenRegistry() {
     TestObservationRegistry registry = TestObservationRegistry.create();
     server.enqueue(new MockResponse().setBody("ok"));
 
     WebClient client =
         new WebClientConfig()
-            .loadBalancedWebClientBuilder(registry)
+            .observedWebClientBuilder(registry)
             .baseUrl(server.url("/").toString())
             .build();
 
@@ -63,8 +63,7 @@ class WebClientConfigTest {
   }
 
   @Test
-  void loadBalancedWebClientBuilder_propagatesTraceContextToTheCallee()
-      throws InterruptedException {
+  void observedWebClientBuilder_propagatesTraceContextToTheCallee() throws InterruptedException {
     Tracing tracing = Tracing.newBuilder().build();
     try {
       BraveTracer braveTracer =
@@ -82,7 +81,7 @@ class WebClientConfigTest {
 
       WebClient client =
           new WebClientConfig()
-              .loadBalancedWebClientBuilder(registry)
+              .observedWebClientBuilder(registry)
               .baseUrl(server.url("/").toString())
               .build();
 

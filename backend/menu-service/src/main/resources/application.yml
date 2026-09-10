@@ -1,11 +1,6 @@
 spring:
   application:
     name: menu-service
-  config:
-    import: "optional:configserver:"
-  cloud:
-    config:
-      uri: http://localhost:8888
   datasource:
     url: jdbc:postgresql://localhost:5432/menu_db
     username: menu_service
@@ -20,23 +15,12 @@ spring:
 server:
   port: 8082
 
-eureka:
-  client:
-    service-url:
-      defaultZone: http://localhost:8761/eureka/
-  instance:
-    # See order-service's application.yml for the full rationale: advertising
-    # the auto-detected container/host IP breaks whichever caller sits on the
-    # other side of the Docker/bare-process boundary. host.docker.internal
-    # works uniformly here because Docker Desktop hairpins a container's own
-    # published port back through it, so both other containers (gateway) and
-    # bare-host processes (an IDE-run order-service) can reach menu-service
-    # through the same advertised address - no docker-compose override needed.
-    hostname: host.docker.internal
-    prefer-ip-address: false
-
 management:
   endpoints:
     web:
       exposure:
         include: health,info
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project. Lower this for a real deployment.
+      probability: 1.0

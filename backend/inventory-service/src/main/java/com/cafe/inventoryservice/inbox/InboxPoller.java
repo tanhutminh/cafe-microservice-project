@@ -17,7 +17,7 @@ import org.springframework.stereotype.Component;
  *
  * <p>Implements {@link SchedulingConfigurer} instead of annotating {@link #poll()} with
  * {@code @Scheduled} so the fixed delay is genuinely sourced from {@link
- * InboxProperties#pollInterval()} - the same bound, config-server-backed value every other {@code
+ * InboxProperties#pollInterval()} - the same bound, application.yml-backed value every other {@code
  * app.inbox.*} tunable already goes through - rather than a second, separately-defaulted {@code
  * ${app.inbox.poll-interval:...}} placeholder that {@code @Scheduled} would otherwise require and
  * that could drift out of sync with it. Trade-off: Spring only wraps {@code @Scheduled}-annotated

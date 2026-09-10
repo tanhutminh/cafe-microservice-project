@@ -1,29 +1,71 @@
 spring:
   application:
     name: gateway
-  config:
-    import: "configserver:"
   cloud:
-    config:
-      uri: http://localhost:8888
-      fail-fast: true
-      retry:
-        max-attempts: 10
-        initial-interval: 2000
-        max-interval: 10000
+    gateway:
+      server:
+        webflux:
+          # Which frontend origin may call through the gateway - the textbook example of a
+          # value that differs per environment (a real deployment's frontend domain, not
+          # localhost) and needs changing without rebuilding the gateway image.
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOrigins: "http://localhost:4200"
+                allowedMethods: "*"
+                allowedHeaders: "*"
+                allowCredentials: true
+          # Path -> service routing table. Adding/moving a route is an operational/topology
+          # change, not a code change, so it belongs here rather than baked into the image.
+          routes:
+            - id: auth-service
+              uri: http://auth-service:8081
+              predicates:
+                - Path=/api/auth/**,/api/users/**
+            - id: inventory-recipe
+              uri: http://inventory-service:8084
+              predicates:
+                - Path=/api/menu-items/*/recipe
+            - id: menu-service
+              uri: http://menu-service:8082
+              predicates:
+                - Path=/api/categories/**,/api/menu-items/**
+            - id: order-service
+              uri: http://order-service:8083
+              predicates:
+                - Path=/api/tables/**,/api/orders/**
+            - id: inventory-service
+              uri: http://inventory-service:8084
+              predicates:
+                - Path=/api/ingredients/**
+            - id: report-service
+              uri: http://report-service:8085
+              predicates:
+                - Path=/api/reports/**
 
 server:
   port: 8080
-
-eureka:
-  client:
-    service-url:
-      defaultZone: http://localhost:8761/eureka/
-  instance:
-    prefer-ip-address: true
 
 management:
   endpoints:
     web:
       exposure:
         include: health,info
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project. Lower this for a real deployment.
+      probability: 1.0
+
+# Public half of the auth-service RS256 keypair — safe to distribute, verify-only.
+app:
+  jwt:
+    public-key: |
+      -----BEGIN PUBLIC KEY-----
+      MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7ZYZTMITaRxKkPm9FV4p
+      dVPEY4o6IXrRBTl0xJj2N4HQDDa0VMztn08g/gC96X0uYsEP9nu+epb4ZFgz9+CX
+      JqXWS6sjbQmtjaouvb+GAuwDkkQEIGlIzySRQMmADRIisBqGWRSNQ9HXNkrR3s3v
+      r13WVAQLvSTzWR5eoPPiEkFVObC9/eBaAlh8t/XgUp3clGLNuscEmisjzgIDxw3k
+      Y2PPq3xGEoGP7/19SRwV+6SVTMMERkRVogBRym1jCx49jnZa7IhoI2463U04Lw9W
+      T4NjghA7B49op/Rmqu3WPzJo1Ls5TjORcBkDSv7RKN2OEQDW3COhfWvmRG7EtZDi
+      9QIDAQAB
+      -----END PUBLIC KEY-----

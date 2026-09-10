@@ -18,11 +18,10 @@ public final class HealthCheckObservationPredicates {
    * filter-chain/authorization observations alike, none of which carry a path/URI field to match on
    * individually. Requires {@code HealthCheckMarkingFilter} to be registered ahead of every other
    * observation-producing filter; used by the services that run a Spring Security filter chain
-   * (auth, menu, order, inventory, report). config-server, eureka-server, and gateway have no
-   * Spring Security filter chain to generate that extra noise, so each keeps its own local,
-   * path-based predicate instead - independent of this class, since none of them share the
-   * exact-same servlet {@code Observation.Context} shape and dependency footprint this factory
-   * assumes.
+   * (auth, menu, order, inventory, report). gateway has no Spring Security filter chain to generate
+   * that extra noise, so it keeps its own local, path-based predicate instead - independent of this
+   * class, since it doesn't share the exact-same servlet {@code Observation.Context} shape and
+   * dependency footprint this factory assumes.
    */
   public static ObservationPredicate excludingMarkedRequests() {
     return (name, context) -> !HealthCheckRequestContext.isHealthCheck();

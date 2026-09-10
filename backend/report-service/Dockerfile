@@ -2,8 +2,6 @@ FROM maven:3.9-eclipse-temurin-21 AS builder
 WORKDIR /build
 COPY pom.xml .
 COPY common-lib/pom.xml common-lib/pom.xml
-COPY config-server/pom.xml config-server/pom.xml
-COPY eureka-server/pom.xml eureka-server/pom.xml
 COPY gateway/pom.xml gateway/pom.xml
 COPY auth-service/pom.xml auth-service/pom.xml
 COPY menu-service/pom.xml menu-service/pom.xml

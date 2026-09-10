@@ -1,11 +1,6 @@
 spring:
   application:
     name: report-service
-  config:
-    import: "optional:configserver:"
-  cloud:
-    config:
-      uri: http://localhost:8888
   datasource:
     url: jdbc:postgresql://localhost:5432/report_db
     username: report_service
@@ -24,27 +19,24 @@ spring:
     consumer:
       group-id: report-service
       auto-offset-reset: earliest
+    template:
+      # report-service has the spring-kafka dependency and a bootstrap-servers connection
+      # wired (docker-compose) but no @KafkaListener/KafkaTemplate usage yet - this is a no-op
+      # today, set proactively so tracing is consistent the moment it starts consuming
+      # order.paid (its evident purpose, given the name and the wiring already in place).
+      observation-enabled: true
+    listener:
+      observation-enabled: true
 
 server:
   port: 8085
-
-eureka:
-  client:
-    service-url:
-      defaultZone: http://localhost:8761/eureka/
-  instance:
-    # See order-service's application.yml for the full rationale: advertising
-    # the auto-detected container/host IP breaks whichever caller sits on the
-    # other side of the Docker/bare-process boundary. host.docker.internal
-    # works uniformly here because Docker Desktop hairpins a container's own
-    # published port back through it, so both other containers (gateway) and
-    # bare-host processes (an IDE-run peer) can reach report-service through
-    # the same advertised address - no docker-compose override needed.
-    hostname: host.docker.internal
-    prefer-ip-address: false
 
 management:
   endpoints:
     web:
       exposure:
         include: health,info
+  tracing:
+    sampling:
+      # Trace everything - this is a learning/demo project. Lower this for a real deployment.
+      probability: 1.0

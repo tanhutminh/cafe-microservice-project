@@ -22,9 +22,9 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
 
 /**
- * Synchronous call to menu-service (via Eureka — service-to-service traffic bypasses the gateway).
- * Forwards the same trusted identity headers the gateway set on the inbound request, since
- * menu-service's security never sees a raw JWT either.
+ * Synchronous call to menu-service (direct HTTP, resolved via DNS — service-to-service traffic
+ * bypasses the gateway). Forwards the same trusted identity headers the gateway set on the inbound
+ * request, since menu-service's security never sees a raw JWT either.
  *
  * <p>Wrapped in the Circuit Breaker pattern (Resilience4j, config under resilience4j.* in
  * application.yml, instance name "menu-service"): a response timeout bounds how long a single call
@@ -40,15 +40,16 @@ public class MenuServiceClient {
   private final WebClient webClient;
 
   @Autowired
-  public MenuServiceClient(WebClient.Builder loadBalancedWebClientBuilder) {
-    this(loadBalancedWebClientBuilder, "http://menu-service");
+  public MenuServiceClient(
+      WebClient.Builder observedWebClientBuilder, MenuServiceClientProperties properties) {
+    this(observedWebClientBuilder, properties.baseUrl());
   }
 
   /** Package-private seam for tests to point this client at a local MockWebServer instead. */
-  MenuServiceClient(WebClient.Builder loadBalancedWebClientBuilder, String baseUrl) {
+  MenuServiceClient(WebClient.Builder observedWebClientBuilder, String baseUrl) {
     HttpClient httpClient = HttpClient.create().responseTimeout(RESPONSE_TIMEOUT);
     this.webClient =
-        loadBalancedWebClientBuilder
+        observedWebClientBuilder
             .baseUrl(baseUrl)
             .clientConnector(new ReactorClientHttpConnector(httpClient))
             .build();

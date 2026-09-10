@@ -4,47 +4,47 @@ import com.cafe.authservice.user.User;
 import com.cafe.common.security.PemKeyUtils;
 import io.jsonwebtoken.Jwts;
 import jakarta.annotation.PostConstruct;
-import org.springframework.stereotype.Service;
-
 import java.security.PrivateKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
+import org.springframework.stereotype.Service;
 
 /**
- * Signs access tokens with the auth-service-owned RS256 private key (distributed via
- * config-server). Only the matching public key ever leaves this service, via gateway.yml.
+ * Signs access tokens with the auth-service-owned RS256 private key, configured locally in this
+ * service's own application.yml. Only the matching public key ever leaves this service, baked into
+ * gateway's application.yml.
  */
 @Service
 public class JwtService {
 
-    private final JwtProperties jwtProperties;
-    private PrivateKey privateKey;
+  private final JwtProperties jwtProperties;
+  private PrivateKey privateKey;
 
-    public JwtService(JwtProperties jwtProperties) {
-        this.jwtProperties = jwtProperties;
-    }
+  public JwtService(JwtProperties jwtProperties) {
+    this.jwtProperties = jwtProperties;
+  }
 
-    @PostConstruct
-    void init() {
-        this.privateKey = PemKeyUtils.parsePrivateKey(jwtProperties.privateKey());
-    }
+  @PostConstruct
+  void init() {
+    this.privateKey = PemKeyUtils.parsePrivateKey(jwtProperties.privateKey());
+  }
 
-    public String generateAccessToken(User user) {
-        Instant now = Instant.now();
-        Instant expiry = now.plus(Duration.ofMinutes(jwtProperties.accessTokenTtlMinutes()));
+  public String generateAccessToken(User user) {
+    Instant now = Instant.now();
+    Instant expiry = now.plus(Duration.ofMinutes(jwtProperties.accessTokenTtlMinutes()));
 
-        return Jwts.builder()
-                .subject(user.getUsername())
-                .claim("userId", user.getId())
-                .claim("role", user.getRole().name())
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(expiry))
-                .signWith(privateKey, Jwts.SIG.RS256)
-                .compact();
-    }
+    return Jwts.builder()
+        .subject(user.getUsername())
+        .claim("userId", user.getId())
+        .claim("role", user.getRole().name())
+        .issuedAt(Date.from(now))
+        .expiration(Date.from(expiry))
+        .signWith(privateKey, Jwts.SIG.RS256)
+        .compact();
+  }
 
-    public int accessTokenTtlSeconds() {
-        return jwtProperties.accessTokenTtlMinutes() * 60;
-    }
+  public int accessTokenTtlSeconds() {
+    return jwtProperties.accessTokenTtlMinutes() * 60;
+  }
 }

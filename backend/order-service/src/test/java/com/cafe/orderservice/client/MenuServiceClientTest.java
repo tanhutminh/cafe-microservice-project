@@ -3,6 +3,9 @@ package com.cafe.orderservice.client;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.cafe.common.exception.ResourceNotFoundException;
 import com.cafe.orderservice.client.dto.MenuItemDetails;
@@ -17,6 +20,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Answers;
 import org.springframework.web.reactive.function.client.WebClient;
 
 /**
@@ -104,5 +108,15 @@ class MenuServiceClientTest {
 
     assertThatThrownBy(() -> client.findMenuItemsAsMap(List.of(1L, 2L)))
         .isInstanceOf(ResourceNotFoundException.class);
+  }
+
+  @Test
+  void autowiredConstructor_usesBaseUrlFromProperties() {
+    WebClient.Builder builder = mock(WebClient.Builder.class, Answers.RETURNS_SELF);
+    when(builder.build()).thenReturn(WebClient.builder().build());
+
+    new MenuServiceClient(builder, new MenuServiceClientProperties("http://some-other-host:1234"));
+
+    verify(builder).baseUrl("http://some-other-host:1234");
   }
 }

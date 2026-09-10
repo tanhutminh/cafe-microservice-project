@@ -8,9 +8,9 @@
       "mainClass": "com.cafe.authservice.AuthServiceApplication",
       "projectName": "auth-service",
       "vmArgs": "-Xmx256m"
-      // No env overrides needed — application.yml's defaults (Postgres on
-      // localhost:5432, config-server on 8888, eureka on 8761) already match
-      // docker-compose's host port mappings for the infra containers.
+      // No env overrides needed — application.yml's default datasource URL
+      // (Postgres on localhost:5432) already matches docker-compose's host
+      // port mapping for the postgres container.
     },
     {
       "type": "chrome",
