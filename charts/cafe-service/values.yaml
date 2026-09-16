@@ -1,0 +1,49 @@
+image:
+  repository: cafe-service
+  tag: latest # overridden per-release by the CD pipeline, once one exists, to a real build tag
+  pullPolicy: IfNotPresent
+replicas: 1
+port: 8080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Only used when db.enabled is true (the wait-for-db initContainer in deployment.yaml).
+initContainer:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+appName: ""
+secretProviderClassName: ""
+
+db:
+  enabled: false
+  # Default matches the CNPG Cluster's auto-generated read-write Service name
+  # (see k8s/data-layer/postgres-cluster.yaml) - override only if that Cluster is ever renamed.
+  host: cafe-postgres-rw
+  name: ""
+  credentialsSecretName: ""
+
+kafka:
+  enabled: false
+  # Default matches the Strimzi Kafka resource's auto-generated bootstrap Service name
+  # (see k8s/data-layer/kafka-cluster.yaml) - override only if that Kafka resource is ever renamed.
+  bootstrapServers: cafe-kafka-kafka-bootstrap:9092
+
+jwt:
+  privateKey:
+    enabled: false
+    secretName: ""
+  publicKey:
+    enabled: false
+    secretName: ""

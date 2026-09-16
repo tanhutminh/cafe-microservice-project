@@ -1,0 +1,47 @@
+global:
+  gcpProjectId: cafe-microservices
+gateway:
+  image: {repository: cafe-gateway}
+  port: 8080
+  appName: gateway
+  secretProviderClassName: gateway-secrets-spc
+  jwt: {publicKey: {enabled: true, secretName: gateway-jwt-key}}
+
+auth-service:
+  image: {repository: cafe-auth-service}
+  port: 8081
+  appName: auth-service
+  secretProviderClassName: auth-service-secrets-spc
+  db: {enabled: true, name: auth_db, credentialsSecretName: auth-service-db-credentials}
+  jwt: {privateKey: {enabled: true, secretName: auth-service-jwt-key}}
+
+menu-service:
+  image: {repository: cafe-menu-service}
+  port: 8082
+  appName: menu-service
+  secretProviderClassName: menu-service-secrets-spc
+  db: {enabled: true, name: menu_db, credentialsSecretName: menu-service-db-credentials}
+
+order-service:
+  image: {repository: cafe-order-service}
+  port: 8083
+  appName: order-service
+  secretProviderClassName: order-service-secrets-spc
+  db: {enabled: true, name: order_db, credentialsSecretName: order-service-db-credentials}
+  kafka: {enabled: true}
+
+inventory-service:
+  image: {repository: cafe-inventory-service}
+  port: 8084
+  appName: inventory-service
+  secretProviderClassName: inventory-service-secrets-spc
+  db: {enabled: true, name: inventory_db, credentialsSecretName: inventory-service-db-credentials}
+  kafka: {enabled: true}
+
+report-service:
+  image: {repository: cafe-report-service}
+  port: 8085
+  appName: report-service
+  secretProviderClassName: report-service-secrets-spc
+  db: {enabled: true, name: report_db, credentialsSecretName: report-service-db-credentials}
+  kafka: {enabled: true}

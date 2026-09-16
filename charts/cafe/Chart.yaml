@@ -1,0 +1,11 @@
+apiVersion: v2
+name: cafe
+description: Cafe microservices umbrella chart
+version: 0.1.0
+dependencies:
+  - {name: cafe-service, version: "0.1.0", repository: "file://../cafe-service", alias: gateway}
+  - {name: cafe-service, version: "0.1.0", repository: "file://../cafe-service", alias: auth-service}
+  - {name: cafe-service, version: "0.1.0", repository: "file://../cafe-service", alias: menu-service}
+  - {name: cafe-service, version: "0.1.0", repository: "file://../cafe-service", alias: order-service}
+  - {name: cafe-service, version: "0.1.0", repository: "file://../cafe-service", alias: inventory-service}
+  - {name: cafe-service, version: "0.1.0", repository: "file://../cafe-service", alias: report-service}

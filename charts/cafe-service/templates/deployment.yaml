@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.appName }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    # Recreate for DB-backed services: avoids an old pod (old schema expectations) and a new pod
+    # (post-Flyway-migration schema) running side by side during a rollout. Zero-downtime
+    # deploys aren't a goal for this learning project, so the brief outage is an acceptable trade.
+    type: {{ .Values.db.enabled | ternary "Recreate" "RollingUpdate" }}
+  selector:
+    matchLabels: {app: {{ .Values.appName }}}
+  template:
+    metadata:
+      labels: {app: {{ .Values.appName }}}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.appName }}
+      {{- if .Values.db.enabled }}
+      initContainers:
+        - name: wait-for-db
+          # Just a psql client for connectivity checks - version-tolerant, doesn't need to
+          # match the actual CNPG-managed server version (see k8s/data-layer/postgres-cluster.yaml,
+          # which doesn't pin an imageName and so tracks the CNPG operator's current default).
+          image: postgres:16-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              start=$(date +%s)
+              until psql -h {{ .Values.db.host }} -U "$DB_USERNAME" -d "$DB_NAME" -c 'SELECT 1' >/dev/null 2>&1; do
+                now=$(date +%s)
+                if [ $((now-start)) -ge 600 ]; then echo "timeout waiting for db"; exit 1; fi
+                sleep 3
+              done
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.db.credentialsSecretName }}, key: password}
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.db.credentialsSecretName }}, key: username}
+            - {name: DB_NAME, value: {{ .Values.db.name | quote }}}
+          resources: {{ toYaml .Values.initContainer.resources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.appName }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.port }}
+          env:
+            {{- if .Values.db.enabled }}
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.db.credentialsSecretName }}, key: username}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.db.credentialsSecretName }}, key: password}
+            {{- end }}
+            {{- if .Values.jwt.privateKey.enabled }}
+            - name: APP_JWT_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.jwt.privateKey.secretName }}, key: private-key}
+            {{- end }}
+            {{- if .Values.jwt.publicKey.enabled }}
+            - name: APP_JWT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.jwt.publicKey.secretName }}, key: public-key}
+            {{- end }}
+            - {name: SPRING_CONFIG_IMPORT, value: "optional:file:/config/application.yml"}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: secrets-store, mountPath: /mnt/secrets-store, readOnly: true}
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          # Spring Boot auto-activates the /liveness and /readiness health groups when it
+          # detects it's running in Kubernetes (via KUBERNETES_SERVICE_HOST) - no extra config
+          # needed beyond exposing the base "health" endpoint, already done in each service's
+          # own application.yml. Splitting them matters: readiness (which includes the db
+          # check) can fail transiently on a DB blip without that also failing liveness and
+          # triggering an unnecessary pod restart.
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: {{ .Values.port }}}
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: {{ .Values.port }}}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: {{ .Values.port }}}
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap: {name: "{{ .Values.appName }}-config"}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: {secretProviderClass: "{{ .Values.secretProviderClassName }}"}

@@ -1,0 +1,54 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: cafe-kafka-pool
+  namespace: cafe
+  labels: {strimzi.io/cluster: cafe-kafka, app.kubernetes.io/managed-by: kubectl}
+spec:
+  replicas: 1
+  # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
+  # 256Mi/512Mi memory) since this is the actual saga event backbone under real load, not a single
+  # stateless service. Strimzi auto-derives the Kafka JVM heap (-Xmx/-Xms) as a fraction of
+  # resources.limits.memory when no explicit jvmOptions are set (not set here) - the memory limit
+  # above isn't just a scheduling ceiling, it also directly sizes the broker's heap.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 768Mi
+    limits:
+      cpu: 1
+      memory: 1536Mi
+  roles: [controller, broker]
+  # GKE's default `standard` StorageClass (Delete reclaim) is fine here, unlike Postgres's
+  # dedicated Retain class (see postgres-storageclass.yaml) - Kafka only carries replayable
+  # saga messages, not source-of-truth data, so losing the disk isn't a data-loss event.
+  # deleteClaim below is a separate, orthogonal control (Strimzi-level: delete the PVC on
+  # scale-down) from the StorageClass's own reclaim policy (K8s-level: what happens to the
+  # PV once a PVC IS deleted) - false here just avoids losing the PVC on a routine scale-down.
+  storage: {type: persistent-claim, size: 5Gi, class: standard, deleteClaim: false}
+  template:
+    pod:
+      tolerations: [{key: "workload", operator: "Equal", value: "stateful", effect: "NoSchedule"}]
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: cloud.google.com/gke-nodepool
+                    operator: In
+                    values: ["stateful-pool"]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: cafe-kafka
+  namespace: cafe
+  labels: {app.kubernetes.io/managed-by: kubectl}
+  annotations: {strimzi.io/node-pools: enabled}
+  # `strimzi.io/node-pools: enabled` and the older `strimzi.io/kraft: enabled` annotation are
+  # both no-ops on Strimzi 1.2.0 (KRaft-only since 0.46; the node-pools requirement was relaxed
+  # starting 0.48) — harmless to include, not required, left in only for clarity.
+spec:
+  kafka:
+    listeners: [{name: plain, port: 9092, type: internal, tls: false}]   # `type` is the enum value (`internal`); `plain` only names this listener
+    config: {offsets.topic.replication.factor: 1, transaction.state.log.replication.factor: 1}

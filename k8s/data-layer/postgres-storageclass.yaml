@@ -1,0 +1,12 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: cafe-postgres-retain
+  labels: {app.kubernetes.io/managed-by: kubectl}
+provisioner: pd.csi.storage.gke.io
+parameters: {type: pd-standard}
+# Retain, not GKE's default Delete - Postgres is this app's source of truth, so the
+# underlying disk must survive even if the PVC/PV/Cluster is deleted by mistake.
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

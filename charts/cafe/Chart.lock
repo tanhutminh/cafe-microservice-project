@@ -1,0 +1,21 @@
+dependencies:
+- name: cafe-service
+  repository: file://../cafe-service
+  version: 0.1.0
+- name: cafe-service
+  repository: file://../cafe-service
+  version: 0.1.0
+- name: cafe-service
+  repository: file://../cafe-service
+  version: 0.1.0
+- name: cafe-service
+  repository: file://../cafe-service
+  version: 0.1.0
+- name: cafe-service
+  repository: file://../cafe-service
+  version: 0.1.0
+- name: cafe-service
+  repository: file://../cafe-service
+  version: 0.1.0
+digest: sha256:cb213a0b3d82b4dfc83d83a336453b3e2cec239da5cb362f4686313da4e43821
+generated: "2026-09-14T18:15:40.3398057+07:00"
