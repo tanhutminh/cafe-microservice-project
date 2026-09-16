@@ -56,16 +56,8 @@ management:
       # Trace everything - this is a learning/demo project. Lower this for a real deployment.
       probability: 1.0
 
-# Public half of the auth-service RS256 keypair — safe to distribute, verify-only.
 app:
   jwt:
-    public-key: |
-      -----BEGIN PUBLIC KEY-----
-      MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7ZYZTMITaRxKkPm9FV4p
-      dVPEY4o6IXrRBTl0xJj2N4HQDDa0VMztn08g/gC96X0uYsEP9nu+epb4ZFgz9+CX
-      JqXWS6sjbQmtjaouvb+GAuwDkkQEIGlIzySRQMmADRIisBqGWRSNQ9HXNkrR3s3v
-      r13WVAQLvSTzWR5eoPPiEkFVObC9/eBaAlh8t/XgUp3clGLNuscEmisjzgIDxw3k
-      Y2PPq3xGEoGP7/19SRwV+6SVTMMERkRVogBRym1jCx49jnZa7IhoI2463U04Lw9W
-      T4NjghA7B49op/Rmqu3WPzJo1Ls5TjORcBkDSv7RKN2OEQDW3COhfWvmRG7EtZDi
-      9QIDAQAB
-      -----END PUBLIC KEY-----
+    # Intentionally blank - sourced from the APP_JWT_PUBLIC_KEY env var
+    # (docker-compose locally, a K8s Secret synced from GCP Secret Manager in the real deployment).
+    public-key:

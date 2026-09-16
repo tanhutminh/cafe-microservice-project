@@ -1,0 +1,81 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: cafe-postgres
+  namespace: cafe   # do not omit — nothing else guarantees this lands in the cafe namespace vs. default
+  labels: {app.kubernetes.io/managed-by: kubectl}
+spec:
+  instances: 1
+  # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
+  # 256Mi/512Mi memory) since this one Postgres instance is the real backbone for all 5 service
+  # DBs under actual load, not a single stateless service. CNPG does not derive shared_buffers or
+  # other postgresql.conf tuning from this - it only governs the pod's own CPU/memory scheduling.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
+  enableSuperuserAccess: false
+  storage:
+    size: 5Gi
+    storageClass: cafe-postgres-retain   # see postgres-storageclass.yaml — NOT GKE's default "standard" class
+  affinity:
+    tolerations: [{key: "workload", operator: "Equal", value: "stateful", effect: "NoSchedule"}]
+    nodeSelector: {cloud.google.com/gke-nodepool: stateful-pool}
+  bootstrap:
+    # CNPG's Cluster can only bootstrap ONE database at creation time - auth_db is it.
+    # The other 4 (menu_db/order_db/inventory_db/report_db) are provisioned below as
+    # separate `Database` CRs against this same cluster, not here.
+    initdb: {database: auth_db, owner: auth_service}
+    # NO `secret:` field here — CNPG auto-generates its own internal bootstrap secret
+    # (named `cafe-postgres-auth_service`), which is what lets the Cluster become Ready with
+    # no dependency on any app pod. Do NOT point this at one of the 5 app-service secrets
+    # below instead — those only exist once their own app pod's CSI mount has synced them,
+    # so doing that would make the Cluster's own readiness depend on an app pod running first.
+  serviceAccountTemplate:
+    metadata:
+      annotations: {iam.gke.io/gcp-service-account: "cafe-postgres-backup@cafe-microservices.iam.gserviceaccount.com"}
+    # This is a DIFFERENT Workload Identity binding from the 5 app-service ones (each service's
+    # own GSA, bound in charts/cafe-service/templates/serviceaccount.yaml) — this one is for the
+    # Postgres pod's own backup-writing access to GCS, scoped to roles/storage.objectAdmin on the
+    # backup bucket only (see postgres-backup.yaml), not GSM secrets.
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters: {barmanObjectName: cafe-postgres-backup-store}
+    # WITHOUT this block, the ObjectStore/ScheduledBackup CRs (see postgres-backup.yaml) are
+    # inert — the plugin is never invoked. Real, load-bearing wiring, not optional decoration.
+  managed:
+    # Each passwordSecret below is one of the 5 app-service CSI-synced Secrets, same class of
+    # secret the bootstrap comment above warns not to depend on for Cluster readiness - here
+    # that's fine, since CNPG's role reconciliation isn't gated on Cluster readiness the way
+    # `bootstrap.initdb` would be, and each app's own wait-for-db initContainer already retries
+    # for up to 600s if the corresponding role/secret isn't ready yet.
+    roles:
+      - {name: auth_service, ensure: present, login: true, passwordSecret: {name: auth-service-db-credentials}}
+      - {name: menu_service, ensure: present, login: true, passwordSecret: {name: menu-service-db-credentials}}
+      - {name: order_service, ensure: present, login: true, passwordSecret: {name: order-service-db-credentials}}
+      - {name: inventory_service, ensure: present, login: true, passwordSecret: {name: inventory-service-db-credentials}}
+      - {name: report_service, ensure: present, login: true, passwordSecret: {name: report-service-db-credentials}}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata: {name: menu-db, namespace: cafe, labels: {app.kubernetes.io/managed-by: kubectl}}
+spec: {name: menu_db, owner: menu_service, cluster: {name: cafe-postgres}}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata: {name: order-db, namespace: cafe, labels: {app.kubernetes.io/managed-by: kubectl}}
+spec: {name: order_db, owner: order_service, cluster: {name: cafe-postgres}}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata: {name: inventory-db, namespace: cafe, labels: {app.kubernetes.io/managed-by: kubectl}}
+spec: {name: inventory_db, owner: inventory_service, cluster: {name: cafe-postgres}}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata: {name: report-db, namespace: cafe, labels: {app.kubernetes.io/managed-by: kubectl}}
+spec: {name: report_db, owner: report_service, cluster: {name: cafe-postgres}}

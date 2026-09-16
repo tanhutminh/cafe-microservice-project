@@ -3,8 +3,11 @@ spring:
     name: menu-service
   datasource:
     url: jdbc:postgresql://localhost:5432/menu_db
-    username: menu_service
-    password: menu_service_pw
+    # Intentionally blank - sourced from the SPRING_DATASOURCE_USERNAME env var
+    # (docker-compose locally, a K8s Secret synced from GCP Secret Manager in the real deployment).
+    username:
+    # Intentionally blank - sourced from the SPRING_DATASOURCE_PASSWORD env var (same as above).
+    password:
   jpa:
     hibernate:
       ddl-auto: validate

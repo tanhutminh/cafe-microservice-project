@@ -1,0 +1,24 @@
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: cafe-postgres-backup-store
+  namespace: cafe
+  labels: {app.kubernetes.io/managed-by: kubectl}
+spec:
+  configuration:
+    destinationPath: "gs://cafe-microservices-cafe-pg-backups/"
+    googleCredentials: {gkeEnvironment: true}   # Workload Identity via the Cluster's serviceAccountTemplate (see postgres-cluster.yaml) — no separate credentials Secret needed
+  retentionPolicy: "10d"   # the plugin architecture's field+location (Cluster.spec.backup.retentionPolicy is deprecated); cleanup runs automatically after each backup via barman-cloud-backup-delete, no separate cron needed
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: cafe-postgres-daily-backup
+  namespace: cafe
+  labels: {app.kubernetes.io/managed-by: kubectl}
+spec:
+  schedule: "0 0 0 * * *"   # 6-field cron, seconds first — CNPG's own textbook "midnight daily" example
+  backupOwnerReference: self
+  cluster: {name: cafe-postgres}
+  method: plugin
+  pluginConfiguration: {name: barman-cloud.cloudnative-pg.io}

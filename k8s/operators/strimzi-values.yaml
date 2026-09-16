@@ -1,0 +1,6 @@
+# Values override for the strimzi-kafka-operator Helm chart, applied on top of chart defaults.
+# Needed because the chart's default `watchAnyNamespace: false` / `watchNamespaces: []` only
+# lets the operator watch its own install namespace (strimzi-system) — it never sees the
+# Kafka/KafkaNodePool CRs applied to the `cafe` namespace otherwise.
+watchNamespaces:
+  - cafe

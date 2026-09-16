@@ -1,0 +1,5 @@
+# Shell scripts run inside Linux containers (Docker init/entrypoint scripts) - a CRLF-converted
+# shebang line (`#!/bin/bash\r`) makes the interpreter path unresolvable ("cannot execute:
+# required file not found"), so these must stay LF regardless of core.autocrlf on any checkout
+# machine.
+*.sh text eol=lf

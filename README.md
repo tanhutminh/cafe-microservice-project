@@ -233,7 +233,7 @@ Releasing a table is gated by more than its current order's status: `POST /api/t
 
 1. Client logs in via `POST /api/auth/login` (public, no token required) — auth-service checks credentials and issues an RS256-signed JWT.
 2. Every other request carries that JWT as `Authorization: Bearer <token>`.
-3. The gateway's `JwtAuthGlobalFilter` is the only place that ever sees or verifies the JWT: it strips any `X-User-*` headers the client tried to set itself (so identity can't be spoofed), verifies the signature with auth-service's public key (baked into gateway's own `application.yml` — fetched live from config-server until it was retired, see [Retired components](#retired-components)), and — only on success — sets trusted `X-User-Id` / `X-Username` / `X-User-Role` headers from the token's claims.
+3. The gateway's `JwtAuthGlobalFilter` is the only place that ever sees or verifies the JWT: it strips any `X-User-*` headers the client tried to set itself (so identity can't be spoofed), verifies the signature with auth-service's public key (supplied via the `APP_JWT_PUBLIC_KEY` env var — fetched live from config-server until it was retired, see [Retired components](#retired-components)), and — only on success — sets trusted `X-User-Id` / `X-Username` / `X-User-Role` headers from the token's claims.
 4. Downstream services never see the JWT; they trust the gateway's headers via `common-lib`'s `HeaderAuthenticationFilter`. A missing or invalid token gets a `401` at the gateway, before it ever reaches a domain service.
 
 ## Patterns in use
@@ -291,7 +291,7 @@ These five all defend the same Kafka exchange (the saga above) against the same 
 ## Retired components
 
 - **Service Discovery (Eureka)** and **Externalized Configuration (Spring Cloud Config Server)** — both retired 2026-09, as the first step of migrating the deployment target from `docker-compose` to Kubernetes (see the [Cafe Roadmap](https://claude.ai/code/artifact/45eea53a-1a1a-4dfe-88bc-f1a1fae63a07?org=ab443343-5dd7-4698-b7cc-00e521059318) for the in-progress migration). Kubernetes provides both concerns natively — Service DNS for discovery, ConfigMap/Secret for config — so the app-level Eureka/`eureka-server` registry and Spring Cloud Config/`config-server` were removed rather than ported.
-- What changed as a result: every inter-service call (gateway's routing table, `order-service`'s call to `menu-service`) now targets a fixed `host:port` instead of a logical name resolved via Eureka; each service's operational config (previously fetched live from `config-server`'s `config-repo`) is now baked directly into that service's own `application.yml`.
+- What changed as a result: every inter-service call (gateway's routing table, `order-service`'s call to `menu-service`) now targets a fixed `host:port` instead of a logical name resolved via Eureka; each service's operational config (previously fetched live from `config-server`'s `config-repo`) is now baked directly into that service's own `application.yml` — except secrets (DB usernames/passwords, JWT keys), which are sourced from env vars instead of being written into `application.yml` at all: locally that's the `.env` file `docker-compose.yml` reads via variable substitution (see `.env.example`); in the real deployment it's a K8s Secret synced from GCP Secret Manager.
 - Local dev impact: `docker compose up` no longer starts an `eureka-server`/`config-server` container — one less moving part, not a regression. Docker Compose's own DNS still resolves a fixed service name (e.g. `http://menu-service:8082`) for any *other container* on the network exactly as before; the one thing that used to come for free via Eureka and now needs a manual one-time step is reaching a service by name from a process running **bare** (e.g. an IDE) alongside the rest in Docker — see [Troubleshooting](#troubleshooting) below.
 
 ## Structure
@@ -300,21 +300,29 @@ These five all defend the same Kafka exchange (the saga above) against the same 
 backend/    Maven multi-module reactor: 5 domain services + gateway + common-lib
 frontend/   Angular (standalone components)
 docker/     Postgres init scripts
+charts/     Helm charts for the real GKE deployment: cafe-service (reusable per-service chart)
+            + cafe (umbrella chart aliasing it 6 times, one per service)
+k8s/        Plain K8s/CNPG/Strimzi manifests for the data layer (Postgres cluster +
+            storage class + backups, Kafka cluster) and Helm values overrides for
+            cluster-wide operators (currently just Strimzi's)
 ```
 
 (Until 2026-09, `backend/` also had `eureka-server` and `config-server` modules — retired, see [Retired components](#retired-components).)
 
-Until config-server's retirement, its native config lived at `backend/config-server/src/main/resources/config-repo/`, bind-mounted read-only into the `config-server` container so editing a `config-repo/*.yml` file only required a restart, no image rebuild. Each service's operational config now lives directly in that service's own `src/main/resources/application.yml` instead — changing it requires rebuilding that service's image.
+Until config-server's retirement, its native config lived at `backend/config-server/src/main/resources/config-repo/`, bind-mounted read-only into the `config-server` container so editing a `config-repo/*.yml` file only required a restart, no image rebuild. Each service's operational config now lives directly in that service's own `src/main/resources/application.yml` instead — changing it requires rebuilding that service's image. Secrets are the exception: they're left out of `application.yml` and sourced from env vars instead (see [Retired components](#retired-components) for exactly where from), so they can change without a rebuild.
 
 ## Prerequisites
 
 - Java 21
 - Node.js 20+ (Angular 21 / npm 11)
 - Docker & Docker Compose
+- Helm & kubectl, and access to a Kubernetes cluster — only needed for the `charts/`/`k8s/` GKE
+  deployment, not for running locally via Docker Compose below
 
 ## Running locally
 
 ```bash
+cp .env.example .env   # first time only — supplies DB credentials + JWT keys to docker compose
 docker compose up -d
 cd frontend && ng serve
 ```
@@ -394,6 +402,7 @@ Both checks run automatically in a `pre-commit` git hook (`.git/hooks/pre-commit
   Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "127.0.0.1 auth-service menu-service order-service inventory-service report-service"
   ```
   After that, a bare-run service resolves any other service's name to `127.0.0.1:<its published port>`, same as another container would.
+- **A service fails to start when run bare from an IDE** — DB usernames/passwords and JWT keys are blank in `application.yml`, sourced from env vars instead (see [Retired components](#retired-components) for exactly where that comes from) — a bare IDE run simply doesn't have them set. For auth-service/gateway this surfaces as `IllegalArgumentException: "Invalid RSA private key PEM"` / `"Invalid RSA public key PEM"` (parsing an empty PEM string); for the 4 DB-only services it surfaces as `PSQLException: "The server requested SCRAM-based authentication, but no password was provided."`, wrapped in a `BeanCreationException`. Fix: `cp application-local.yml.example application-local.yml` in that service's module directory, then activate the `local` Spring profile (`-Dspring.profiles.active=local` JVM option, or `SPRING_PROFILES_ACTIVE=local` env var) in the IDE's run configuration. `application-local.yml` is gitignored and excluded from the built jar/image (see `backend/pom.xml`) — configuring the IDE to pick it up (e.g. disabling "delegate build/run to Maven" if that setting hides non-Maven-processed resources) is up to each developer's own setup.
 
 </details>
 
@@ -628,7 +637,7 @@ Release 1 bàn bị chặn bởi nhiều hơn chỉ status của đơn hàng hi�
 
 1. Client đăng nhập qua `POST /api/auth/login` (public, không cần token) — auth-service kiểm tra thông tin đăng nhập và cấp JWT ký bằng RS256.
 2. Mọi request sau đó đều mang JWT này qua header `Authorization: Bearer <token>`.
-3. `JwtAuthGlobalFilter` ở gateway là nơi duy nhất từng thấy và xác thực JWT: nó xóa bỏ mọi header `X-User-*` mà client tự gửi lên (để không thể giả mạo danh tính), xác thực chữ ký bằng public key của auth-service (nằm sẵn trong `application.yml` của gateway — trước đây lấy runtime từ config-server, tới khi bị retired, xem mục [Thành phần đã retired](#thành-phần-đã-retired)), và chỉ khi thành công mới set các header đáng tin cậy `X-User-Id`/`X-Username`/`X-User-Role` dựa trên claim trong token.
+3. `JwtAuthGlobalFilter` ở gateway là nơi duy nhất từng thấy và xác thực JWT: nó xóa bỏ mọi header `X-User-*` mà client tự gửi lên (để không thể giả mạo danh tính), xác thực chữ ký bằng public key của auth-service (lấy qua biến môi trường `APP_JWT_PUBLIC_KEY` — trước đây lấy runtime từ config-server, tới khi bị retired, xem mục [Thành phần đã retired](#thành-phần-đã-retired)), và chỉ khi thành công mới set các header đáng tin cậy `X-User-Id`/`X-Username`/`X-User-Role` dựa trên claim trong token.
 4. Các service phía sau không bao giờ thấy JWT; chúng tin tưởng header do gateway set, thông qua `HeaderAuthenticationFilter` trong `common-lib`. Token thiếu hoặc không hợp lệ sẽ bị trả về `401` ngay tại gateway, trước khi tới được bất kỳ service nghiệp vụ nào.
 
 ## Các pattern đã áp dụng
@@ -686,7 +695,7 @@ Cả 5 pattern dưới đây đều bảo vệ cùng 1 luồng trao đổi qua K
 ## Thành phần đã retired
 
 - **Service Discovery (Eureka)** và **Externalized Configuration (Spring Cloud Config Server)** — cả 2 đều đã retired 2026-09, như bước đầu tiên của việc chuyển deploy target từ `docker-compose` sang Kubernetes (xem [Cafe Roadmap](https://claude.ai/code/artifact/45eea53a-1a1a-4dfe-88bc-f1a1fae63a07?org=ab443343-5dd7-4698-b7cc-00e521059318) để biết quá trình migration đang diễn ra). Kubernetes tự cung cấp cả 2 nhu cầu này — Service DNS cho discovery, ConfigMap/Secret cho config — nên Eureka/`eureka-server` và Spring Cloud Config/`config-server` ở tầng ứng dụng bị xóa hẳn thay vì port sang.
-- Hệ quả cụ thể: mọi lời gọi giữa các service (bảng route của gateway, lời gọi từ `order-service` sang `menu-service`) giờ trỏ thẳng tới `host:port` cố định thay vì tên logic phân giải qua Eureka; config vận hành của mỗi service (trước đây lấy runtime từ `config-repo` của `config-server`) giờ nằm sẵn trong `application.yml` của chính service đó.
+- Hệ quả cụ thể: mọi lời gọi giữa các service (bảng route của gateway, lời gọi từ `order-service` sang `menu-service`) giờ trỏ thẳng tới `host:port` cố định thay vì tên logic phân giải qua Eureka; config vận hành của mỗi service (trước đây lấy runtime từ `config-repo` của `config-server`) giờ nằm sẵn trong `application.yml` của chính service đó — trừ secret (username/mật khẩu DB, JWT key), những giá trị này lấy qua biến môi trường thay vì viết vào `application.yml`: khi chạy local là file `.env` mà `docker-compose.yml` đọc qua cơ chế thay thế biến (xem `.env.example`); khi deploy thật là K8s Secret đồng bộ từ GCP Secret Manager.
 - Ảnh hưởng tới local dev: `docker compose up` không còn khởi động container `eureka-server`/`config-server` nữa — ít hơn 1 phần phải chạy, không phải regression. DNS nội bộ của Docker Compose vẫn phân giải đúng tên service cố định (vd. `http://menu-service:8082`) cho bất kỳ *container khác* trên cùng network như trước; thứ duy nhất trước đây tự động có sẵn nhờ Eureka mà giờ cần thêm 1 bước thủ công 1 lần là gọi service theo tên từ 1 tiến trình chạy **bare** (vd. từ IDE) cùng lúc với phần còn lại chạy Docker — xem mục [Xử lý sự cố thường gặp](#xử-lý-sự-cố-thường-gặp) bên dưới.
 
 ## Cấu trúc
@@ -695,21 +704,29 @@ Cả 5 pattern dưới đây đều bảo vệ cùng 1 luồng trao đổi qua K
 backend/    Maven multi-module reactor: 5 domain services + gateway + common-lib
 frontend/   Angular (standalone components)
 docker/     Script khởi tạo Postgres
+charts/     Helm chart cho deploy thật lên GKE: cafe-service (chart tái sử dụng cho từng service)
+            + cafe (umbrella chart alias nó 6 lần, mỗi service 1 alias)
+k8s/        Manifest K8s/CNPG/Strimzi thuần cho tầng dữ liệu (Postgres cluster +
+            storage class + backup, Kafka cluster) và các file values override Helm
+            cho operator dùng chung toàn cluster (hiện chỉ có của Strimzi)
 ```
 
 (Tới trước 2026-09, `backend/` còn có thêm module `eureka-server` và `config-server` — đã retired, xem mục [Thành phần đã retired](#thành-phần-đã-retired).)
 
-Tới trước khi config-server bị retired, config native của nó nằm ở `backend/config-server/src/main/resources/config-repo/`, bind-mount dạng read-only vào container `config-server` nên sửa 1 file `config-repo/*.yml` chỉ cần restart, không cần rebuild image. Giờ config vận hành của mỗi service nằm thẳng trong `src/main/resources/application.yml` của chính service đó — muốn đổi thì phải rebuild lại image của service đó.
+Tới trước khi config-server bị retired, config native của nó nằm ở `backend/config-server/src/main/resources/config-repo/`, bind-mount dạng read-only vào container `config-server` nên sửa 1 file `config-repo/*.yml` chỉ cần restart, không cần rebuild image. Giờ config vận hành của mỗi service nằm thẳng trong `src/main/resources/application.yml` của chính service đó — muốn đổi thì phải rebuild lại image của service đó. Riêng secret là ngoại lệ: chúng không nằm trong `application.yml`, lấy qua biến môi trường thay thế (xem mục [Thành phần đã retired](#thành-phần-đã-retired) để biết lấy từ đâu) — nên đổi được mà không cần rebuild.
 
 ## Yêu cầu môi trường
 
 - Java 21
 - Node.js 20+ (Angular 21 / npm 11)
 - Docker & Docker Compose
+- Helm & kubectl, và quyền truy cập 1 Kubernetes cluster — chỉ cần cho việc deploy `charts/`/`k8s/`
+  lên GKE, không cần khi chạy local qua Docker Compose bên dưới
 
 ## Chạy ở local
 
 ```bash
+cp .env.example .env   # chỉ cần làm 1 lần — cấp DB credentials + JWT key cho docker compose
 docker compose up -d
 cd frontend && ng serve
 ```
@@ -789,5 +806,6 @@ Cả 2 được tự động enforce qua git hook `pre-commit` (`.git/hooks/pre-
   Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "127.0.0.1 auth-service menu-service order-service inventory-service report-service"
   ```
   Sau đó, service chạy bare sẽ resolve tên bất kỳ service nào khác về `127.0.0.1:<port đã publish>`, y hệt như đang gọi 1 container khác.
+- **1 service không khởi động được khi chạy trần từ IDE** — username/mật khẩu DB và JWT key để trống trong `application.yml`, lấy qua biến môi trường thay thế (xem mục [Thành phần đã retired](#thành-phần-đã-retired) để biết lấy từ đâu) — chạy trần từ IDE không có các biến này. Với auth-service/gateway, lỗi hiện ra dạng `IllegalArgumentException: "Invalid RSA private key PEM"` / `"Invalid RSA public key PEM"` (parse chuỗi PEM rỗng); với 4 service chỉ dùng DB, lỗi hiện ra dạng `PSQLException: "The server requested SCRAM-based authentication, but no password was provided."`, bọc trong `BeanCreationException`. Cách sửa: `cp application-local.yml.example application-local.yml` trong thư mục module của service đó, rồi bật profile `local` của Spring (VM option `-Dspring.profiles.active=local`, hoặc biến môi trường `SPRING_PROFILES_ACTIVE=local`) trong cấu hình run của IDE. `application-local.yml` đã gitignore và bị loại khỏi jar/image build ra (xem `backend/pom.xml`) — việc cấu hình IDE để nhận file này (vd tắt "delegate build/run to Maven" nếu setting đó khiến IDE bỏ qua resource không qua Maven xử lý) là trách nhiệm của từng dev.
 
 </details>

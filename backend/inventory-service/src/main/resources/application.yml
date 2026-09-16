@@ -3,8 +3,11 @@ spring:
     name: inventory-service
   datasource:
     url: jdbc:postgresql://localhost:5432/inventory_db
-    username: inventory_service
-    password: inventory_service_pw
+    # Intentionally blank - sourced from the SPRING_DATASOURCE_USERNAME env var
+    # (docker-compose locally, a K8s Secret synced from GCP Secret Manager in the real deployment).
+    username:
+    # Intentionally blank - sourced from the SPRING_DATASOURCE_PASSWORD env var (same as above).
+    password:
   jpa:
     hibernate:
       ddl-auto: validate
