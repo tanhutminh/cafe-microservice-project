@@ -11,6 +11,11 @@ create_service_db() {
   local db="$1"
   local role="$2"
   local password="$3"
+  # $role and $password are interpolated raw below - $role as an unquoted SQL identifier,
+  # $password inside a quoted string literal. Safe today since every caller passes a trusted
+  # .env value with no quotes/whitespace/SQL syntax in it, but neither is sanitized: a $role
+  # containing whitespace or SQL syntax would inject arbitrary SQL, and a $password containing
+  # a single quote would break the string literal.
   psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
     CREATE ROLE $role LOGIN PASSWORD '$password';
     CREATE DATABASE $db OWNER $role;
@@ -19,8 +24,8 @@ create_service_db() {
 EOSQL
 }
 
-create_service_db auth_db auth_service auth_service_pw
-create_service_db menu_db menu_service menu_service_pw
-create_service_db order_db order_service order_service_pw
-create_service_db inventory_db inventory_service inventory_service_pw
-create_service_db report_db report_service report_service_pw
+create_service_db auth_db "$AUTH_SERVICE_DB_USERNAME" "$AUTH_SERVICE_DB_PASSWORD"
+create_service_db menu_db "$MENU_SERVICE_DB_USERNAME" "$MENU_SERVICE_DB_PASSWORD"
+create_service_db order_db "$ORDER_SERVICE_DB_USERNAME" "$ORDER_SERVICE_DB_PASSWORD"
+create_service_db inventory_db "$INVENTORY_SERVICE_DB_USERNAME" "$INVENTORY_SERVICE_DB_PASSWORD"
+create_service_db report_db "$REPORT_SERVICE_DB_USERNAME" "$REPORT_SERVICE_DB_PASSWORD"

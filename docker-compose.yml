@@ -2,15 +2,27 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: cafe
-      POSTGRES_PASSWORD: cafe
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # Consumed by docker/postgres-init/init-db.sh to create each service's own role - not
+      # read by the postgres image itself, only by our own init script.
+      AUTH_SERVICE_DB_USERNAME: ${AUTH_SERVICE_DB_USERNAME}
+      AUTH_SERVICE_DB_PASSWORD: ${AUTH_SERVICE_DB_PASSWORD}
+      MENU_SERVICE_DB_USERNAME: ${MENU_SERVICE_DB_USERNAME}
+      MENU_SERVICE_DB_PASSWORD: ${MENU_SERVICE_DB_PASSWORD}
+      ORDER_SERVICE_DB_USERNAME: ${ORDER_SERVICE_DB_USERNAME}
+      ORDER_SERVICE_DB_PASSWORD: ${ORDER_SERVICE_DB_PASSWORD}
+      INVENTORY_SERVICE_DB_USERNAME: ${INVENTORY_SERVICE_DB_USERNAME}
+      INVENTORY_SERVICE_DB_PASSWORD: ${INVENTORY_SERVICE_DB_PASSWORD}
+      REPORT_SERVICE_DB_USERNAME: ${REPORT_SERVICE_DB_USERNAME}
+      REPORT_SERVICE_DB_PASSWORD: ${REPORT_SERVICE_DB_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cafe"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -72,6 +84,9 @@ services:
       dockerfile: gateway/Dockerfile
     environment:
       MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: "http://zipkin:9411/api/v2/spans"
+      # Sourced from .env (see .env.example) - not used for the real K8s deployment, which
+      # sources a separately-generated keypair from GCP Secret Manager instead.
+      APP_JWT_PUBLIC_KEY: ${GATEWAY_JWT_PUBLIC_KEY}
     depends_on:
       zipkin:
         condition: service_healthy
@@ -90,9 +105,12 @@ services:
       dockerfile: auth-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/auth_db"
-      SPRING_DATASOURCE_USERNAME: auth_service
-      SPRING_DATASOURCE_PASSWORD: auth_service_pw
+      SPRING_DATASOURCE_USERNAME: ${AUTH_SERVICE_DB_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${AUTH_SERVICE_DB_PASSWORD}
       MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: "http://zipkin:9411/api/v2/spans"
+      # Sourced from .env (see .env.example) - not used for the real K8s deployment, which
+      # sources a separately-generated keypair from GCP Secret Manager instead.
+      APP_JWT_PRIVATE_KEY: ${AUTH_SERVICE_JWT_PRIVATE_KEY}
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,8 +131,8 @@ services:
       dockerfile: menu-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/menu_db"
-      SPRING_DATASOURCE_USERNAME: menu_service
-      SPRING_DATASOURCE_PASSWORD: menu_service_pw
+      SPRING_DATASOURCE_USERNAME: ${MENU_SERVICE_DB_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${MENU_SERVICE_DB_PASSWORD}
       MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: "http://zipkin:9411/api/v2/spans"
     depends_on:
       postgres:
@@ -136,8 +154,8 @@ services:
       dockerfile: order-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/order_db"
-      SPRING_DATASOURCE_USERNAME: order_service
-      SPRING_DATASOURCE_PASSWORD: order_service_pw
+      SPRING_DATASOURCE_USERNAME: ${ORDER_SERVICE_DB_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${ORDER_SERVICE_DB_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: "http://zipkin:9411/api/v2/spans"
     depends_on:
@@ -162,8 +180,8 @@ services:
       dockerfile: inventory-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/inventory_db"
-      SPRING_DATASOURCE_USERNAME: inventory_service
-      SPRING_DATASOURCE_PASSWORD: inventory_service_pw
+      SPRING_DATASOURCE_USERNAME: ${INVENTORY_SERVICE_DB_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${INVENTORY_SERVICE_DB_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: "http://zipkin:9411/api/v2/spans"
     depends_on:
@@ -188,8 +206,8 @@ services:
       dockerfile: report-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/report_db"
-      SPRING_DATASOURCE_USERNAME: report_service
-      SPRING_DATASOURCE_PASSWORD: report_service_pw
+      SPRING_DATASOURCE_USERNAME: ${REPORT_SERVICE_DB_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${REPORT_SERVICE_DB_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: "http://zipkin:9411/api/v2/spans"
     depends_on:

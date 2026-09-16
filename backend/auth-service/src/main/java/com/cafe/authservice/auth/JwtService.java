@@ -11,9 +11,10 @@ import java.util.Date;
 import org.springframework.stereotype.Service;
 
 /**
- * Signs access tokens with the auth-service-owned RS256 private key, configured locally in this
- * service's own application.yml. Only the matching public key ever leaves this service, baked into
- * gateway's application.yml.
+ * Signs access tokens with the auth-service-owned RS256 private key, supplied via the
+ * APP_JWT_PRIVATE_KEY env var (docker-compose locally, a K8s Secret synced from GCP Secret Manager
+ * in the real deployment). Only the matching public key ever leaves this service, supplied to
+ * gateway the same way via its own APP_JWT_PUBLIC_KEY env var.
  */
 @Service
 public class JwtService {

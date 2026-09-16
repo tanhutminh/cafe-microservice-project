@@ -1,0 +1,9 @@
+# Copy to application-local.yml (gitignored, excluded from the built jar/image - see
+# backend/pom.xml), then run with -Dspring.profiles.active=local or SPRING_PROFILES_ACTIVE=local
+# to run this service bare (e.g. from an IDE) without docker-compose. Same dev-only values as
+# .env.example - not used for the real K8s deployment.
+spring:
+  datasource:
+    # Keep in sync with .env.example's MENU_SERVICE_DB_USERNAME/MENU_SERVICE_DB_PASSWORD.
+    username: menu_service
+    password: menu_service_pw
