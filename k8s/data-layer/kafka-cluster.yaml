@@ -19,7 +19,7 @@ spec:
       cpu: 1
       memory: 1536Mi
   roles: [controller, broker]
-  # GKE's default `standard` StorageClass (Delete reclaim) is fine here, unlike Postgres's
+  # GKE's built-in `standard` StorageClass (Delete reclaim) is fine here, unlike Postgres's
   # dedicated Retain class (see postgres-storageclass.yaml) - Kafka only carries replayable
   # saga messages, not source-of-truth data, so losing the disk isn't a data-loss event.
   # deleteClaim below is a separate, orthogonal control (Strimzi-level: delete the PVC on

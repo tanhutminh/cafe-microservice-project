@@ -20,7 +20,7 @@ spec:
   enableSuperuserAccess: false
   storage:
     size: 5Gi
-    storageClass: cafe-postgres-retain   # see postgres-storageclass.yaml — NOT GKE's default "standard" class
+    storageClass: cafe-postgres-retain   # see postgres-storageclass.yaml — NOT one of GKE's built-in (Delete) classes
   affinity:
     tolerations: [{key: "workload", operator: "Equal", value: "stateful", effect: "NoSchedule"}]
     nodeSelector: {cloud.google.com/gke-nodepool: stateful-pool}
