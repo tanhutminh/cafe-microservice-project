@@ -5,8 +5,9 @@ metadata:
   labels: {app.kubernetes.io/managed-by: kubectl}
 provisioner: pd.csi.storage.gke.io
 parameters: {type: pd-standard}
-# Retain, not GKE's default Delete - Postgres is this app's source of truth, so the
-# underlying disk must survive even if the PVC/PV/Cluster is deleted by mistake.
+# Retain, not the Delete reclaim policy of every GKE built-in class - Postgres is
+# this app's source of truth, so the underlying disk must survive even if the
+# PVC/PV/Cluster is deleted by mistake.
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
