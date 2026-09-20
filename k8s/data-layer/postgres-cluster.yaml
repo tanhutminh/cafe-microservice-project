@@ -52,8 +52,9 @@ spec:
       annotations: {iam.gke.io/gcp-service-account: "cafe-postgres-backup@cafe-microservices.iam.gserviceaccount.com"}
     # This is a DIFFERENT Workload Identity binding from the 5 app-service ones (each service's
     # own GSA, bound in charts/cafe-service/templates/serviceaccount.yaml) — this one is for the
-    # Postgres pod's own backup-writing access to GCS, scoped to roles/storage.objectAdmin on the
-    # backup bucket only (see postgres-backup.yaml), not GSM secrets.
+    # Postgres pod's own backup-writing access to GCS, scoped to roles/storage.objectAdmin +
+    # roles/storage.legacyBucketReader (Barman also reads bucket metadata, which objectAdmin alone
+    # doesn't cover) on the backup bucket named in postgres-backup.yaml, not GSM secrets.
   plugins:
     - name: barman-cloud.cloudnative-pg.io
       isWALArchiver: true
