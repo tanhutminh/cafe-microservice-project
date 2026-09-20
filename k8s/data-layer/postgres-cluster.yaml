@@ -6,14 +6,23 @@ metadata:
   labels: {app.kubernetes.io/managed-by: kubectl}
 spec:
   instances: 1
-  # Pinned to the image running today, so upgrading the CNPG operator cannot silently change the
-  # Postgres version (unset, CNPG uses the operator's own default). Changing this value triggers
-  # a rolling update of the instance.
+  # Pins the Postgres *version* (18.4) so upgrading the CNPG operator cannot silently change it
+  # (unset, CNPG uses the operator's own default). It does not pin the image *content*: this is
+  # upstream's rolling tag form (`MM.mm-TYPE-OS`), rebuilt for CVE fixes, so a pod rescheduled
+  # onto a fresh node can pull a different build of 18.4 (the immutable form carries a timestamp:
+  # `18.4-<YYYYMMDDHHMM>-standard-trixie`). The `system` flavor is also deprecated upstream in
+  # favour of `standard` + the Barman Cloud plugin this cluster already uses (see `plugins`
+  # below); not switched here because changing `imageName` restarts the instance.
+  # Changing this value triggers a rolling update, but with `instances: 1` there is nothing to
+  # roll: no replica to upgrade first and no switchover target, so CNPG restarts the single
+  # primary pod in place (`primaryUpdateMethod` defaults to `restart`, and `supervised` is not
+  # supported for a one-instance cluster). That is a short outage for all five service DBs.
   imageName: ghcr.io/cloudnative-pg/postgresql:18.4-system-trixie
   # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
   # 256Mi/512Mi memory) since this one Postgres instance is the real backbone for all 5 service
   # DBs under actual load, not a single stateless service. CNPG does not derive shared_buffers or
   # other postgresql.conf tuning from this - it only governs the pod's own CPU/memory scheduling.
+  # Changing these values restarts the instance too (same one-instance outage as `imageName`).
   resources:
     requests:
       cpu: 250m
