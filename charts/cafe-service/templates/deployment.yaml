@@ -24,7 +24,7 @@ spec:
         - name: wait-for-db
           # Just a psql client for connectivity checks - version-tolerant, doesn't need to
           # match the actual CNPG-managed server version (see k8s/data-layer/postgres-cluster.yaml,
-          # which doesn't pin an imageName and so tracks the CNPG operator's current default).
+          # which pins the server image via imageName).
           image: postgres:16-alpine
           command: ["/bin/sh", "-c"]
           args:

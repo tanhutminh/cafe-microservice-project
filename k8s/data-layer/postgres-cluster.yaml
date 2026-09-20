@@ -6,6 +6,10 @@ metadata:
   labels: {app.kubernetes.io/managed-by: kubectl}
 spec:
   instances: 1
+  # Pinned to the image running today, so upgrading the CNPG operator cannot silently change the
+  # Postgres version (unset, CNPG uses the operator's own default). Changing this value triggers
+  # a rolling update of the instance.
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.4-system-trixie
   # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
   # 256Mi/512Mi memory) since this one Postgres instance is the real backbone for all 5 service
   # DBs under actual load, not a single stateless service. CNPG does not derive shared_buffers or
