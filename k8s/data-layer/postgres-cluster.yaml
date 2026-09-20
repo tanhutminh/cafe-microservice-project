@@ -6,18 +6,17 @@ metadata:
   labels: {app.kubernetes.io/managed-by: kubectl}
 spec:
   instances: 1
-  # Pins the Postgres *version* (18.4) so upgrading the CNPG operator cannot silently change it
-  # (unset, CNPG uses the operator's own default). It does not pin the image *content*: this is
-  # upstream's rolling tag form (`MM.mm-TYPE-OS`), rebuilt for CVE fixes, so a pod rescheduled
-  # onto a fresh node can pull a different build of 18.4 (the immutable form carries a timestamp:
-  # `18.4-<YYYYMMDDHHMM>-standard-trixie`). The `system` flavor is also deprecated upstream in
-  # favour of `standard` + the Barman Cloud plugin this cluster already uses (see `plugins`
-  # below); not switched here because changing `imageName` restarts the instance.
+  # Pins the Postgres image by its immutable tag (`<version>-<YYYYMMDDHHMM>-<flavor>-<os>`), so
+  # neither a CNPG operator upgrade (unset, CNPG uses the operator's own default) nor a CVE
+  # rebuild of upstream's rolling tag (`18.4-standard-trixie`) can change what runs. The
+  # `standard` flavor is the one upstream recommends together with the Barman Cloud plugin this
+  # cluster uses (see `plugins` below); the older `system` flavor is deprecated. To take a newer
+  # build or minor version, pick a tag from ghcr.io/cloudnative-pg/postgresql and change this.
   # Changing this value triggers a rolling update, but with `instances: 1` there is nothing to
   # roll: no replica to upgrade first and no switchover target, so CNPG restarts the single
   # primary pod in place (`primaryUpdateMethod` defaults to `restart`, and `supervised` is not
   # supported for a one-instance cluster). That is a short outage for all five service DBs.
-  imageName: ghcr.io/cloudnative-pg/postgresql:18.4-system-trixie
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.4-202608130737-standard-trixie
   # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
   # 256Mi/512Mi memory) since this one Postgres instance is the real backbone for all 5 service
   # DBs under actual load, not a single stateless service. CNPG does not derive shared_buffers or
