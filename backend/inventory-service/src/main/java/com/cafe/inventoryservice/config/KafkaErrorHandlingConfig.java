@@ -11,11 +11,17 @@ import org.springframework.util.backoff.ExponentialBackOff;
 /**
  * Dead Letter Queue pattern for the three inventory command topics ({@code
  * inventory.reserve-stock.command}, {@code inventory.commit-stock.command}, {@code
- * inventory.release-stock.command}): technical failures only (deserialization errors, bugs, DB
- * outages) - StockReservationService never throws for a business "insufficient stock" outcome, it
- * returns a normal failure reply instead, so that path never reaches this handler. Spring Boot
- * auto-wires this single CommonErrorHandler bean into the auto-configured listener container
- * factory (inventory-service defines no factory of its own), so no further wiring is needed.
+ * inventory.release-stock.command}): a record whose listener invocation throws is routed to {@code
+ * <topic>.dlq} instead of blocking the consumer as a poison pill. Only technical failures get that
+ * far - a deserialization error, a structurally invalid command rejected by the listener's Bean
+ * Validation check, a DB outage while the command is being recorded. A business outcome like
+ * "insufficient stock" cannot: receiving a command only records it in the Transactional Inbox, and
+ * the reserve/commit/release step that decides such an outcome runs later on the inbox worker's own
+ * thread, outside any listener invocation this handler wraps.
+ *
+ * <p>Spring Boot auto-wires this single CommonErrorHandler bean into the auto-configured listener
+ * container factory (inventory-service defines no factory of its own), so no further wiring is
+ * needed.
  */
 @Configuration
 public class KafkaErrorHandlingConfig {
