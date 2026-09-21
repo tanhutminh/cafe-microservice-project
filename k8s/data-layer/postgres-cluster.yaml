@@ -14,8 +14,9 @@ spec:
   # build or minor version, pick a tag from ghcr.io/cloudnative-pg/postgresql and change this.
   # Changing this value triggers a rolling update, but with `instances: 1` there is nothing to
   # roll: no replica to upgrade first and no switchover target, so CNPG restarts the single
-  # primary pod in place (`primaryUpdateMethod` defaults to `restart`, and `supervised` is not
-  # supported for a one-instance cluster). That is a short outage for all five service DBs.
+  # primary pod in place (`primaryUpdateMethod` defaults to `restart` rather than `switchover`,
+  # and `primaryUpdateStrategy: supervised` is rejected for a one-instance cluster). That is a
+  # short outage for all five service DBs.
   imageName: ghcr.io/cloudnative-pg/postgresql:18.4-202608130737-standard-trixie
   # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
   # 256Mi/512Mi memory) since this one Postgres instance is the real backbone for all 5 service

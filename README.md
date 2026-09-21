@@ -305,6 +305,8 @@ charts/     Helm charts for the real GKE deployment: cafe-service (reusable per-
 k8s/        Plain K8s/CNPG/Strimzi manifests for the data layer (Postgres cluster +
             storage class + backups, Kafka cluster) and Helm values overrides for
             cluster-wide operators (currently just Strimzi's)
+docs/       Step-by-step setup runbooks (currently: the GKE/CI-CD build, see
+            docs/gke-cicd-runbook.md)
 ```
 
 (Until 2026-09, `backend/` also had `eureka-server` and `config-server` modules — retired, see [Retired components](#retired-components).)
@@ -709,6 +711,8 @@ charts/     Helm chart cho deploy thật lên GKE: cafe-service (chart tái sử
 k8s/        Manifest K8s/CNPG/Strimzi thuần cho tầng dữ liệu (Postgres cluster +
             storage class + backup, Kafka cluster) và các file values override Helm
             cho operator dùng chung toàn cluster (hiện chỉ có của Strimzi)
+docs/       Tài liệu hướng dẫn từng bước (hiện có: quá trình build GKE/CI-CD, xem
+            docs/gke-cicd-runbook.md)
 ```
 
 (Tới trước 2026-09, `backend/` còn có thêm module `eureka-server` và `config-server` — đã retired, xem mục [Thành phần đã retired](#thành-phần-đã-retired).)
