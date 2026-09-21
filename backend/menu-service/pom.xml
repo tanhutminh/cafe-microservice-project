@@ -14,6 +14,13 @@
   <packaging>jar</packaging>
   <name>menu-service</name>
 
+  <properties>
+  <!-- Coverage floor ratchet: matches this module's actual measured coverage, not the
+       parent's 70% aspirational target - raise this value (never lower it) as this
+       module's own test coverage improves. See feedback_unit_test_every_change. -->
+    <jacoco.line.coverage.minimum>0.65</jacoco.line.coverage.minimum>
+  </properties>
+
   <dependencies>
     <dependency>
       <groupId>com.cafe</groupId>

@@ -1,0 +1,184 @@
+name: backend-ci
+
+on:
+  push:
+    branches: [master]
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      common-lib: ${{ steps.filter.outputs.common-lib }}
+      gateway: ${{ steps.filter.outputs.gateway }}
+      auth-service: ${{ steps.filter.outputs.auth-service }}
+      menu-service: ${{ steps.filter.outputs.menu-service }}
+      order-service: ${{ steps.filter.outputs.order-service }}
+      inventory-service: ${{ steps.filter.outputs.inventory-service }}
+      report-service: ${{ steps.filter.outputs.report-service }}
+      backend-any: ${{ steps.filter.outputs.backend-any }}
+      charts: ${{ steps.filter.outputs.charts }}
+      k8s: ${{ steps.filter.outputs.k8s }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            common-lib:
+              - 'backend/common-lib/**'
+              - 'backend/pom.xml'
+            gateway:
+              - 'backend/gateway/**'
+            auth-service:
+              - 'backend/auth-service/**'
+            menu-service:
+              - 'backend/menu-service/**'
+            order-service:
+              - 'backend/order-service/**'
+            inventory-service:
+              - 'backend/inventory-service/**'
+            report-service:
+              - 'backend/report-service/**'
+            backend-any:
+              - 'backend/**'
+            charts:
+              - 'charts/**'
+            k8s:
+              - 'k8s/**'
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.backend-any == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Scan for accidentally-committed secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+      - name: Check code formatting (Spotless)
+        working-directory: backend
+        run: mvn -q spotless:check
+
+      - name: Run full reactor test suite
+        working-directory: backend
+        run: mvn -q test
+
+      - name: Enforce per-module coverage floor (no-regression ratchet)
+        working-directory: backend
+        run: mvn -q -pl common-lib,auth-service,menu-service,order-service,inventory-service jacoco:check
+
+  validate-manifests:
+    needs: changes
+    if: needs.changes.outputs.charts == 'true' || needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Guard against data-layer resources leaking into the Helm-managed app chart
+        run: |
+          if grep -rlE 'apiVersion: (postgresql\.cnpg\.io|kafka\.strimzi\.io|barmancloud\.cnpg\.io)|^kind: (StorageClass|ScheduledBackup)' charts/*/templates/ 2>/dev/null; then
+            echo "::error::A data-layer resource type was found under charts/**/templates/ - these belong in k8s/data-layer/ as plain manifests, not the Helm-managed app chart."
+            exit 1
+          fi
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: helm lint
+        run: helm dependency update charts/cafe && helm lint charts/cafe
+
+      - name: helm template (render check)
+        run: |
+          helm template charts/cafe -n cafe \
+            --set gateway.image.tag=ci-check \
+            --set auth-service.image.tag=ci-check \
+            --set menu-service.image.tag=ci-check \
+            --set order-service.image.tag=ci-check \
+            --set inventory-service.image.tag=ci-check \
+            --set report-service.image.tag=ci-check \
+            > /dev/null
+
+      - name: Install kubeconform
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz -o kubeconform.tar.gz
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  kubeconform.tar.gz" | sha256sum -c -
+          tar xzf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate k8s/data-layer manifests against real CRD schemas
+        if: needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          kubeconform -strict \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            k8s/data-layer/*.yaml
+
+  build-and-push:
+    needs: [changes, test]
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, auth-service, menu-service, order-service, inventory-service, report-service]
+    steps:
+      - name: Decide whether this service needs a rebuild
+        id: decide
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] \
+             || [[ "${{ needs.changes.outputs.common-lib }}" == "true" ]] \
+             || [[ "${{ needs.changes.outputs[matrix.service] }}" == "true" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.decide.outputs.build == 'true'
+
+      - id: auth
+        if: steps.decide.outputs.build == 'true'
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: projects/271893052132/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
+          service_account: github-actions-ci@cafe-microservices.iam.gserviceaccount.com
+
+      - name: Log in to Artifact Registry
+        if: steps.decide.outputs.build == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: us-central1-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.decide.outputs.build == 'true'
+
+      - name: Build and push
+        if: steps.decide.outputs.build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: backend
+          file: backend/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: us-central1-docker.pkg.dev/cafe-microservices/cafe-images/cafe-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
