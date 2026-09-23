@@ -1,4 +1,4 @@
-# GKE Data-Layer & Helm Chart Setup Guide
+# GKE & CI/CD Runbook
 
 🇬🇧 English is expanded by default below —
 🇻🇳 nhấn vào phần "Tiếng Việt" bên dưới để mở nội dung tiếng Việt.
@@ -11,15 +11,12 @@ project's Kubernetes deployment: the cluster itself, the CNPG (Postgres) and Str
 operators, Secret Manager-backed secrets via the Secrets Store CSI Driver, and the Helm charts
 that deploy the 6 Spring Boot services.
 
-**Scope**: cluster foundation through a successful `helm install` of `charts/cafe`. It does
-**not** cover the CI pipeline (building/pushing container images to a registry) — that is a
-separate, not-yet-implemented step. Until it exists, the application pods are created but
-show `ImagePullBackOff` (no real image exists yet at `image.repository:image.tag`).
+**Scope**: GKE cluster foundation through a successful `helm install` of `charts/cafe` (Steps
+1-8), plus the CI pipeline that builds and pushes the real container images those pods run
+(Step 9). CD/teardown automation (scaling `stateful-pool` up/down around a deploy) is separate,
+not-yet-implemented work — see "Not covered here" at the end.
 
-Links to repo files carry `@<hash>`: the last commit that changed that file as of the last time
-this guide was checked against it, itself a link to that exact version on GitHub (also available
-locally via `git show <hash>:<path>`). If `git log -1 --format=%h -- <path>` now returns a
-different hash, the file has changed since and the description may be stale.
+Links to repo files point at `master` on GitHub.
 
 All `gcloud` commands assume the default project is set (see Prerequisites). The commands below
 are written as plain bash, without a prefix. On some Windows Git Bash setups plain `gcloud` fails
@@ -44,6 +41,9 @@ in on stdin (`--data-file=-`, as in Step 4).
 - **Helm**: `charts/cafe-service` (one reusable chart) + `charts/cafe` (umbrella chart with 6
   aliased dependencies: gateway, auth-service, menu-service, order-service, inventory-service,
   report-service).
+- **GitHub Actions** (`.github/workflows/backend-ci.yml`, Step 9) builds and pushes each
+  service's image to **Artifact Registry**, authenticating to GCP via a separate **Workload
+  Identity Federation** setup for GitHub — no static key there either.
 - Postgres/Kafka manifests live under `k8s/data-layer/`, applied with plain `kubectl apply`
   — **not** part of any Helm release. This is deliberate: a `helm uninstall`/rollback of the
   app layer must never be able to cascade-delete the database.
@@ -52,6 +52,9 @@ in on stdin (`--data-file=-`, as in Step 4).
 
 - `gcloud`, `kubectl`, `helm`, `cmctl` (cert-manager's CLI, installed per cert-manager's
   documentation) and `openssl` installed; `gcloud` authenticated.
+- `gitleaks` (only needed if you ever move the dev JWT keypair, or another `.gitleaksignore`-listed
+  credential, to a different file/line and must regenerate fingerprints — see `.gitleaksignore`
+  below; CI itself runs it via `gitleaks/gitleaks-action`, no local install needed for the pipeline).
 - `gke-gcloud-auth-plugin` on your `PATH` (check with `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` and `cmctl` all need it to talk to a GKE cluster. Install it with
   `gcloud components install gke-gcloud-auth-plugin` (standalone SDK / Windows installer) or, with
@@ -78,8 +81,12 @@ Set the default project and enable the APIs this guide uses (on a fresh project 
 
 ```bash
 gcloud config set project cafe-microservices
-gcloud services enable container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com
+gcloud services enable container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com
 ```
+
+Step 9 also needs a GitHub repository with Actions enabled and admin access to it (to configure
+branch protection) — no extra CLI tooling beyond `gcloud`, though the GitHub CLI (`gh`) is a
+convenient way to trigger the first manual run.
 
 ---
 
@@ -157,7 +164,7 @@ done
 ```
 
 Bind each GSA to its matching Kubernetes ServiceAccount (KSA) via Workload Identity. The KSA
-doesn't need to exist yet — `charts/cafe-service`'s [serviceaccount.yaml](../charts/cafe-service/templates/serviceaccount.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/charts/cafe-service/templates/serviceaccount.yaml) template will create
+doesn't need to exist yet — `charts/cafe-service`'s [serviceaccount.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/serviceaccount.yaml) template will create
 it later with a matching name and the `iam.gke.io/gcp-service-account` annotation:
 
 ```bash
@@ -176,7 +183,7 @@ gcloud iam service-accounts add-iam-policy-binding \
 ```
 
 The Postgres pod's own backup GSA is annotated differently — via the CNPG `Cluster`'s
-`serviceAccountTemplate` (see [k8s/data-layer/postgres-cluster.yaml](../k8s/data-layer/postgres-cluster.yaml) @[`4c928f4`](https://github.com/tanhutminh/cafe-microservice-project/blob/4c928f4/k8s/data-layer/postgres-cluster.yaml)),
+`serviceAccountTemplate` (see [k8s/data-layer/postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml)),
 not a Helm-managed ServiceAccount, since it's the data layer, not an app service. That template
 only sets the annotation, so the binding above is still required — without it the pod cannot
 authenticate to the backup bucket.
@@ -232,7 +239,7 @@ then nothing works downstream):
   project turns a CSI-mounted secret into a real `Secret` object that a Deployment's
   `secretKeyRef` can reference) silently does nothing — no error, the mounted files under
   `/mnt/secrets-store` are there, but no `Secret` ever appears.
-- **`-f`** [k8s/operators/strimzi-values.yaml](../k8s/operators/strimzi-values.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/operators/strimzi-values.yaml), which sets `watchNamespaces: [cafe]`: the chart
+- **`-f`** [k8s/operators/strimzi-values.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/operators/strimzi-values.yaml), which sets `watchNamespaces: [cafe]`: the chart
   defaults to `watchAnyNamespace: false` / `watchNamespaces: []`, meaning the operator only
   reconciles resources in its own `strimzi-system` namespace and silently ignores any
   `Kafka`/`KafkaNodePool` applied to `cafe` — no events, no error, just nothing happening.
@@ -326,8 +333,8 @@ They are sourced from environment variables instead (`SPRING_DATASOURCE_USERNAME
 `charts/cafe-service/templates/deployment.yaml`'s `secretKeyRef` in the real deployment, or by
 `docker-compose.yml` / each service's `application-local.yml` for local dev.
 
-See [auth-service/application.yml](../backend/auth-service/src/main/resources/application.yml) @[`d65155e`](https://github.com/tanhutminh/cafe-microservice-project/blob/d65155e/backend/auth-service/src/main/resources/application.yml)
-and [gateway/application.yml](../backend/gateway/src/main/resources/application.yml) @[`d65155e`](https://github.com/tanhutminh/cafe-microservice-project/blob/d65155e/backend/gateway/src/main/resources/application.yml) for the
+See [auth-service/application.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/auth-service/src/main/resources/application.yml)
+and [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/gateway/src/main/resources/application.yml) for the
 exact pattern.
 
 ---
@@ -336,11 +343,11 @@ exact pattern.
 
 Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
 
-- [postgres-storageclass.yaml](../k8s/data-layer/postgres-storageclass.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/data-layer/postgres-storageclass.yaml) — a dedicated
+- [postgres-storageclass.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-storageclass.yaml) — a dedicated
   `Retain`-policy StorageClass for Postgres's PVC (GKE's built-in classes are all `Delete`;
   Postgres is this app's source of truth, so its disk must survive even a mistaken PVC/Cluster
   deletion).
-- [postgres-cluster.yaml](../k8s/data-layer/postgres-cluster.yaml) @[`4c928f4`](https://github.com/tanhutminh/cafe-microservice-project/blob/4c928f4/k8s/data-layer/postgres-cluster.yaml) — the CNPG `Cluster` and its databases and roles:
+- [postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml) — the CNPG `Cluster` and its databases and roles:
   - the `Cluster` bootstraps `auth_db` at creation (a `Cluster` can only bootstrap one database);
   - 4 `Database` CRs create the other services' databases;
   - 5 `managed.roles` entries are reconciled against each service's `{service}-db-credentials`
@@ -354,10 +361,10 @@ Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
   - tip: the storage field is `spec.storage.storageClass` (CNPG's own CRD field), not
     `storageClassName` (the plain-PVC name) — an easy mix-up, verify with
     `kubectl explain cluster.spec.storage`.
-- [postgres-backup.yaml](../k8s/data-layer/postgres-backup.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/data-layer/postgres-backup.yaml) — the Barman Cloud Plugin's
+- [postgres-backup.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-backup.yaml) — the Barman Cloud Plugin's
   `ObjectStore` (points at the GCS bucket, auths via the Cluster's own Workload Identity, no
   separate credentials Secret) and a daily `ScheduledBackup`.
-- [kafka-cluster.yaml](../k8s/data-layer/kafka-cluster.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/data-layer/kafka-cluster.yaml) — a single-broker KRaft
+- [kafka-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/kafka-cluster.yaml) — a single-broker KRaft
   `KafkaNodePool` + `Kafka`, pinned to `stateful-pool` via node affinity/toleration. Uses GKE's
   built-in `standard` StorageClass (`Delete` reclaim) deliberately, unlike Postgres — Kafka here
   only carries replayable saga messages, not source-of-truth data. Like Postgres, the Kafka
@@ -382,7 +389,7 @@ service's `wait-for-db` initContainer (Step 7) waits up to 600s for its role to 
 
 ### `charts/cafe-service` — one reusable chart, instantiated 6 times
 
-Key values (full schema: [values.yaml](../charts/cafe-service/values.yaml) @[`333eba5`](https://github.com/tanhutminh/cafe-microservice-project/blob/333eba5/charts/cafe-service/values.yaml)):
+Key values (full schema: [values.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/values.yaml)):
 
 - `appName` — drives the Deployment/Service/ServiceAccount/ConfigMap names *and* the pod label
   selector; the `SecretProviderClass` is named separately, via `secretProviderClassName`.
@@ -390,11 +397,12 @@ Key values (full schema: [values.yaml](../charts/cafe-service/values.yaml) @[`33
   which env vars, ConfigMap keys, `SecretProviderClass` entries and the `wait-for-db`
   initContainer get rendered for this particular service instance; `db.enabled` also picks the
   rollout `strategy.type`.
-- `image.tag` ships with a placeholder default and is meant to be set on every deploy (via
-  `--set-string <alias>.image.tag=<built-image-sha>`, see Step 8) — no real image tag exists
-  until a CI pipeline builds one.
+- `image.tag` defaults to the deliberately invalid `unset` — CI (Step 9) never pushes a
+  `latest` tag, only content-hash ones, so a deploy that forgets to override it fails loudly
+  instead of silently trying to pull a tag that doesn't exist. Step 8 sets it per service via
+  `--set-string <alias>.image.tag=<content-hash-tag>`.
 
-Templates ([deployment.yaml](../charts/cafe-service/templates/deployment.yaml) @[`75208c9`](https://github.com/tanhutminh/cafe-microservice-project/blob/75208c9/charts/cafe-service/templates/deployment.yaml)):
+Templates ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/deployment.yaml)):
 
 - `strategy.type` is `Recreate` for DB-backed services (`RollingUpdate` otherwise) — avoids an
   old pod and a post-Flyway-migration new pod running side by side; an acceptable trade for a
@@ -410,17 +418,19 @@ Templates ([deployment.yaml](../charts/cafe-service/templates/deployment.yaml) @
   The CSI volume **must** actually be mounted (not just declared) — an unmounted CSI volume
   never triggers the driver's `secretObjects` sync, so the derived `Secret` never gets created.
 
-[secretproviderclass.yaml](../charts/cafe-service/templates/secretproviderclass.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/charts/cafe-service/templates/secretproviderclass.yaml) lists the
+[secretproviderclass.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/secretproviderclass.yaml) lists the
 GSM secrets this service instance needs (conditionally, per the `db.enabled` / `jwt.*.enabled`
 flags) and maps them into `secretObjects` — the bridge from "files mounted under
 `/mnt/secrets-store`" to "a real K8s `Secret` other resources can reference via `secretKeyRef`".
 
 ### `charts/cafe` — umbrella chart
 
-[Chart.yaml](../charts/cafe/Chart.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/charts/cafe/Chart.yaml) declares `cafe-service` as 6 *aliased* Helm
+[Chart.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe/Chart.yaml) declares `cafe-service` as 6 *aliased* Helm
 dependencies (the standard pattern for many near-identical service instances sharing one
-chart). [values.yaml](../charts/cafe/values.yaml) @[`333eba5`](https://github.com/tanhutminh/cafe-microservice-project/blob/333eba5/charts/cafe/values.yaml) sets `global.gcpProjectId` once, plus one
-block per alias with that service's real port/db/kafka/jwt values and its own `image.repository`.
+chart). [values.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe/values.yaml) sets `global.gcpProjectId` and
+`global.imageRegistry` (the Artifact Registry host+path every service's image is pulled from,
+prefixed onto `image.repository` when rendering each Deployment) once, plus one block per alias
+with that service's real port/db/kafka/jwt values and its own `image.repository`.
 
 ```bash
 helm dependency update charts/cafe
@@ -435,27 +445,35 @@ helm template charts/cafe > /dev/null
 
 ## Step 8 — Deploy for real
 
-```bash
-TAG=dummy   # replace with the image tag CI produced, once a CI pipeline exists
+Each service's image tag is a content hash of its own source, `common-lib` and the parent pom
+(see Step 9), so — unlike a single shared release tag — one `$TAG` does not fit all six.
+Compute each one and confirm the image actually exists in Artifact Registry before deploying;
+setting a tag with no matching image just produces a silent `ImagePullBackOff` later:
 
-helm upgrade --install cafe charts/cafe -n cafe \
-  --set-string gateway.image.tag="$TAG" \
-  --set-string auth-service.image.tag="$TAG" \
-  --set-string menu-service.image.tag="$TAG" \
-  --set-string order-service.image.tag="$TAG" \
-  --set-string inventory-service.image.tag="$TAG" \
-  --set-string report-service.image.tag="$TAG"
+```bash
+services=(gateway auth-service menu-service order-service inventory-service report-service)
+set_args=()
+for svc in "${services[@]}"; do
+  tag=$(bash scripts/image-tag.sh "$svc")
+  image="us-central1-docker.pkg.dev/cafe-microservices/cafe-images/cafe-${svc}:${tag}"
+  if ! gcloud artifacts docker images describe "$image" > /dev/null 2>&1; then
+    echo "MISSING: $image - run backend-ci via workflow_dispatch on master first (Step 9)" >&2
+    exit 1
+  fi
+  set_args+=(--set-string "${svc}.image.tag=${tag}")
+done
+
+helm upgrade --install cafe charts/cafe -n cafe "${set_args[@]}"
 
 kubectl get pods -n cafe
 kubectl get secret -n cafe
 ```
 
-Until a CI pipeline builds real images, `TAG` can only be a dummy value like the one above, so
-the app pods end up in `ImagePullBackOff`. Expect the DB-backed pods to pass through `Init:0/1`
-(their `wait-for-db` initContainer) and then `ErrImagePull` → `ImagePullBackOff`; the gateway has
-no initContainer and goes straight to `ImagePullBackOff` (pods can also sit `Pending` briefly
-while the Spot `stateless-pool` scales up from 0). The `{service}-db-credentials` and `*-jwt-key`
-Secrets should appear, and `cafe-postgres-1` and the Kafka pod should be `Running`.
+If every image exists, expect all 6 app pods to reach `Running` — the DB-backed ones pass through
+`Init:0/1` while their `wait-for-db` initContainer waits (Step 6/7) — not `ImagePullBackOff`;
+that now means something is actually wrong (see Troubleshooting item 7 below), not an expected
+gap. The `{service}-db-credentials` and `*-jwt-key` Secrets should appear, and `cafe-postgres-1`
+and the Kafka pod should be `Running` too.
 
 `-n cafe` is mandatory — nothing in the chart hardcodes a namespace (every template uses
 `{{ .Release.Namespace }}`), so omitting it silently deploys everything, including each
@@ -487,8 +505,181 @@ Symptoms you may hit on a first real deploy, with their root causes:
 6. **The CNPG `Cluster` reports that a role's password Secret is missing** — expected until
    Step 8: the `{service}-db-credentials` Secrets only exist once service pods mount the CSI
    volume (see Step 6). It resolves by itself once the pods run.
-7. **Every application pod sits in `ImagePullBackOff`** — expected: no CI pipeline has built or
-   pushed real images yet (out of scope for this guide), so there is nothing to pull.
+7. **An application pod sits in `ImagePullBackOff`** — Step 8's guard should have caught a
+   missing image before this, so first confirm the exact `image:` the pod is trying to pull
+   (`kubectl describe pod <pod> -n cafe`) matches what `gcloud artifacts docker images describe`
+   reports for that same tag. A mismatch usually means `scripts/image-tag.sh` was run against a
+   different commit than the one Step 9 last built from (e.g. an uncommitted local change) —
+   commit first, or push and let Step 9 build for the commit actually being deployed.
+
+---
+
+## Step 9 — CI pipeline
+
+Builds and pushes each service's image to Artifact Registry on every push to `master` that
+touches `backend/**` or `scripts/**` (or via a manual `workflow_dispatch`), gated by the same
+lint/test/coverage checks a pull request runs. Everything below is already implemented
+in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
+and [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
+— this section documents the GCP-side setup those files assume, and how the pieces fit together.
+
+### GCP setup
+
+```bash
+PROJECT_ID=cafe-microservices
+REGION=us-central1
+AR_REPO=cafe-images
+CI_SA=github-actions-ci
+WIF_POOL=github-actions-pool
+WIF_PROVIDER=github-actions-provider
+GH_REPO=tanhutminh/cafe-microservice-project
+
+# The registry the workflow pushes to
+gcloud artifacts repositories create "$AR_REPO" \
+  --repository-format=docker --location="$REGION" --project="$PROJECT_ID" \
+  --description="Backend service images"
+
+# Nodes need to pull from it. A node pool with no --service-account set at creation uses the
+# Compute Engine default SA - `gcloud container node-pools describe ... --format="value(config.serviceAccount)"`
+# then literally prints "default", not the real email; the real principal is always
+# <project-number>-compute@developer.gserviceaccount.com.
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role=roles/artifactregistry.reader
+
+# A dedicated GSA for CI to push as - never a static key, see Workload Identity Federation below
+gcloud iam service-accounts create "$CI_SA" --project="$PROJECT_ID" \
+  --display-name="GitHub Actions CI (backend image build+push)"
+gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" \
+  --member="serviceAccount:${CI_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role=roles/artifactregistry.writer
+
+# Workload Identity Federation for GitHub Actions - a separate trust setup from the per-pod one
+# in Step 2 (that one lets a K8s pod act as a GSA; this one lets a GitHub Actions run act as one,
+# with no per-pod-equivalent component). The attribute-condition restricts it to this exact repo
+# AND to pushes on master, not just anyone who learns the provider's resource name.
+gcloud iam workload-identity-pools create "$WIF_POOL" \
+  --project="$PROJECT_ID" --location=global --display-name="GitHub Actions"
+gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool="$WIF_POOL" \
+  --display-name="GitHub Actions OIDC" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+  --attribute-condition="assertion.repository=='${GH_REPO}' && assertion.ref=='refs/heads/master'" \
+  --issuer-uri="https://token.actions.githubusercontent.com"
+gcloud iam service-accounts add-iam-policy-binding \
+  "${CI_SA}@${PROJECT_ID}.iam.gserviceaccount.com" --project="$PROJECT_ID" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL}/attribute.repository/${GH_REPO}"
+
+# The workflow file needs this exact resource name in its workload_identity_provider field
+gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool="$WIF_POOL" \
+  --format="value(name)"
+```
+
+No GitHub Secret is needed for any of this — Workload Identity Federation exchanges GitHub's own
+OIDC token for a short-lived GCP access token at request time, so there is no static credential
+to store or leak in the first place.
+
+### What the workflow does
+
+Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
+
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) decides whether
+  `backend/**`, `scripts/**`, `charts/**`, or `k8s/**` changed (as four separate outputs), so the
+  other jobs can skip when they're not relevant. Deliberately has **no path filter on the
+  workflow's own trigger** (`on.push`/`on.pull_request`) — that would make the whole workflow, not
+  just a job, never run for an unrelated PR (e.g. frontend-only), and once `test`/
+  `validate-manifests` are required status checks (see Branch protection below), a PR with no
+  check run for them is blocked from merging forever, not just correctly skipped.
+- **`gitleaks`** — secret scan (see `.gitleaksignore` below). Runs unconditionally on every push
+  and PR, with no path filter — a secret can land in any file type (a pasted credential in a doc,
+  a stray key in a YAML manifest), not just backend Java source, so it isn't gated behind
+  `changes` the way `test`/`validate-manifests` are.
+- **`test`** — only runs when `backend/**` or `scripts/**` changed (or on `workflow_dispatch`):
+  `spotless:check` (format, meaningful only on a `pull_request` run — see the paragraph after this
+  list), the full `mvn test` reactor, `mvn jacoco:check` against the five modules that opt into a
+  coverage floor (each module's own `pom.xml` sets `jacoco.line.coverage.minimum` — a
+  no-regression ratchet: it matches that module's own current coverage, or the parent's 70%
+  default for a module already at or above it, and only ever moves up as coverage improves), then
+  `shellcheck` against `scripts/image-tag.sh`/`scripts/image-tag.test.sh` and a run of that test
+  script itself.
+- **`validate-manifests`** — guards against a CNPG/Strimzi/Barman resource ever being added under
+  `charts/*/templates/` (that data layer stays outside any Helm release, see "Architecture at a
+  glance"), then `helm lint`/`helm template` (which run whenever `charts/**` or `k8s/**` changed,
+  or on `workflow_dispatch`), then — only when `k8s/**` itself changed, or on `workflow_dispatch`
+  — `kubeconform` against `k8s/data-layer/*.yaml` using the community
+  [CRDs-catalog](https://github.com/datreeio/CRDs-catalog)
+  for the CNPG/Strimzi/Barman schemas `kubeconform`'s own bundled set doesn't include.
+- **`build-and-push`** — needs both `test` and `gitleaks` to succeed, and only runs on a push (or
+  manual `workflow_dispatch`) to `master`, never on a PR. For each of the 6 services: compute its
+  tag with `scripts/image-tag.sh <service>` (a content hash of that service's own directory,
+  `common-lib` and the parent pom — the exact inputs its `Dockerfile` copies; see the script's own
+  header comment for what that deliberately excludes and for the `salt` constant — bump it to
+  force every service's tag to change when nothing in those hashed inputs did, e.g. after a
+  base-image security update), check whether Artifact Registry already has an image at that tag
+  (`docker manifest inspect`), and only build+push if not. This makes the job idempotent: a
+  `workflow_dispatch` run (or the next ordinary push) always ends with every service's current
+  content actually present in the registry, regardless of what did or didn't get rebuilt on any
+  prior run — including a commit whose `test` job failed, which a plain "did this commit touch
+  this service" check would otherwise permanently miss.
+
+**Why `test`'s Spotless check only means something on a `pull_request` run**: the project's
+`ratchetFrom: origin/master` setting only checks files that differ from `origin/master` — on a
+`push` to `master` itself, that diff is empty (the branch is being compared to itself), so the
+step trivially passes without checking anything. It does real work on a PR, where the PR branch
+genuinely differs from `origin/master`. This is why branch protection (below) requires a PR for
+every change — a direct push to `master` would bypass Spotless entirely, not just skip a
+redundant re-check.
+
+**`.gitleaksignore`** carries the fingerprints of the project's own deliberately-committed dev
+JWT keypair (see Step 5) — without it, a `workflow_dispatch` run (the only trigger that scans
+full history rather than just the pushed commits) would fail on a secret the project has already
+decided to keep public. Regenerate its fingerprints with `gitleaks detect --report-format json`
+if that keypair, or any other already-accepted dev credential, is ever moved to a different file
+or line.
+
+### Branch protection
+
+GitHub Settings → Branches → add a rule for `master`:
+
+- **Require a pull request before merging** — see the Spotless note above for why this matters,
+  not just as general good practice.
+- **Require status checks to pass before merging** → add `gitleaks`, `test` and
+  `validate-manifests` (they only appear once each has run at least once — merge the PR that adds
+  this workflow first, or trigger one `workflow_dispatch` run, before configuring this). **Do
+  not** add `build-and-push` — it never runs on a PR at all, so a PR would show it as
+  "Expected — Waiting for status to be reported" forever, with no way to satisfy it.
+- **Do not allow bypassing the above settings** — without this, anyone with admin access
+  (including the repository owner) can still push straight to `master`, which is exactly the
+  path the first bullet exists to close.
+
+### First run and verifying it worked
+
+The very first run has nothing to compare against yet (no images exist), and `build-and-push`'s
+own idempotency check only helps once something is already in the registry — trigger one
+manually once the workflow file and branch protection are both in place:
+
+```bash
+# GitHub UI: Actions -> backend-ci -> Run workflow, branch = master
+# or, with the GitHub CLI:
+gh workflow run backend-ci.yml --ref master
+```
+
+Confirm all 6 images landed:
+
+```bash
+gcloud artifacts docker images list \
+  us-central1-docker.pkg.dev/cafe-microservices/cafe-images \
+  --include-tags --project=cafe-microservices
+```
+
+From here on, an ordinary push to `master` that touches `backend/**` only rebuilds the services
+whose content actually changed (or all 6, if `common-lib`/the parent `pom.xml` changed) — see
+Step 8 for computing each service's current tag and deploying it.
 
 ---
 
@@ -554,6 +745,9 @@ the Notes column for where the mapping breaks down.
 | Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Network-attached block storage tiers; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` sits roughly between `gp3` and `io1`/`io2` (no exact match); `pd-extreme` (not used here) is the closest analogue of the provisioned-IOPS `io1`/`io2`. |
 | PD CSI driver (`pdcsi-node`) + default StorageClass (`standard-rwo`) | EBS CSI driver (EKS add-on) + default StorageClass (commonly `gp2`) | Provisions PersistentVolumes from block storage (the Persistent Disk row covers the disk tiers). GKE ships the driver preinstalled; on EKS it is an add-on that needs its own IAM setup. |
 | Workload Identity Federation | IAM Roles for Service Accounts (IRSA) / EKS Pod Identity | Both let a pod assume a cloud IAM identity with no static key. IRSA wires this through an OIDC provider registered against the cluster; EKS Pod Identity (newer) simplifies the same idea. The workload pool (`<project>.svc.id.goog`, used in `serviceAccount:<pool>[ns/ksa]` members) is the trust anchor, like the IAM OIDC provider in IRSA; Pod Identity has no counterpart. GCP creates the pool automatically, once per project. |
+| Workload Identity Federation **for external identities** (GitHub Actions OIDC, Step 9) | IAM OIDC identity provider + `AssumeRoleWithWebIdentity` | Same underlying mechanism as the row above, but the caller is a GitHub Actions run authenticated via its own OIDC token, not a Kubernetes pod — no per-pod/per-node component involved, just a workload identity pool + provider + one IAM binding. AWS's IAM OIDC identity provider plays the same trust-anchor role as the pool. |
+| Security Token Service (`sts.googleapis.com`) + IAM Service Account Credentials API (`iamcredentials.googleapis.com`) | AWS STS (`sts:AssumeRoleWithWebIdentity`) | The APIs that actually perform the OIDC-token-for-access-token exchange behind both Workload Identity Federation rows above — a one-time per-project enablement (see Prerequisites). |
+| `docker login` with username `oauth2accesstoken` and a Workload-Identity-issued access token as the password (Step 9) | `aws ecr get-login-password` | Both turn a short-lived cloud credential into what the Docker CLI needs to push; GCP reuses Docker's generic username/password login instead of a dedicated helper command. |
 | `gke-metadata-server` | EKS Pod Identity Agent | The per-node pod that serves Workload Identity credentials to pods. Closest analogue only: IRSA needs no such per-node pod. |
 | `--workload-metadata=GKE_METADATA` (node pool) | — (no equivalent) | Per-node-pool switch replacing the raw GCE metadata server with the Workload Identity one; without it, pods on that pool fall back to the node's own service account. Turning it on for an existing pool takes effect immediately for workloads already running there, which stops them using the node's service account and can disrupt them. EKS needs no node-level toggle — IRSA/Pod Identity work per pod. |
 | Google Service Account (GSA) | IAM Role | The cloud-side identity a KSA is bound to. |
@@ -562,7 +756,7 @@ the Notes column for where the mapping breaks down.
 | Google Secret Manager | AWS Secrets Manager | Managed secret storage with IAM-scoped access and versioning. |
 | Secrets Store CSI Driver + **GCP provider** | Secrets Store CSI Driver + **AWS provider** | Same upstream Kubernetes SIGs driver (`secrets-store-csi-driver`); only the cloud-provider plugin differs. |
 | Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — here, where CNPG's Barman Cloud Plugin archives Postgres WAL/backups (the plugin supports S3 natively too). |
-| Artifact Registry | Elastic Container Registry (ECR) | Container image registry — not yet used in this project (planned for the CI pipeline, see "Not covered here"). |
+| Artifact Registry | Elastic Container Registry (ECR) | Container image registry holding the 6 service images Step 9's CI pipeline builds and pushes. |
 | Google Managed Prometheus (GMP) | Amazon Managed Service for Prometheus (AMP) | Managed Prometheus-compatible metrics collection, enabled by default on a new GKE Standard cluster. Its `gmp-operator` and per-node `collector` pods run in `gmp-system`. |
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | The managed metric and log stores that `gke-metrics-agent`, `fluentbit-gke` and `event-exporter-gke` write to. On EKS, sending node/pod metrics and container logs to CloudWatch is opt-in (Container Insights / the CloudWatch Observability add-on). |
 | GCP project | AWS account | The resource-isolation, IAM and API-enablement boundary; billing rolls up to a separate billing account (next row). |
@@ -586,11 +780,11 @@ general GCP-vs-AWS difference.
 
 ## Not covered here (separate, future work)
 
-- CI pipeline (build + push images to Artifact Registry, Workload Identity Federation for
-  CI→GCP auth) — without this, `image.repository:image.tag` never resolves to a real image.
 - CD/teardown automation (scaling `stateful-pool` up/down around a deploy, ordered graceful
   shutdown of Postgres/Kafka).
-- kubeconform/CI validation of `k8s/data-layer/*.yaml`.
+- An Artifact Registry cleanup policy — content-hash tags never collide or get overwritten, so
+  the registry only grows; nothing here deletes an old image once no deployed release still
+  references it.
 
 </details>
 
@@ -601,16 +795,12 @@ general GCP-vs-AWS difference.
 cluster, operator CNPG (Postgres) và Strimzi (Kafka), secret lấy từ Secret Manager qua Secrets
 Store CSI Driver, và các Helm chart triển khai 6 service Spring Boot.
 
-**Phạm vi**: từ hạ tầng cluster tới khi `helm install` `charts/cafe` thành công. Tài liệu này
-**không** bao gồm CI pipeline (build/push image vào registry) — đó là bước riêng, chưa triển
-khai. Cho tới khi bước đó có, các pod ứng dụng được tạo ra nhưng sẽ báo `ImagePullBackOff` (chưa
-có image thật ở `image.repository:image.tag`).
+**Phạm vi**: từ hạ tầng cluster GKE tới khi `helm install` `charts/cafe` thành công (Bước 1-8),
+cộng thêm CI pipeline build và push image container thật cho các pod đó (Bước 9). Tự động hoá
+CD/teardown (bật/tắt `stateful-pool` quanh mỗi lần deploy) là việc riêng, chưa triển khai — xem
+mục "Chưa bao gồm trong tài liệu này" ở cuối.
 
-Các link tới file trong repo có kèm `@<hash>`: commit gần nhất đã thay đổi file đó tính tới lần
-gần nhất tài liệu này được đối chiếu với file, bản thân hash là link tới đúng phiên bản đó trên
-GitHub (cũng xem được ở local bằng `git show <hash>:<path>`). Nếu
-`git log -1 --format=%h -- <path>` giờ trả về hash khác thì file đã đổi kể từ đó và phần mô tả
-có thể đã lỗi thời.
+Link tới file trong repo trỏ thẳng tới `master` trên GitHub.
 
 Mọi lệnh `gcloud` giả định đã set project mặc định (xem mục "Yêu cầu môi trường"). Các lệnh bên
 dưới được viết dạng bash thuần, không kèm tiền tố. Trên một số cấu hình Git Bash Windows,
@@ -635,6 +825,9 @@ với các lệnh pipe dữ liệu vào stdin (`--data-file=-`, như ở Bước
 - **Helm**: `charts/cafe-service` (1 chart tái sử dụng) + `charts/cafe` (umbrella chart với 6
   dependency alias: gateway, auth-service, menu-service, order-service, inventory-service,
   report-service).
+- **GitHub Actions** (`.github/workflows/backend-ci.yml`, Bước 9) build và push image của từng
+  service lên **Artifact Registry**, xác thực với GCP qua một cấu hình **Workload Identity
+  Federation** riêng dành cho GitHub — cũng không dùng static key nào.
 - Manifest Postgres/Kafka nằm ở `k8s/data-layer/`, áp dụng bằng `kubectl apply` thuần — **không**
   thuộc bất kỳ Helm release nào. Đây là chủ đích: `helm uninstall`/rollback tầng ứng dụng không
   bao giờ được phép cascade-xoá database.
@@ -643,6 +836,9 @@ với các lệnh pipe dữ liệu vào stdin (`--data-file=-`, như ở Bước
 
 - Đã cài CLI `gcloud`, `kubectl`, `helm`, `cmctl` (CLI của cert-manager, cài theo tài liệu của
   cert-manager) và `openssl`; `gcloud` đã đăng nhập.
+- `gitleaks` (chỉ cần khi bạn di chuyển cặp khoá JWT dev, hay bất kỳ credential nào khác nằm trong
+  `.gitleaksignore`, sang file/dòng khác và phải tạo lại fingerprint — xem `.gitleaksignore` bên
+  dưới; bản thân CI chạy nó qua `gitleaks/gitleaks-action`, không cần cài local cho pipeline).
 - `gke-gcloud-auth-plugin` nằm trong `PATH` (kiểm tra bằng `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` và `cmctl` đều cần nó để nói chuyện với cluster GKE. Cài bằng
   `gcloud components install gke-gcloud-auth-plugin` (SDK độc lập / bộ cài Windows) hoặc, nếu
@@ -669,8 +865,12 @@ tiên sẽ hỏi hoặc báo lỗi nếu chưa bật):
 
 ```bash
 gcloud config set project cafe-microservices
-gcloud services enable container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com
+gcloud services enable container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com
 ```
+
+Bước 9 còn cần một repository GitHub đã bật Actions và quyền admin trên repo đó (để cấu hình
+branch protection) — không cần thêm CLI nào ngoài `gcloud`, dù GitHub CLI (`gh`) là cách tiện lợi
+để chạy lần đầu thủ công.
 
 ---
 
@@ -747,7 +947,7 @@ done
 ```
 
 Gắn mỗi GSA với ServiceAccount Kubernetes (KSA) tương ứng qua Workload Identity. KSA chưa cần
-tồn tại — template [serviceaccount.yaml](../charts/cafe-service/templates/serviceaccount.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/charts/cafe-service/templates/serviceaccount.yaml) của `charts/cafe-service` sẽ tạo nó sau, đúng tên và có
+tồn tại — template [serviceaccount.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/serviceaccount.yaml) của `charts/cafe-service` sẽ tạo nó sau, đúng tên và có
 annotation `iam.gke.io/gcp-service-account`:
 
 ```bash
@@ -766,7 +966,7 @@ gcloud iam service-accounts add-iam-policy-binding \
 ```
 
 GSA backup của pod Postgres được gắn annotation theo cách khác — qua `serviceAccountTemplate` của
-CNPG `Cluster` (xem [k8s/data-layer/postgres-cluster.yaml](../k8s/data-layer/postgres-cluster.yaml) @[`4c928f4`](https://github.com/tanhutminh/cafe-microservice-project/blob/4c928f4/k8s/data-layer/postgres-cluster.yaml)),
+CNPG `Cluster` (xem [k8s/data-layer/postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml)),
 không phải ServiceAccount do Helm quản lý, vì đây là tầng dữ liệu, không phải service ứng dụng.
 Template đó chỉ đặt annotation, nên binding ở trên vẫn bắt buộc — thiếu nó thì pod không xác
 thực được với bucket backup.
@@ -822,7 +1022,7 @@ nhưng mọi thứ phía sau không hoạt động):
   CSI mount thành 1 `Secret` object thật mà `secretKeyRef` của Deployment có thể tham chiếu) sẽ
   âm thầm không làm gì cả — không lỗi, file vẫn được mount ở `/mnt/secrets-store`, nhưng
   `Secret` không bao giờ xuất hiện.
-- **`-f`** [k8s/operators/strimzi-values.yaml](../k8s/operators/strimzi-values.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/operators/strimzi-values.yaml), đặt `watchNamespaces: [cafe]`: chart mặc
+- **`-f`** [k8s/operators/strimzi-values.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/operators/strimzi-values.yaml), đặt `watchNamespaces: [cafe]`: chart mặc
   định `watchAnyNamespace: false` / `watchNamespaces: []`, nghĩa là operator chỉ reconcile
   resource trong namespace cài đặt của chính nó (`strimzi-system`) và âm thầm bỏ qua mọi
   `Kafka`/`KafkaNodePool` áp dụng vào namespace `cafe` — không event, không lỗi, chỉ đơn giản
@@ -916,8 +1116,8 @@ Chúng được lấy từ biến môi trường thay thế (`SPRING_DATASOURCE_
 `secretKeyRef` trong `deployment.yaml` của `charts/cafe-service` ở môi trường triển khai thật,
 hoặc qua `docker-compose.yml` / `application-local.yml` của từng service khi chạy local.
 
-Xem [auth-service/application.yml](../backend/auth-service/src/main/resources/application.yml) @[`d65155e`](https://github.com/tanhutminh/cafe-microservice-project/blob/d65155e/backend/auth-service/src/main/resources/application.yml)
-và [gateway/application.yml](../backend/gateway/src/main/resources/application.yml) @[`d65155e`](https://github.com/tanhutminh/cafe-microservice-project/blob/d65155e/backend/gateway/src/main/resources/application.yml) để thấy
+Xem [auth-service/application.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/auth-service/src/main/resources/application.yml)
+và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/gateway/src/main/resources/application.yml) để thấy
 đúng khuôn mẫu này.
 
 ---
@@ -926,11 +1126,11 @@ và [gateway/application.yml](../backend/gateway/src/main/resources/application.
 
 4 file, áp dụng trực tiếp bằng `kubectl` — không bao giờ đóng gói vào Helm chart:
 
-- [postgres-storageclass.yaml](../k8s/data-layer/postgres-storageclass.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/data-layer/postgres-storageclass.yaml) — 1 StorageClass
+- [postgres-storageclass.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-storageclass.yaml) — 1 StorageClass
   riêng với policy `Retain` cho PVC của Postgres (các class dựng sẵn của GKE đều là
   `Delete`; Postgres là nguồn dữ liệu gốc của app này, nên đĩa của nó phải sống sót kể cả khi
   PVC/Cluster bị xoá nhầm).
-- [postgres-cluster.yaml](../k8s/data-layer/postgres-cluster.yaml) @[`4c928f4`](https://github.com/tanhutminh/cafe-microservice-project/blob/4c928f4/k8s/data-layer/postgres-cluster.yaml) — CNPG `Cluster` cùng các database và role của nó:
+- [postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml) — CNPG `Cluster` cùng các database và role của nó:
   - `Cluster` bootstrap `auth_db` ngay lúc tạo (1 `Cluster` chỉ bootstrap được 1 database);
   - 4 `Database` CR tạo database cho các service còn lại;
   - 5 mục `managed.roles` được reconcile dựa theo Secret `{service}-db-credentials` của từng
@@ -944,10 +1144,10 @@ và [gateway/application.yml](../backend/gateway/src/main/resources/application.
   - mẹo: field đúng là `spec.storage.storageClass` (field riêng của CNPG CRD), không phải
     `storageClassName` (tên field của PVC thuần) — rất dễ nhầm, dùng
     `kubectl explain cluster.spec.storage` để kiểm tra lại.
-- [postgres-backup.yaml](../k8s/data-layer/postgres-backup.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/data-layer/postgres-backup.yaml) — `ObjectStore` của Barman
+- [postgres-backup.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-backup.yaml) — `ObjectStore` của Barman
   Cloud Plugin (trỏ tới GCS bucket, xác thực qua Workload Identity của chính Cluster, không cần
   Secret credential riêng) và 1 `ScheduledBackup` chạy hàng ngày.
-- [kafka-cluster.yaml](../k8s/data-layer/kafka-cluster.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/k8s/data-layer/kafka-cluster.yaml) — `KafkaNodePool` + `Kafka` KRaft
+- [kafka-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/kafka-cluster.yaml) — `KafkaNodePool` + `Kafka` KRaft
   1 broker, ghim vào `stateful-pool` qua node affinity/toleration. Cố tình dùng StorageClass
   `standard` dựng sẵn của GKE (reclaim `Delete`), khác với Postgres — Kafka ở đây chỉ chứa
   message saga có thể replay lại, không phải dữ liệu gốc. Giống Postgres, phiên bản Kafka (4.3.1)
@@ -972,7 +1172,7 @@ khi service pod mount volume CSI, nên `managed.roles` của CNPG `Cluster` chư
 
 ### `charts/cafe-service` — 1 chart tái sử dụng, tạo ra 6 instance
 
-Các value chính (schema đầy đủ: [values.yaml](../charts/cafe-service/values.yaml) @[`333eba5`](https://github.com/tanhutminh/cafe-microservice-project/blob/333eba5/charts/cafe-service/values.yaml)):
+Các value chính (schema đầy đủ: [values.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/values.yaml)):
 
 - `appName` — quyết định tên của Deployment/Service/ServiceAccount/ConfigMap *và* label selector
   của pod; riêng `SecretProviderClass` được đặt tên qua `secretProviderClassName`.
@@ -980,11 +1180,12 @@ Các value chính (schema đầy đủ: [values.yaml](../charts/cafe-service/val
   env var, key trong ConfigMap, mục `SecretProviderClass` và initContainer `wait-for-db` nào
   được render cho instance service đó; riêng `db.enabled` còn quyết định `strategy.type` của
   rollout.
-- `image.tag` có sẵn 1 giá trị mặc định giữ chỗ và được thiết kế để set ở mỗi lần deploy (qua
-  `--set-string <alias>.image.tag=<built-image-sha>`, xem Bước 8) — chưa có tag image thật nào
-  cho tới khi CI pipeline build ra.
+- `image.tag` mặc định là giá trị cố tình không hợp lệ `unset` — CI (Bước 9) không bao giờ push
+  tag `latest`, chỉ push tag content-hash, nên 1 lần deploy quên override nó sẽ báo lỗi ngay lập
+  tức thay vì âm thầm cố pull 1 tag không tồn tại. Bước 8 set nó cho từng service qua
+  `--set-string <alias>.image.tag=<content-hash-tag>`.
 
-Template ([deployment.yaml](../charts/cafe-service/templates/deployment.yaml) @[`75208c9`](https://github.com/tanhutminh/cafe-microservice-project/blob/75208c9/charts/cafe-service/templates/deployment.yaml)):
+Template ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/deployment.yaml)):
 
 - `strategy.type` là `Recreate` cho service dùng DB (`RollingUpdate` cho các service còn lại)
   — tránh việc 1 pod cũ và 1 pod mới (sau khi Flyway đã migrate) chạy song song; đánh đổi chấp
@@ -1001,7 +1202,7 @@ Template ([deployment.yaml](../charts/cafe-service/templates/deployment.yaml) @[
   được mount sẽ không bao giờ kích hoạt việc đồng bộ `secretObjects` của driver, nên `Secret`
   tương ứng sẽ không bao giờ được tạo ra.
 
-[secretproviderclass.yaml](../charts/cafe-service/templates/secretproviderclass.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/charts/cafe-service/templates/secretproviderclass.yaml) liệt kê
+[secretproviderclass.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/secretproviderclass.yaml) liệt kê
 các secret GSM mà instance service đó cần (có điều kiện, theo các cờ `db.enabled` /
 `jwt.*.enabled`) và map chúng vào `secretObjects` — cầu nối từ "file được mount ở
 `/mnt/secrets-store`" sang "1 `Secret` K8s thật mà resource khác có thể tham chiếu qua
@@ -1009,11 +1210,12 @@ các secret GSM mà instance service đó cần (có điều kiện, theo các c
 
 ### `charts/cafe` — umbrella chart
 
-[Chart.yaml](../charts/cafe/Chart.yaml) @[`ed04e41`](https://github.com/tanhutminh/cafe-microservice-project/blob/ed04e41/charts/cafe/Chart.yaml) khai báo `cafe-service` như 6 dependency Helm được
+[Chart.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe/Chart.yaml) khai báo `cafe-service` như 6 dependency Helm được
 *alias* (mẫu chuẩn cho nhiều instance service gần giống nhau dùng chung 1 chart).
-[values.yaml](../charts/cafe/values.yaml) @[`333eba5`](https://github.com/tanhutminh/cafe-microservice-project/blob/333eba5/charts/cafe/values.yaml) set `global.gcpProjectId` 1 lần duy nhất, cộng thêm 1
-block cho mỗi alias với giá trị port/db/kafka/jwt thật của service đó và `image.repository`
-riêng của nó.
+[values.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe/values.yaml) set `global.gcpProjectId` và
+`global.imageRegistry` (host+path của Artifact Registry mà image mọi service được pull về, ghép
+vào trước `image.repository` khi render mỗi Deployment) 1 lần duy nhất, cộng thêm 1 block cho mỗi
+alias với giá trị port/db/kafka/jwt thật của service đó và `image.repository` riêng của nó.
 
 ```bash
 helm dependency update charts/cafe
@@ -1028,27 +1230,35 @@ helm template charts/cafe > /dev/null
 
 ## Bước 8 — Deploy thật
 
-```bash
-TAG=dummy   # replace with the image tag CI produced, once a CI pipeline exists
+Tag image của mỗi service là 1 hash nội dung tính từ source của chính nó, `common-lib` và pom
+cha (xem Bước 9), nên — khác với 1 tag release dùng chung — không thể dùng 1 `$TAG` cho cả 6
+service. Tính từng tag rồi xác nhận image đó thực sự tồn tại trên Artifact Registry trước khi
+deploy; set 1 tag mà không có image tương ứng chỉ dẫn tới `ImagePullBackOff` âm thầm về sau:
 
-helm upgrade --install cafe charts/cafe -n cafe \
-  --set-string gateway.image.tag="$TAG" \
-  --set-string auth-service.image.tag="$TAG" \
-  --set-string menu-service.image.tag="$TAG" \
-  --set-string order-service.image.tag="$TAG" \
-  --set-string inventory-service.image.tag="$TAG" \
-  --set-string report-service.image.tag="$TAG"
+```bash
+services=(gateway auth-service menu-service order-service inventory-service report-service)
+set_args=()
+for svc in "${services[@]}"; do
+  tag=$(bash scripts/image-tag.sh "$svc")
+  image="us-central1-docker.pkg.dev/cafe-microservices/cafe-images/cafe-${svc}:${tag}"
+  if ! gcloud artifacts docker images describe "$image" > /dev/null 2>&1; then
+    echo "MISSING: $image - run backend-ci via workflow_dispatch on master first (Step 9)" >&2
+    exit 1
+  fi
+  set_args+=(--set-string "${svc}.image.tag=${tag}")
+done
+
+helm upgrade --install cafe charts/cafe -n cafe "${set_args[@]}"
 
 kubectl get pods -n cafe
 kubectl get secret -n cafe
 ```
 
-Cho tới khi có CI pipeline build image thật, `TAG` chỉ có thể là giá trị giả như ở trên, nên các
-app pod sẽ kết thúc ở `ImagePullBackOff`. Các pod dùng DB sẽ đi qua `Init:0/1` (initContainer
-`wait-for-db` của chúng) rồi `ErrImagePull` → `ImagePullBackOff`; gateway không có initContainer
-nên đi thẳng tới `ImagePullBackOff` (pod cũng có thể `Pending` ngắn khi pool Spot `stateless-pool`
-lên từ 0 node). Các Secret `{service}-db-credentials` và `*-jwt-key` phải xuất hiện, còn
-`cafe-postgres-1` và pod Kafka phải `Running`.
+Nếu mọi image đều tồn tại, cả 6 app pod sẽ đạt `Running` — các pod dùng DB đi qua `Init:0/1`
+trong lúc initContainer `wait-for-db` của chúng chờ (Bước 6/7) — không còn `ImagePullBackOff`
+nữa; nếu thấy trạng thái đó bây giờ nghĩa là có gì đó thực sự sai (xem mục 7 của phần Xử lý sự cố
+bên dưới), không còn là khoảng trống dự kiến. Các Secret `{service}-db-credentials` và
+`*-jwt-key` phải xuất hiện, còn `cafe-postgres-1` và pod Kafka phải `Running`.
 
 `-n cafe` là bắt buộc — không có gì trong chart hardcode namespace (mọi template đều dùng
 `{{ .Release.Namespace }}`), nên bỏ qua nó sẽ âm thầm deploy mọi thứ, kể cả ServiceAccount của
@@ -1082,8 +1292,181 @@ Các triệu chứng có thể gặp khi deploy thật lần đầu, kèm nguyê
 6. **CNPG `Cluster` báo thiếu Secret mật khẩu của 1 role** — bình thường cho tới Bước 8: các
    Secret `{service}-db-credentials` chỉ tồn tại khi service pod mount volume CSI (xem Bước 6).
    Tự hết khi các pod chạy.
-7. **Mọi app pod đều ở `ImagePullBackOff`** — bình thường: chưa có CI pipeline nào build/push
-   image thật (nằm ngoài phạm vi tài liệu này), nên không có gì để kéo về.
+7. **1 pod ứng dụng bị `ImagePullBackOff`** — cơ chế kiểm tra ở Bước 8 lẽ ra đã phát hiện image
+   thiếu trước khi tới đây, nên trước tiên hãy xác nhận đúng `image:` mà pod đó đang cố pull
+   (`kubectl describe pod <pod> -n cafe`) khớp với những gì `gcloud artifacts docker images
+   describe` báo cho cùng tag đó. Lệch nhau thường nghĩa là `scripts/image-tag.sh` được chạy trên
+   1 commit khác với commit mà Bước 9 build lần gần nhất (ví dụ: có thay đổi local chưa commit) —
+   commit trước, hoặc push rồi để Bước 9 build đúng cho commit đang được deploy.
+
+---
+
+## Bước 9 — CI pipeline
+
+Build và push image của từng service lên Artifact Registry ở mỗi lần push lên `master` có đụng
+tới `backend/**` hoặc `scripts/**` (hoặc qua `workflow_dispatch` thủ công), được gate bởi đúng các
+kiểm tra lint/test/coverage mà 1 pull request chạy. Mọi thứ dưới đây đã được
+implement trong [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
+và [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
+— mục này chỉ ghi lại phần cấu hình phía GCP mà 2 file đó giả định đã có, và cách các phần khớp
+với nhau.
+
+### Thiết lập phía GCP
+
+```bash
+PROJECT_ID=cafe-microservices
+REGION=us-central1
+AR_REPO=cafe-images
+CI_SA=github-actions-ci
+WIF_POOL=github-actions-pool
+WIF_PROVIDER=github-actions-provider
+GH_REPO=tanhutminh/cafe-microservice-project
+
+# The registry the workflow pushes to
+gcloud artifacts repositories create "$AR_REPO" \
+  --repository-format=docker --location="$REGION" --project="$PROJECT_ID" \
+  --description="Backend service images"
+
+# Nodes need to pull from it. A node pool with no --service-account set at creation uses the
+# Compute Engine default SA - `gcloud container node-pools describe ... --format="value(config.serviceAccount)"`
+# then literally prints "default", not the real email; the real principal is always
+# <project-number>-compute@developer.gserviceaccount.com.
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role=roles/artifactregistry.reader
+
+# A dedicated GSA for CI to push as - never a static key, see Workload Identity Federation below
+gcloud iam service-accounts create "$CI_SA" --project="$PROJECT_ID" \
+  --display-name="GitHub Actions CI (backend image build+push)"
+gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" \
+  --member="serviceAccount:${CI_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role=roles/artifactregistry.writer
+
+# Workload Identity Federation for GitHub Actions - a separate trust setup from the per-pod one
+# in Step 2 (that one lets a K8s pod act as a GSA; this one lets a GitHub Actions run act as one,
+# with no per-pod-equivalent component). The attribute-condition restricts it to this exact repo
+# AND to pushes on master, not just anyone who learns the provider's resource name.
+gcloud iam workload-identity-pools create "$WIF_POOL" \
+  --project="$PROJECT_ID" --location=global --display-name="GitHub Actions"
+gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool="$WIF_POOL" \
+  --display-name="GitHub Actions OIDC" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+  --attribute-condition="assertion.repository=='${GH_REPO}' && assertion.ref=='refs/heads/master'" \
+  --issuer-uri="https://token.actions.githubusercontent.com"
+gcloud iam service-accounts add-iam-policy-binding \
+  "${CI_SA}@${PROJECT_ID}.iam.gserviceaccount.com" --project="$PROJECT_ID" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL}/attribute.repository/${GH_REPO}"
+
+# The workflow file needs this exact resource name in its workload_identity_provider field
+gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool="$WIF_POOL" \
+  --format="value(name)"
+```
+
+Không cần GitHub Secret nào cho phần này — Workload Identity Federation đổi token OIDC riêng của
+GitHub lấy 1 access token GCP có thời hạn ngắn ngay tại thời điểm chạy, nên ngay từ đầu đã không
+có credential tĩnh nào cần lưu hay có thể bị lộ.
+
+### Workflow làm gì
+
+5 job, đều nằm trong [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
+
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) quyết định liệu
+  `backend/**`, `scripts/**`, `charts/**`, hay `k8s/**` có thay đổi hay không (4 output riêng
+  biệt), để các job còn lại có thể bỏ qua khi không liên quan. Cố tình **không đặt path filter
+  trên trigger của chính workflow** (`on.push`/`on.pull_request`) — nếu đặt, cả workflow (chứ
+  không chỉ 1 job) sẽ không bao giờ chạy cho 1 PR không liên quan (ví dụ: chỉ sửa frontend), và
+  một khi `test`/`validate-manifests` đã là required status check (xem Branch protection bên
+  dưới), 1 PR không có lần chạy check nào cho chúng sẽ bị chặn merge vĩnh viễn, chứ không chỉ
+  được bỏ qua đúng cách.
+- **`gitleaks`** — quét secret (xem `.gitleaksignore` bên dưới). Chạy vô điều kiện ở mọi lần push
+  và PR, không có path filter nào — secret có thể lọt vào bất kỳ loại file nào (1 credential dán
+  nhầm vào doc, 1 key lạc vào manifest YAML), không riêng gì Java backend, nên không bị gate theo
+  `changes` như `test`/`validate-manifests`.
+- **`test`** — chỉ chạy khi `backend/**` hoặc `scripts/**` có thay đổi (hoặc khi
+  `workflow_dispatch`): `spotless:check` (kiểm tra format, chỉ có ý nghĩa thật trên 1 lần chạy
+  `pull_request` — xem đoạn ngay sau danh sách này), toàn bộ reactor `mvn test`, `mvn jacoco:check`
+  với 5 module có bật sàn coverage (mỗi `pom.xml` của module tự đặt `jacoco.line.coverage.minimum`
+  — 1 ratchet không cho phép thụt lùi: khớp đúng coverage hiện tại của module đó, hoặc mặc định
+  70% của pom cha cho module đã đạt hoặc vượt mức đó, và chỉ tăng dần khi coverage cải thiện), rồi
+  `shellcheck` với `scripts/image-tag.sh`/`scripts/image-tag.test.sh` và chạy chính test script đó.
+- **`validate-manifests`** — chặn việc 1 resource CNPG/Strimzi/Barman bị thêm nhầm vào
+  `charts/*/templates/` (tầng data layer đó nằm ngoài mọi Helm release, xem "Kiến trúc tổng
+  quan"), sau đó `helm lint`/`helm template` (chạy khi `charts/**` hoặc `k8s/**` có thay đổi, hoặc
+  khi `workflow_dispatch`), rồi — chỉ khi `k8s/**` tự nó thay đổi, hoặc khi `workflow_dispatch` —
+  `kubeconform` với `k8s/data-layer/*.yaml` dùng
+  [CRDs-catalog](https://github.com/datreeio/CRDs-catalog) của cộng
+  đồng cho schema CNPG/Strimzi/Barman mà bộ schema có sẵn của `kubeconform` không có.
+- **`build-and-push`** — cần cả `test` lẫn `gitleaks` cùng thành công, và chỉ chạy khi push (hoặc
+  `workflow_dispatch` thủ công) lên `master`, không bao giờ chạy trên PR. Với mỗi trong 6 service:
+  tính tag bằng `scripts/image-tag.sh <service>` (hash nội dung của thư mục service đó,
+  `common-lib` và pom cha — đúng các input mà `Dockerfile` của nó copy vào; xem comment ở đầu file
+  script để biết những gì cố tình bị loại ra, và về hằng số `salt` — tăng giá trị này để buộc tag
+  của mọi service đổi ngay cả khi không input nào trong số đó thay đổi, ví dụ sau khi vá bảo mật
+  base image), kiểm tra xem Artifact Registry đã có image ở tag đó chưa
+  (`docker manifest inspect`), và chỉ build+push nếu chưa có. Điều này làm job trở nên idempotent:
+  1 lần chạy `workflow_dispatch` (hoặc lần push bình thường tiếp theo) luôn kết thúc với nội dung
+  hiện tại của mọi service thực sự có mặt trên registry, bất kể lần chạy trước đã build hay chưa
+  build gì — kể cả 1 commit có job `test` thất bại, thứ mà 1 kiểm tra kiểu "commit này có đụng
+  tới service này không" đơn thuần sẽ bỏ sót vĩnh viễn.
+
+**Vì sao kiểm tra Spotless của `test` chỉ có ý nghĩa thật trên 1 lần chạy `pull_request`**: cấu
+hình `ratchetFrom: origin/master` của dự án chỉ kiểm tra các file khác biệt so với
+`origin/master` — trên 1 lần `push` lên chính `master`, diff đó rỗng (nhánh đang được so sánh với
+chính nó), nên bước này pass 1 cách hiển nhiên mà không kiểm tra gì cả. Nó chỉ thực sự làm việc
+trên 1 PR, nơi nhánh PR thực sự khác `origin/master`. Đây là lý do branch protection (bên dưới)
+yêu cầu PR cho mọi thay đổi — 1 lần push trực tiếp lên `master` sẽ bỏ qua Spotless hoàn toàn, chứ
+không chỉ bỏ qua 1 lần kiểm tra lại thừa.
+
+**`.gitleaksignore`** chứa fingerprint của cặp khoá JWT dev mà dự án đã cố tình commit công khai
+(xem Bước 5) — thiếu nó, 1 lần chạy `workflow_dispatch` (trigger duy nhất quét toàn bộ lịch sử
+thay vì chỉ các commit vừa push) sẽ fail vì 1 secret mà dự án đã quyết định giữ công khai. Tạo
+lại fingerprint bằng `gitleaks detect --report-format json` nếu cặp khoá đó, hay bất kỳ credential
+dev nào khác đã được chấp nhận, bị chuyển sang file hoặc dòng khác.
+
+### Branch protection
+
+GitHub Settings → Branches → thêm rule cho `master`:
+
+- **Require a pull request before merging** — xem ghi chú về Spotless ở trên để biết vì sao điều
+  này quan trọng, không chỉ là thông lệ tốt chung chung.
+- **Require status checks to pass before merging** → thêm `gitleaks`, `test` và
+  `validate-manifests` (chúng chỉ xuất hiện sau khi đã chạy ít nhất 1 lần — merge PR thêm workflow
+  này trước, hoặc chạy 1 lần `workflow_dispatch`, trước khi cấu hình mục này). **Không** thêm
+  `build-and-push` — nó không bao giờ chạy trên PR, nên 1 PR sẽ hiển thị nó là "Expected — Waiting
+  for status to be reported" mãi mãi, không có cách nào thoả mãn được.
+- **Do not allow bypassing the above settings** — nếu không có mục này, bất kỳ ai có quyền admin
+  (kể cả chủ repo) vẫn có thể push thẳng lên `master`, đúng con đường mà mục đầu tiên tồn tại để
+  chặn lại.
+
+### Chạy lần đầu và xác minh nó hoạt động
+
+Lần chạy đầu tiên chưa có gì để so sánh (chưa có image nào tồn tại), và kiểm tra idempotent của
+`build-and-push` chỉ hữu ích khi registry đã có sẵn thứ gì đó — kích hoạt 1 lần thủ công ngay khi
+file workflow và branch protection đã sẵn sàng cả hai:
+
+```bash
+# GitHub UI: Actions -> backend-ci -> Run workflow, branch = master
+# or, with the GitHub CLI:
+gh workflow run backend-ci.yml --ref master
+```
+
+Xác nhận cả 6 image đã lên registry:
+
+```bash
+gcloud artifacts docker images list \
+  us-central1-docker.pkg.dev/cafe-microservices/cafe-images \
+  --include-tags --project=cafe-microservices
+```
+
+Từ đây trở đi, 1 lần push bình thường lên `master` có đụng tới `backend/**` chỉ rebuild những
+service có nội dung thực sự thay đổi (hoặc cả 6, nếu `common-lib`/`pom.xml` cha thay đổi) — xem
+Bước 8 để tính tag hiện tại của từng service và deploy nó.
 
 ---
 
@@ -1148,6 +1531,9 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Các tier lưu trữ block gắn qua mạng; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` nằm khoảng giữa `gp3` và `io1`/`io2` (không có tương đương chính xác); `pd-extreme` (không dùng ở đây) là tương đương gần nhất của `io1`/`io2` provisioned-IOPS. |
 | PD CSI driver (`pdcsi-node`) + default StorageClass (`standard-rwo`) | EBS CSI driver (EKS add-on) + default StorageClass (commonly `gp2`) | Cấp PersistentVolume từ block storage (dòng Persistent Disk đã nói về các tier đĩa). GKE cài sẵn driver; trên EKS đây là add-on cần cấu hình IAM riêng. |
 | Workload Identity Federation | IAM Roles for Service Accounts (IRSA) / EKS Pod Identity | Cả 2 đều cho phép 1 pod nhận danh tính IAM của cloud mà không cần static key. IRSA nối qua 1 OIDC provider đăng ký với cluster; EKS Pod Identity (mới hơn) đơn giản hoá cùng ý tưởng đó. Workload pool (`<project>.svc.id.goog`, dùng trong member `serviceAccount:<pool>[ns/ksa]`) là điểm neo tin cậy, giống IAM OIDC provider của IRSA; Pod Identity không có khái niệm tương ứng. GCP tự tạo pool, 1 lần cho mỗi project. |
+| Workload Identity Federation **cho danh tính bên ngoài** (GitHub Actions OIDC, Bước 9) | IAM OIDC identity provider + `AssumeRoleWithWebIdentity` | Cùng cơ chế nền tảng với dòng phía trên, nhưng bên gọi là 1 lần chạy GitHub Actions xác thực qua token OIDC của chính nó, không phải 1 pod Kubernetes — không có thành phần nào theo pod/node, chỉ cần 1 workload identity pool + provider + 1 IAM binding. IAM OIDC identity provider của AWS đóng vai trò điểm neo tin cậy giống pool ở đây. |
+| Security Token Service (`sts.googleapis.com`) + IAM Service Account Credentials API (`iamcredentials.googleapis.com`) | AWS STS (`sts:AssumeRoleWithWebIdentity`) | Các API thực sự thực hiện việc đổi token OIDC lấy access token đứng sau cả 2 dòng Workload Identity Federation ở trên — chỉ cần bật 1 lần cho mỗi project (xem Yêu cầu môi trường). |
+| `docker login` với username `oauth2accesstoken` và access token do Workload Identity cấp làm password (Bước 9) | `aws ecr get-login-password` | Cả 2 đều biến 1 credential cloud có thời hạn ngắn thành thứ Docker CLI cần để push; GCP tái dùng cơ chế login username/password chung của Docker thay vì 1 lệnh helper riêng. |
 | `gke-metadata-server` | EKS Pod Identity Agent | Pod chạy trên mỗi node, cấp credential Workload Identity cho các pod. Chỉ là tương đương gần nhất: IRSA không cần pod theo node như vậy. |
 | `--workload-metadata=GKE_METADATA` (node pool) | — (no equivalent) | Công tắc theo từng node pool, thay metadata server GCE thô bằng metadata server của Workload Identity; không có nó, pod trên pool đó rơi về dùng service account của chính node. Bật nó trên pool đã tồn tại có hiệu lực ngay với các workload đang chạy ở đó, khiến chúng không còn dùng được service account của node và có thể gây gián đoạn. EKS không cần công tắc cấp node như vậy — IRSA/Pod Identity hoạt động theo từng pod. |
 | Google Service Account (GSA) | IAM Role | Danh tính phía cloud mà 1 KSA được gắn vào. |
@@ -1156,7 +1542,7 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | Google Secret Manager | AWS Secrets Manager | Kho lưu secret được quản lý, quyền truy cập qua IAM, có versioning. |
 | Secrets Store CSI Driver + **GCP provider** | Secrets Store CSI Driver + **AWS provider** | Cùng 1 driver Kubernetes SIGs gốc (`secrets-store-csi-driver`); chỉ khác plugin theo từng cloud. |
 | Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — ở đây là nơi Barman Cloud Plugin của CNPG lưu WAL/backup của Postgres (plugin này cũng hỗ trợ S3 trực tiếp). |
-| Artifact Registry | Elastic Container Registry (ECR) | Registry lưu image container — dự án này chưa dùng tới (dự kiến cho CI pipeline, xem mục "Chưa bao gồm"). |
+| Artifact Registry | Elastic Container Registry (ECR) | Registry lưu image container — chứa 6 image service mà CI pipeline ở Bước 9 build và push. |
 | Google Managed Prometheus (GMP) | Amazon Managed Service for Prometheus (AMP) | Dịch vụ thu thập metric tương thích Prometheus được quản lý, mặc định bật sẵn trên cluster GKE Standard mới. Các pod `gmp-operator` và `collector` (mỗi node 1 pod) của nó chạy trong `gmp-system`. |
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | Nơi lưu metric và log được quản lý mà `gke-metrics-agent`, `fluentbit-gke` và `event-exporter-gke` ghi vào. Trên EKS, việc đẩy metric node/pod và log container sang CloudWatch phải bật thêm (Container Insights / add-on CloudWatch Observability). |
 | GCP project | AWS account | Ranh giới cô lập tài nguyên, IAM và bật API; phần billing được gom về 1 billing account riêng (dòng kế tiếp). |
@@ -1179,11 +1565,10 @@ là đặc thù của giới hạn Free Trial đó, không phải khác biệt c
 
 ## Chưa bao gồm trong tài liệu này (việc riêng, làm sau)
 
-- CI pipeline (build + push image lên Artifact Registry, Workload Identity Federation để CI xác
-  thực với GCP) — thiếu bước này thì `image.repository:image.tag` không bao giờ trỏ tới image
-  thật.
 - Tự động hoá CD/teardown (bật/tắt `stateful-pool` quanh mỗi lần deploy, tắt Postgres/Kafka có
   thứ tự, không đột ngột).
-- Kiểm tra `k8s/data-layer/*.yaml` bằng kubeconform/CI.
+- Chính sách dọn dẹp Artifact Registry — tag content-hash không bao giờ trùng hay bị ghi đè, nên
+  registry chỉ có tăng lên; không có gì ở đây xoá 1 image cũ khi không còn release nào đang deploy
+  tham chiếu tới nó nữa.
 
 </details>
