@@ -14,10 +14,6 @@
   <packaging>jar</packaging>
   <name>inventory-service</name>
 
-  <properties>
-    <jacoco.line.coverage.minimum>0.70</jacoco.line.coverage.minimum>
-  </properties>
-
   <!--
     spring-boot-dependencies imports testcontainers-bom internally, but Maven doesn't flatten a
     BOM's own nested `import`-scoped entries into whatever imports *it* - only its own directly
