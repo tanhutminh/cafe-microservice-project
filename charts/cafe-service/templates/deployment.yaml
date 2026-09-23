@@ -24,7 +24,7 @@ spec:
         - name: wait-for-db
           # Just a psql client for connectivity checks - version-tolerant, doesn't need to
           # match the actual CNPG-managed server version (see k8s/data-layer/postgres-cluster.yaml,
-          # which doesn't pin an imageName and so tracks the CNPG operator's current default).
+          # which is where that version is pinned, via imageName).
           image: postgres:16-alpine
           command: ["/bin/sh", "-c"]
           args:
@@ -47,7 +47,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Values.appName }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.port }}

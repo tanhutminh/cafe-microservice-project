@@ -14,6 +14,12 @@
   <packaging>jar</packaging>
   <name>auth-service</name>
 
+  <properties>
+    <!-- This module's current LINE coverage floor, below the parent's 70% default. A ratchet:
+         raise it as coverage improves, never lower it. -->
+    <jacoco.line.coverage.minimum>0.33</jacoco.line.coverage.minimum>
+  </properties>
+
   <dependencies>
     <dependency>
       <groupId>com.cafe</groupId>

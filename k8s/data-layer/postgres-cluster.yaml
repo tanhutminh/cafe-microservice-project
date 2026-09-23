@@ -6,10 +6,23 @@ metadata:
   labels: {app.kubernetes.io/managed-by: kubectl}
 spec:
   instances: 1
+  # Pins the Postgres image by its immutable tag (`<version>-<YYYYMMDDHHMM>-<flavor>-<os>`), so
+  # neither a CNPG operator upgrade (unset, CNPG uses the operator's own default) nor a CVE
+  # rebuild of upstream's rolling tag (`18.4-standard-trixie`) can change what runs. The
+  # `standard` flavor is the one upstream recommends together with the Barman Cloud plugin this
+  # cluster uses (see `plugins` below); the older `system` flavor is deprecated. To take a newer
+  # build or minor version, pick a tag from ghcr.io/cloudnative-pg/postgresql and change this.
+  # Changing this value triggers a rolling update, but with `instances: 1` there is nothing to
+  # roll: no replica to upgrade first and no switchover target, so CNPG restarts the single
+  # primary pod in place (`primaryUpdateMethod` defaults to `restart` rather than `switchover`,
+  # and `primaryUpdateStrategy: supervised` is rejected for a one-instance cluster). That is a
+  # short outage for all five service DBs.
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.4-202608130737-standard-trixie
   # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
   # 256Mi/512Mi memory) since this one Postgres instance is the real backbone for all 5 service
   # DBs under actual load, not a single stateless service. CNPG does not derive shared_buffers or
   # other postgresql.conf tuning from this - it only governs the pod's own CPU/memory scheduling.
+  # Changing these values restarts the instance too (same one-instance outage as `imageName`).
   resources:
     requests:
       cpu: 250m
@@ -20,7 +33,7 @@ spec:
   enableSuperuserAccess: false
   storage:
     size: 5Gi
-    storageClass: cafe-postgres-retain   # see postgres-storageclass.yaml — NOT GKE's default "standard" class
+    storageClass: cafe-postgres-retain   # see postgres-storageclass.yaml — NOT one of GKE's built-in (Delete) classes
   affinity:
     tolerations: [{key: "workload", operator: "Equal", value: "stateful", effect: "NoSchedule"}]
     nodeSelector: {cloud.google.com/gke-nodepool: stateful-pool}
@@ -39,8 +52,9 @@ spec:
       annotations: {iam.gke.io/gcp-service-account: "cafe-postgres-backup@cafe-microservices.iam.gserviceaccount.com"}
     # This is a DIFFERENT Workload Identity binding from the 5 app-service ones (each service's
     # own GSA, bound in charts/cafe-service/templates/serviceaccount.yaml) — this one is for the
-    # Postgres pod's own backup-writing access to GCS, scoped to roles/storage.objectAdmin on the
-    # backup bucket only (see postgres-backup.yaml), not GSM secrets.
+    # Postgres pod's own backup-writing access to GCS, scoped to roles/storage.objectAdmin +
+    # roles/storage.legacyBucketReader (Barman also reads bucket metadata, which objectAdmin alone
+    # doesn't cover) on the backup bucket named in postgres-backup.yaml, not GSM secrets.
   plugins:
     - name: barman-cloud.cloudnative-pg.io
       isWALArchiver: true

@@ -10,11 +10,17 @@ import org.springframework.util.backoff.ExponentialBackOff;
 
 /**
  * Dead Letter Queue pattern for {@code inventory.stock-reservation.reply} and {@code
- * inventory.stock-commit.reply}: technical failures only (deserialization errors, a structurally
- * invalid reply per OrderSaga.validate, bugs, DB outages). Mirrors inventory-service's
- * KafkaErrorHandlingConfig exactly. Spring Boot auto-wires this single CommonErrorHandler bean into
- * the auto-configured listener container factory (order-service defines no factory of its own), so
- * no further wiring is needed.
+ * inventory.stock-commit.reply}: a record whose listener invocation throws is retried with the
+ * exponential backoff configured below and then routed to {@code <topic>.dlq} instead of blocking
+ * the consumer as a poison pill; an error Spring Kafka classifies as fatal, such as a
+ * deserialization failure, skips the retries and is routed there on the first attempt. Only
+ * technical failures get that far - a deserialization error, a structurally invalid reply rejected
+ * by the listener's Bean Validation check, a DB outage while the reply is being applied. A business
+ * outcome like "insufficient stock" cannot: inventory-service sends it as an ordinary failure
+ * reply, which the listener answers by compensating the order rather than by throwing.
+ *
+ * <p>Spring Boot auto-wires this single CommonErrorHandler bean into the auto-configured listener
+ * container factory (order-service defines no factory of its own), so no further wiring is needed.
  */
 @Configuration
 public class KafkaErrorHandlingConfig {

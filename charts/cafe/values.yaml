@@ -1,5 +1,6 @@
 global:
   gcpProjectId: cafe-microservices
+  imageRegistry: us-central1-docker.pkg.dev/cafe-microservices/cafe-images
 gateway:
   image: {repository: cafe-gateway}
   port: 8080

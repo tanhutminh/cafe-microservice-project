@@ -26,6 +26,10 @@
     <springdoc.version>2.8.6</springdoc.version>
     <mockwebserver.version>4.12.0</mockwebserver.version>
     <jacoco.version>0.8.12</jacoco.version>
+    <!-- Minimum LINE coverage enforced by `mvn jacoco:check`: the project's 70% target. A module
+         still below it overrides this in its own <properties> with its current floor (a ratchet:
+         raise it as coverage improves, never lower it); modules at or above it inherit it. -->
+    <jacoco.line.coverage.minimum>0.70</jacoco.line.coverage.minimum>
     <spotless.version>2.44.3</spotless.version>
     <maven-surefire-plugin.version>3.5.6</maven-surefire-plugin.version>
     <testcontainers-bom.version>2.0.5</testcontainers-bom.version>
@@ -186,6 +190,20 @@
           <groupId>org.jacoco</groupId>
           <artifactId>jacoco-maven-plugin</artifactId>
           <version>${jacoco.version}</version>
+          <configuration>
+            <rules>
+              <rule>
+                <element>BUNDLE</element>
+                <limits>
+                  <limit>
+                    <counter>LINE</counter>
+                    <value>COVEREDRATIO</value>
+                    <minimum>${jacoco.line.coverage.minimum}</minimum>
+                  </limit>
+                </limits>
+              </rule>
+            </rules>
+          </configuration>
           <executions>
             <execution>
               <id>jacoco-prepare-agent</id>

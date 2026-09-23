@@ -1,0 +1,6 @@
+# Dev-only RSA keypair, deliberately kept public for clone-and-run convenience.
+# The real deployment uses a separate, never-committed key from Secret Manager.
+d65155e0ba9c2f0263e81d1c693d202bb078504b:.env.example:private-key:24
+d65155e0ba9c2f0263e81d1c693d202bb078504b:backend/auth-service/src/main/resources/application-local.yml.example:private-key:14
+2e1b12e342643ff678311fa72afa1a58720873f0:backend/auth-service/src/main/resources/application.yml:private-key:36
+eaee5654368436f8051bf9dd25e30c7b49ef688b:backend/config-server/src/main/resources/config-repo/auth-service.yml:private-key:10

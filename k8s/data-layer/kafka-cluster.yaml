@@ -19,7 +19,7 @@ spec:
       cpu: 1
       memory: 1536Mi
   roles: [controller, broker]
-  # GKE's default `standard` StorageClass (Delete reclaim) is fine here, unlike Postgres's
+  # GKE's built-in `standard` StorageClass (Delete reclaim) is fine here, unlike Postgres's
   # dedicated Retain class (see postgres-storageclass.yaml) - Kafka only carries replayable
   # saga messages, not source-of-truth data, so losing the disk isn't a data-loss event.
   # deleteClaim below is a separate, orthogonal control (Strimzi-level: delete the PVC on
@@ -50,5 +50,10 @@ metadata:
   # starting 0.48) — harmless to include, not required, left in only for clarity.
 spec:
   kafka:
+    # Pinned to 4.3.1 so upgrading the Strimzi operator cannot silently change the Kafka version
+    # (unset, Strimzi uses the operator's own default). metadataVersion is the KRaft metadata
+    # format; keep it at the level matching `version` until deliberately raised after an upgrade.
+    version: 4.3.1
+    metadataVersion: 4.3-IV0
     listeners: [{name: plain, port: 9092, type: internal, tls: false}]   # `type` is the enum value (`internal`); `plain` only names this listener
     config: {offsets.topic.replication.factor: 1, transaction.state.log.replication.factor: 1}
