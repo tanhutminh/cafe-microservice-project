@@ -8,21 +8,14 @@ on:
 
 permissions:
   contents: read
-  id-token: write
   pull-requests: read
 
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      common-lib: ${{ steps.filter.outputs.common-lib }}
-      gateway: ${{ steps.filter.outputs.gateway }}
-      auth-service: ${{ steps.filter.outputs.auth-service }}
-      menu-service: ${{ steps.filter.outputs.menu-service }}
-      order-service: ${{ steps.filter.outputs.order-service }}
-      inventory-service: ${{ steps.filter.outputs.inventory-service }}
-      report-service: ${{ steps.filter.outputs.report-service }}
-      backend-any: ${{ steps.filter.outputs.backend-any }}
+      backend: ${{ steps.filter.outputs.backend }}
+      scripts: ${{ steps.filter.outputs.scripts }}
       charts: ${{ steps.filter.outputs.charts }}
       k8s: ${{ steps.filter.outputs.k8s }}
     steps:
@@ -31,31 +24,16 @@ jobs:
         id: filter
         with:
           filters: |
-            common-lib:
-              - 'backend/common-lib/**'
-              - 'backend/pom.xml'
-            gateway:
-              - 'backend/gateway/**'
-            auth-service:
-              - 'backend/auth-service/**'
-            menu-service:
-              - 'backend/menu-service/**'
-            order-service:
-              - 'backend/order-service/**'
-            inventory-service:
-              - 'backend/inventory-service/**'
-            report-service:
-              - 'backend/report-service/**'
-            backend-any:
+            backend:
               - 'backend/**'
+            scripts:
+              - 'scripts/**'
             charts:
               - 'charts/**'
             k8s:
               - 'k8s/**'
 
-  test:
-    needs: changes
-    if: needs.changes.outputs.backend-any == 'true' || github.event_name == 'workflow_dispatch'
+  gitleaks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,6 +45,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: 'false'
+
+  test:
+    needs: changes
+    if: success() && (needs.changes.outputs.backend == 'true' || needs.changes.outputs.scripts == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
@@ -87,9 +74,15 @@ jobs:
         working-directory: backend
         run: mvn -q -pl common-lib,auth-service,menu-service,order-service,inventory-service jacoco:check
 
+      - name: Lint the image-tag script (shellcheck)
+        run: shellcheck scripts/image-tag.sh scripts/image-tag.test.sh
+
+      - name: Test the image-tag script
+        run: bash scripts/image-tag.test.sh
+
   validate-manifests:
     needs: changes
-    if: needs.changes.outputs.charts == 'true' || needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch'
+    if: success() && (needs.changes.outputs.charts == 'true' || needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -118,6 +111,7 @@ jobs:
             > /dev/null
 
       - name: Install kubeconform
+        if: needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch'
         run: |
           curl -sL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz -o kubeconform.tar.gz
           echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  kubeconform.tar.gz" | sha256sum -c -
@@ -133,52 +127,71 @@ jobs:
             k8s/data-layer/*.yaml
 
   build-and-push:
-    needs: [changes, test]
-    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    needs: [test, gitleaks]
+    if: success() && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     strategy:
+      fail-fast: false
       matrix:
         service: [gateway, auth-service, menu-service, order-service, inventory-service, report-service]
+    env:
+      IMAGE: us-central1-docker.pkg.dev/cafe-microservices/cafe-images/cafe-${{ matrix.service }}
     steps:
-      - name: Decide whether this service needs a rebuild
-        id: decide
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] \
-             || [[ "${{ needs.changes.outputs.common-lib }}" == "true" ]] \
-             || [[ "${{ needs.changes.outputs[matrix.service] }}" == "true" ]]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.decide.outputs.build == 'true'
+
+      - name: Compute the image's content-hash tag
+        id: tag
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          tag="$(bash scripts/image-tag.sh "$SERVICE")"
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
 
       - id: auth
-        if: steps.decide.outputs.build == 'true'
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: projects/271893052132/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
           service_account: github-actions-ci@cafe-microservices.iam.gserviceaccount.com
+          token_format: access_token
+          create_credentials_file: false
 
       - name: Log in to Artifact Registry
-        if: steps.decide.outputs.build == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: us-central1-docker.pkg.dev
           username: oauth2accesstoken
           password: ${{ steps.auth.outputs.access_token }}
 
+      # Any failure here (not only "no such tag") counts as "missing" and falls through to the
+      # build; a real auth or network problem then fails loudly at the push instead.
+      - name: Check whether this content already has an image
+        id: exists
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          if out="$(docker manifest inspect "$IMAGE:$IMAGE_TAG" 2>&1)"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No image found for $IMAGE:$IMAGE_TAG (docker said: $out)"
+          fi
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: steps.decide.outputs.build == 'true'
+        if: steps.exists.outputs.exists == 'false'
 
       - name: Build and push
-        if: steps.decide.outputs.build == 'true'
+        if: steps.exists.outputs.exists == 'false'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: backend
           file: backend/${{ matrix.service }}/Dockerfile
           push: true
-          tags: us-central1-docker.pkg.dev/cafe-microservices/cafe-images/cafe-${{ matrix.service }}:${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.value }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
