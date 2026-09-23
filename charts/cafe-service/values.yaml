@@ -1,8 +1,8 @@
 image:
   repository: cafe-service
-  tag: unset # deliberately invalid default - CI never pushes a "latest" tag (SHA-only), so a
-             # missed `--set image.tag=<SHA>` at deploy time should fail loudly, not silently
-             # try to pull a tag that will never exist
+  tag: unset # deliberately invalid default - CI never pushes a "latest" tag (content-hash tags
+             # only), so a missed `--set image.tag=<content-hash-tag>` at deploy time should fail
+             # loudly, not silently try to pull a tag that will never exist
   pullPolicy: IfNotPresent
 replicas: 1
 port: 8080
