@@ -16,3 +16,8 @@ data:
         bootstrap-servers: {{ .Values.kafka.bootstrapServers }}
       {{- end }}
     {{- end }}
+    management:
+      tracing:
+        export:
+          zipkin:
+            enabled: {{ .Values.global.tracing.export.zipkin.enabled }}

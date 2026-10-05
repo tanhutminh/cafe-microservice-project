@@ -1,0 +1,3 @@
+# Files under this chart that Helm must not package: test suites for the chart's own scripts
+# stay in the repo but out of the chart (and out of .Files).
+*.test.sh
