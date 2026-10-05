@@ -1,6 +1,10 @@
 global:
   gcpProjectId: cafe-microservices
   imageRegistry: us-central1-docker.pkg.dev/cafe-microservices/cafe-images
+  tracing:
+    export:
+      zipkin:
+        enabled: false # no Zipkin collector runs in the cluster yet
 gateway:
   image: {repository: cafe-gateway}
   port: 8080

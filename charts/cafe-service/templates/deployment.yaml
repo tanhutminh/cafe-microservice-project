@@ -5,6 +5,22 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.replicas }}
+  {{- if .Values.db.enabled }}
+  # A pod waiting in wait-for-db makes no rollout progress, so the default 600s deadline would
+  # mark a legitimate first rollout failed. The slowest legitimate path to ready, about 930s:
+  #   - 600s: wait-for-db's window;
+  #   - ~8s: its last attempt past the window (assuming DNS answers promptly);
+  #   - 10s: the default back-off before the initContainer restarts with a fresh window, when the
+  #     database comes up just after the first window ran out (it then connects at once);
+  #   - 300s: up to 30 x 10s of startup probe;
+  #   - 10s: one readiness period.
+  # 1200s leaves about 4.5 minutes for the image pulls and, when the autoscaler has to add a node,
+  # its startup (including the CSI driver pod the secrets-store volume needs before any
+  # initContainer runs). The pod never gives up by itself, so this deadline is what marks a
+  # stalled rollout as failed. Services without a database have no wait-for-db and keep the 600s
+  # default.
+  progressDeadlineSeconds: 1200
+  {{- end }}
   strategy:
     # Recreate for DB-backed services: avoids an old pod (old schema expectations) and a new pod
     # (post-Flyway-migration schema) running side by side during a rollout. Zero-downtime
@@ -28,21 +44,24 @@ spec:
           image: postgres:16-alpine
           command: ["/bin/sh", "-c"]
           args:
+            # The script lives in files/wait-for-db.sh; `required` fails the render if it's missing.
+            # It is inlined whole, comments included, so any edit to that file - even to a
+            # comment - changes the pod template and rolls every DB-backed Deployment.
             - |
-              start=$(date +%s)
-              until psql -h {{ .Values.db.host }} -U "$DB_USERNAME" -d "$DB_NAME" -c 'SELECT 1' >/dev/null 2>&1; do
-                now=$(date +%s)
-                if [ $((now-start)) -ge 600 ]; then echo "timeout waiting for db"; exit 1; fi
-                sleep 3
-              done
+              {{- required "files/wait-for-db.sh is missing from the chart" (.Files.Get "files/wait-for-db.sh") | trimSuffix "\n" | nindent 14 }}
+          # libpq's own variables, which the script's bare `psql` reads.
           env:
+            - {name: PGHOST, value: {{ .Values.db.host | quote }}}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.db.credentialsSecretName }}, key: username}
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ .Values.db.credentialsSecretName }}, key: password}
-            - name: DB_USERNAME
-              valueFrom:
-                secretKeyRef: {name: {{ .Values.db.credentialsSecretName }}, key: username}
-            - {name: DB_NAME, value: {{ .Values.db.name | quote }}}
+            - {name: PGDATABASE, value: {{ .Values.db.name | quote }}}
+            # Caps each psql attempt's connection; without it one attempt against an unreachable
+            # host can hang for minutes, and the loop only checks its 600s window between attempts.
+            - {name: PGCONNECT_TIMEOUT, value: "5"}
           resources: {{ toYaml .Values.initContainer.resources | nindent 12 }}
       {{- end }}
       containers:

@@ -1,8 +1,8 @@
 image:
   repository: cafe-service
   tag: unset # deliberately invalid default - CI never pushes a "latest" tag (content-hash tags
-             # only), so a missed `--set image.tag=<content-hash-tag>` at deploy time should fail
-             # loudly, not silently try to pull a tag that will never exist
+             # only), so a missed `--set-string <alias>.image.tag=<content-hash-tag>` at deploy
+             # time should fail loudly, not silently try to pull a tag that will never exist
   pullPolicy: IfNotPresent
 replicas: 1
 port: 8080
@@ -49,3 +49,11 @@ jwt:
   publicKey:
     enabled: false
     secretName: ""
+
+# Whether spans are exported to Zipkin (Spring's management.tracing.export.zipkin.enabled).
+# Environment-wide, so it is a global the umbrella chart sets; true matches Spring's own default.
+global:
+  tracing:
+    export:
+      zipkin:
+        enabled: true

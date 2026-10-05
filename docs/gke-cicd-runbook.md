@@ -11,17 +11,16 @@ project's Kubernetes deployment: the cluster itself, the CNPG (Postgres) and Str
 operators, Secret Manager-backed secrets via the Secrets Store CSI Driver, and the Helm charts
 that deploy the 6 Spring Boot services.
 
-**Scope**: GKE cluster foundation through a successful `helm install` of `charts/cafe` (Steps
-1-8), plus the CI pipeline that builds and pushes the real container images those pods run
-(Step 9). CD/teardown automation (scaling `stateful-pool` up/down around a deploy) is separate,
-not-yet-implemented work — see "Not covered here" at the end.
+**Scope**: GKE cluster foundation through a successful deploy of `charts/cafe` with
+`scripts/deploy.sh` (Steps 1-8), plus the CI pipeline that builds and pushes the real container
+images those pods run (Step 9). CD/teardown automation (scaling `stateful-pool` up/down around a
+deploy) is separate, not-yet-implemented work — see "Not covered here" at the end.
 
 Links to repo files point at `master` on GitHub.
 
 All `gcloud` commands assume the default project is set (see Prerequisites). The commands below
-are written as plain bash, without a prefix. On some Windows Git Bash setups plain `gcloud` fails
-to start; `cmd //c gcloud ...` is a working alternative there, including for calls that pipe data
-in on stdin (`--data-file=-`, as in Step 4).
+are written as plain bash. On Git Bash for Windows, `gcloud` needs `CLOUDSDK_PYTHON` set first
+(see Prerequisites).
 
 ## Architecture at a glance
 
@@ -51,29 +50,57 @@ in on stdin (`--data-file=-`, as in Step 4).
 ## Prerequisites
 
 - `gcloud`, `kubectl`, `helm`, `cmctl` (cert-manager's CLI, installed per cert-manager's
-  documentation) and `openssl` installed; `gcloud` authenticated.
+  documentation) and `openssl` installed; `gcloud` authenticated. `helm` must be Helm 4.1.1 or
+  newer, the floor `scripts/deploy.sh` enforces: it waits with the `--wait=watcher` status
+  checks, which Helm 3 doesn't have, and earlier Helm 4 releases wait out the full timeout on a
+  failed Deployment instead of reporting it as soon as the rest have settled.
 - `gitleaks` (only needed if you ever move the dev JWT keypair, or another `.gitleaksignore`-listed
   credential, to a different file/line and must regenerate fingerprints — see `.gitleaksignore`
   below; CI itself runs it via `gitleaks/gitleaks-action`, no local install needed for the pipeline).
+- `docker` (only needed to run the pinned shellcheck lint locally, Step 9; CI runs the same image
+  itself).
 - `gke-gcloud-auth-plugin` on your `PATH` (check with `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` and `cmctl` all need it to talk to a GKE cluster. Install it with
   `gcloud components install gke-gcloud-auth-plugin` (standalone SDK / Windows installer) or, with
   a package manager, the `google-cloud-cli-gke-gcloud-auth-plugin` package. `clusters create`
   (Step 1) writes the kubeconfig entry itself; to resume from a new shell or machine, run
   `gcloud container clusters get-credentials cafe-cluster --zone=us-central1-a`.
-- A bash shell (Git Bash on Windows works) — the commands use bash features such as
-  `${var//-/_}` and brace expansion.
+- A bash 4.3+ shell (Git Bash on Windows works; macOS's built-in bash 3.2 doesn't) — the
+  commands use bash features such as `${var//-/_}` and brace expansion, and `scripts/deploy.sh`
+  uses a nameref (`local -n`). The scripts are tested on bash 5.x.
+- On Git Bash for Windows only: `CLOUDSDK_PYTHON` pointing at the Cloud SDK's bundled Python.
+  Git Bash runs the SDK's POSIX `gcloud` launcher, which only looks for a bundled Python under a
+  Unix-only path, then falls back to `python3`/`python` on `PATH`; when those are only the
+  Microsoft Store aliases, `gcloud` fails to start (exit code 49, "Python was not found").
+  `scripts/deploy.sh` runs the same POSIX `gcloud` launcher, so it needs this too, and stops with
+  a hint when `gcloud` can't start. Add the variable to `~/.bashrc`, then open a new Git Bash
+  window (or run `source ~/.bashrc`):
+
+  ```bash
+  echo 'export CLOUDSDK_PYTHON="$LOCALAPPDATA/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe"' >> ~/.bashrc
+  ```
+
+  That is the Cloud SDK's default per-user install path; if yours lives elsewhere,
+  `gcloud.cmd info --format='value(basic.python_location)'` prints the right one.
+- `git` and `sha256sum` on your `PATH` — `scripts/deploy.sh` checks the repo state with git, and
+  `scripts/image-tag.sh` hashes with `sha256sum` (Git Bash ships both; macOS before 15 (Sequoia)
+  lacks `sha256sum`).
 - A GCP project with billing enabled.
 - Run every command from the repo root — paths like `k8s/data-layer/` and `charts/cafe` are
   relative to it.
-- Decide your project ID, cluster name/zone, and Postgres backup bucket name up front. The
-  cluster name and zone appear only as `gcloud`/`kubectl` flags in this guide; the project ID and
-  bucket name are also baked into IAM bindings and repo files: `charts/cafe/values.yaml`'s
-  `global.gcpProjectId` (which renders each `SecretProviderClass`'s `resourceName:` paths and
-  each ServiceAccount's `iam.gke.io/gcp-service-account` annotation),
+- Decide your project ID, cluster name/zone, and Postgres backup bucket name up front. They are also
+  baked into IAM bindings and repo files: `scripts/deploy.sh`'s `gcp_project`, `cluster_zone` and
+  `cluster_name` (the kube-context and `get-credentials` hint it uses); the Artifact Registry path,
+  which `deploy.test.sh` keeps in sync across `scripts/deploy.sh`'s `image_ref`,
+  `charts/cafe/values.yaml`'s `global.imageRegistry` and `.github/workflows/backend-ci.yml`'s
+  `IMAGE`; that workflow's `service_account`, its `workload_identity_provider` (which holds the
+  project number; Step 9's GCP setup prints the full name) and its Docker login `registry:` host
+  (the host part of the Artifact Registry path, which `deploy.test.sh` doesn't check);
+  `charts/cafe/values.yaml`'s `global.gcpProjectId` (which renders each `SecretProviderClass`'s
+  `resourceName:` paths and each ServiceAccount's `iam.gke.io/gcp-service-account` annotation),
   `k8s/data-layer/postgres-cluster.yaml`'s `serviceAccountTemplate` annotation, and
-  `k8s/data-layer/postgres-backup.yaml`'s `destinationPath`. This guide uses the actual values
-  from this repo (`cafe-microservices` / `cafe-cluster` / `us-central1-a` /
+  `k8s/data-layer/postgres-backup.yaml`'s `destinationPath`. This guide uses the actual values from
+  this repo (`cafe-microservices` / `cafe-cluster` / `us-central1-a` /
   `gs://cafe-microservices-cafe-pg-backups`) as examples; substitute your own.
 
 Set the default project and enable the APIs this guide uses (on a fresh project the first
@@ -81,12 +108,12 @@ Set the default project and enable the APIs this guide uses (on a fresh project 
 
 ```bash
 gcloud config set project cafe-microservices
-gcloud services enable container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com
+gcloud services enable compute.googleapis.com container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com
 ```
 
 Step 9 also needs a GitHub repository with Actions enabled and admin access to it (to configure
-branch protection) — no extra CLI tooling beyond `gcloud`, though the GitHub CLI (`gh`) is a
-convenient way to trigger the first manual run.
+branch protection) — no extra CLI tooling beyond `gcloud` (and `docker`, only for the optional
+local lint), though the GitHub CLI (`gh`) is a convenient way to trigger the first manual run.
 
 ---
 
@@ -407,9 +434,19 @@ Templates ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-pro
 - `strategy.type` is `Recreate` for DB-backed services (`RollingUpdate` otherwise) — avoids an
   old pod and a post-Flyway-migration new pod running side by side; an acceptable trade for a
   project that isn't targeting zero-downtime deploys.
-- A `wait-for-db` initContainer (DB-backed services only) retries a `psql` connection for up to
-  600s using `date +%s` — **not** `$SECONDS`, which BusyBox `ash` (the `postgres:16-alpine`
-  image's shell) silently expands to empty, turning the timeout check into dead code.
+- A `wait-for-db` initContainer (DB-backed services only) runs
+  [wait-for-db.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/files/wait-for-db.sh),
+  which the template inlines with `.Files.Get` (the render fails if the file is missing). It
+  retries a `psql` connection for up to 600s, reading host, user, database and password from
+  libpq's own `PGHOST`/`PGUSER`/`PGDATABASE`/`PGPASSWORD`, with `PGCONNECT_TIMEOUT` capping
+  each attempt's connection at 5s, and times the window with `date +%s` — **not** `$SECONDS`,
+  which BusyBox `ash` (the `postgres:16-alpine` image's shell) silently expands to empty, turning
+  the timeout check into dead code. It logs psql's error the first time and whenever it changes,
+  and the last one when it times out: `kubectl logs <pod> -n cafe -c wait-for-db`. Its test
+  suite, `wait-for-db.test.sh`, sits next to it; the chart's `.helmignore` keeps `*.test.sh` out
+  of the packaged chart.
+- `progressDeadlineSeconds: 1200` on the DB-backed Deployments, so a pod waiting in `wait-for-db`
+  doesn't fail a legitimate first rollout (see Step 8 for the arithmetic).
 - `startupProbe` (30 × 10s budget) gates when `readinessProbe`/`livenessProbe` even start being
   checked — more robust than a fixed `initialDelaySeconds` guess under JVM + Flyway boot time on
   a Spot node.
@@ -432,8 +469,17 @@ chart). [values.yaml](https://github.com/tanhutminh/cafe-microservice-project/bl
 prefixed onto `image.repository` when rendering each Deployment) once, plus one block per alias
 with that service's real port/db/kafka/jwt values and its own `image.repository`.
 
+- `global.tracing.export.zipkin.enabled` (`false`) — rendered into every service's ConfigMap as
+  Spring's `management.tracing.export.zipkin.enabled`. Only the Zipkin exporter is off:
+  sampling, trace-context propagation and trace IDs in logs are unaffected. Not the global
+  `management.tracing.export.enabled`, which would also turn off propagation and log
+  correlation. The reusable `cafe-service` chart defaults it to `true`, Spring's own default.
+
 ```bash
-helm dependency update charts/cafe
+# `build`, not `update`: packages the file:// subchart against the committed Chart.lock without
+# rewriting it, and fails if Chart.yaml's dependencies no longer match that lock;
+# --skip-refresh: a file:// dependency needs none of the Helm repositories added above
+helm dependency build --skip-refresh charts/cafe
 # render and lint locally before touching the real cluster (rendering is the real check);
 # lint should report 0 failed - an "icon is recommended" INFO and a "templates/ directory does
 # not exist" warning are normal for this umbrella chart
@@ -445,43 +491,98 @@ helm template charts/cafe > /dev/null
 
 ## Step 8 — Deploy for real
 
+This step needs images to deploy: do Step 9's GCP setup and let one CI run build them first.
+
 Each service's image tag is a content hash of its own source, `common-lib` and the parent pom
 (see Step 9), so — unlike a single shared release tag — one `$TAG` does not fit all six.
-Compute each one and confirm the image actually exists in Artifact Registry before deploying;
-setting a tag with no matching image just produces a silent `ImagePullBackOff` later:
+[scripts/deploy.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/deploy.sh)
+deploys the images for the checked-out commit. Before any `helm upgrade` it aborts if:
+
+- bash is older than 4.3, or `gcloud`, `helm`, `kubectl`, `gke-gcloud-auth-plugin`, `git` or
+  `sha256sum` isn't on `PATH` (it names every missing one).
+- `backend/`, `charts/` or `scripts/image-tag.sh` has uncommitted changes (whatever
+  `status.showUntrackedFiles` says), files git status is told to skip (assume-unchanged or
+  skip-worktree, listed with git's own `h`/`s`/`S` tag; a sparse checkout sets `S` too), or
+  `charts/` holds git-ignored files (listed with a `!! ` prefix). A deploy must correspond to one
+  commit: the images come from committed `backend/` code, so local backend edits would silently
+  not be deployed, while the chart and `image-tag.sh` are used as-is from the working tree, so
+  edits to them would be deployed without being recorded in any commit. Helm packages every file
+  in a chart directory not excluded by its `.helmignore`, git-ignored or not;
+  `charts/cafe/charts/*.tgz` is exempt from every one of these checks, since the deploy
+  regenerates it. `scripts/deploy.sh` itself is exempt too, so edits to the script can be tried
+  before committing; release content belongs in the chart, not in the script's `helm` flags.
+- the `HEAD` commit can't be read, or isn't on `master`: neither the commit `origin/master` points
+  at, as last fetched, nor one of its ancestors. `HEAD` is read once, so this check, every image tag
+  and the release's description all name the same commit. CI builds images only from `master`, and
+  the chart is deployed from the working tree, which the check above requires to match `HEAD`, so a
+  branch commit would put chart changes no merge has recorded on the cluster. Merge it through a PR
+  and deploy from `master`, or run `git fetch` if it already is; a missing `origin/master` ref fails
+  the check too. Uncommitted edits to `scripts/deploy.sh` can still be tried from `master`, since
+  the check above exempts it. These repo-state checks come before the environment ones below, and
+  inherited git variables (`GIT_DIR` and the like) are cleared first, so they always read this
+  checkout.
+- the `helm` on `PATH` is older than 4.1.1 (see Prerequisites), or can't report its version.
+- the `gcloud` on `PATH` fails to start (on Git Bash for Windows, set `CLOUDSDK_PYTHON` — see
+  Prerequisites).
+- the `gke_cafe-microservices_us-central1-a_cafe-cluster` kube-context doesn't exist (run the
+  `get-credentials` command from Prerequisites). Every call that talks to the cluster names that
+  context explicitly, so a deploy never lands on whatever cluster the current context points at.
+- a service's tag can't be computed at `HEAD` (for example, its `backend/<service>` directory
+  isn't in the commit).
+- any service's image is missing or not accessible in Artifact Registry (it names that image). A
+  tag with no matching image would otherwise just produce a silent `ImagePullBackOff` later. If
+  gcloud's own error above the message isn't a not-found error (authentication, permission or
+  network), fix that first. Otherwise: tags are computed from `HEAD`'s committed `backend/`
+  content, and CI builds images only from `master` (Step 9). So either `HEAD` is a `master`
+  commit no CI run built (e.g. one inside a merged branch) — deploy a commit CI built, such as
+  `master`'s tip or a merge commit — or `master`'s `backend-ci` run for it is still running or
+  failed (wait, or fix it); if `master` has that content but no run built it, a
+  `workflow_dispatch` run of `backend-ci` on `master` builds it. The check runs with your own
+  gcloud credentials; the cluster's nodes pull with their own service account, granted
+  `roles/artifactregistry.reader` in Step 9's GCP setup.
+
+Otherwise it runs `helm dependency build --skip-refresh` (so the packaged `cafe-service` subchart
+always matches `charts/cafe-service`), then `helm upgrade --install` with
+`-n cafe --wait=watcher --timeout 22m`, recording the checked-out commit as the release's
+description (`helm history` shows it for every deployed revision; a failed revision shows Helm's
+failure message instead, and a rollback revision reads "Rollback to N"), and lists the pods and
+Secrets in the `cafe` namespace:
 
 ```bash
-services=(gateway auth-service menu-service order-service inventory-service report-service)
-set_args=()
-for svc in "${services[@]}"; do
-  tag=$(bash scripts/image-tag.sh "$svc")
-  image="us-central1-docker.pkg.dev/cafe-microservices/cafe-images/cafe-${svc}:${tag}"
-  if ! gcloud artifacts docker images describe "$image" > /dev/null 2>&1; then
-    echo "MISSING: $image - run backend-ci via workflow_dispatch on master first (Step 9)" >&2
-    exit 1
-  fi
-  set_args+=(--set-string "${svc}.image.tag=${tag}")
-done
-
-helm upgrade --install cafe charts/cafe -n cafe "${set_args[@]}"
-
-kubectl get pods -n cafe
-kubectl get secret -n cafe
+git checkout master && git pull
+bash scripts/deploy.sh
 ```
 
-If every image exists, expect all 6 app pods to reach `Running` — the DB-backed ones pass through
-`Init:0/1` while their `wait-for-db` initContainer waits (Step 6/7) — not `ImagePullBackOff`;
-that now means something is actually wrong (see Troubleshooting item 7 below), not an expected
-gap. The `{service}-db-credentials` and `*-jwt-key` Secrets should appear, and `cafe-postgres-1`
-and the Kafka pod should be `Running` too.
+The script only returns once all 6 app Deployments are ready — the DB-backed pods pass through
+`Init:0/1` while their `wait-for-db` initContainer waits (Step 6/7) — or fails, listing the pods
+so you can see which one is stuck (see Troubleshooting below). The chart sets each DB-backed
+Deployment's `progressDeadlineSeconds` to 1200 (the gateway, with no `wait-for-db`, keeps the
+600s default): a pod waiting in `wait-for-db` makes no rollout progress, and the slowest
+legitimate first rollout takes about 930s (a 600s `wait-for-db` window plus up to 8s for its last
+attempt, a 10s restart back-off if the database comes up just after that window, up to 300s of
+startup probe and a 10s readiness period), plus the image pulls and, when the autoscaler has to
+add a `stateless-pool` node, that node's startup including its CSI driver pod — 1200s leaves
+about 4.5 minutes for those. With Helm 4.1.1 or newer, `--wait=watcher` marks a Deployment past
+its deadline as Failed ("Progress deadline exceeded") and returns that error once every other
+resource has settled; the 22-minute timeout sits 2 minutes above the deadline, so the deadline,
+not a bare timeout, ends a stalled rollout. After a successful run, the
+`{service}-db-credentials` and `*-jwt-key` Secrets should appear, and `cafe-postgres-1` and the
+Kafka pod should be `Running` too.
 
-`-n cafe` is mandatory — nothing in the chart hardcodes a namespace (every template uses
-`{{ .Release.Namespace }}`), so omitting it silently deploys everything, including each
-Deployment's own ServiceAccount, into `default` instead.
+While it waits the script prints nothing: a pod stuck in, say, `ImagePullBackOff` counts as still
+in progress until its Deployment's deadline (600s for the gateway, 1200s for the DB-backed
+services), never beyond the 22-minute timeout. Watch it from another shell with
+`kubectl get pods -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -w`.
 
-### Troubleshooting a first real deploy
+`scripts/deploy.sh` always passes `-n cafe` to its `helm upgrade --install` call — necessary because
+nothing in the chart itself sets a namespace (every template uses `{{ .Release.Namespace }}`), so a
+bare `helm upgrade --install cafe charts/cafe` without `-n cafe` would silently deploy everything,
+including each Deployment's own ServiceAccount, into `default` instead.
 
-Symptoms you may hit on a first real deploy, with their root causes:
+### Troubleshooting deploys
+
+Symptoms you may hit when deploying — most of them on the first real deploy — with their root
+causes:
 
 1. **CSI mount fails with `driver name secrets-store.csi.k8s.io not found`** on a very new node
    — usually just the CSI DaemonSet not finished starting on that node yet. Check node age
@@ -506,20 +607,81 @@ Symptoms you may hit on a first real deploy, with their root causes:
    Step 8: the `{service}-db-credentials` Secrets only exist once service pods mount the CSI
    volume (see Step 6). It resolves by itself once the pods run.
 7. **An application pod sits in `ImagePullBackOff`** — Step 8's guard should have caught a
-   missing image before this, so first confirm the exact `image:` the pod is trying to pull
-   (`kubectl describe pod <pod> -n cafe`) matches what `gcloud artifacts docker images describe`
-   reports for that same tag. A mismatch usually means `scripts/image-tag.sh` was run against a
-   different commit than the one Step 9 last built from (e.g. an uncommitted local change) —
-   commit first, or push and let Step 9 build for the commit actually being deployed.
+   missing image before this. `kubectl describe pod <pod> -n cafe` shows the `image:` the pod is
+   trying to pull and, in its events, why the pull failed:
+   - **not found** — the reference doesn't match what `gcloud artifacts docker images describe`
+     reports for that tag. `deploy.sh` refuses to run with uncommitted changes under `backend/`,
+     `charts/` or `scripts/image-tag.sh`, so a mismatch usually means the image was deployed some
+     other way (e.g. a manual `helm upgrade` with a hand-computed tag) — redeploy through
+     `deploy.sh`, whose check confirms each image exists first.
+   - **403 / denied** — the image exists (Step 8's check, which uses your own credentials,
+     passed), but the nodes can't read it: check the nodes' service account has
+     `roles/artifactregistry.reader` on the repository (Step 9's GCP setup), and that the node
+     pools' access scopes include `devstorage.read_only` or `cloud-platform`.
+8. **A rerun fails with `another operation (install/upgrade/rollback) is in progress`** — Helm
+   refuses because the release's last revision is still `pending-*`. Either another deploy or
+   rollback on this release is still running, or an earlier one was cut off before Helm could
+   record the outcome (terminal or SSH session closed, process killed, cluster connection lost
+   for good, or the cluster unreachable just when Helm tried to record it). A Ctrl+C during
+   `deploy.sh`'s `helm upgrade --install` is normally handled: Helm records the revision
+   `failed`; if it still shows `pending-upgrade`, Helm didn't get the signal — treat it as cut
+   off (below). Check the release's history with
+   `helm history cafe -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster`.
+   A live operation can't stay pending much past its 22-minute timeout, so if the pending
+   revision's UPDATED time is within that plus a few minutes (about 25 minutes), another deploy
+   may still be running — wait and check again. Once it's older, the operation was cut off:
+   - **`pending-upgrade`** — roll back to the last `deployed` revision (if none is `deployed`,
+     uninstall as for `pending-install`):
+     `helm rollback cafe <revision> -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster --wait=watcher --timeout 22m`,
+     then rerun.
+   - **`pending-rollback`** (`helm rollback` doesn't handle Ctrl+C, so an interrupted one stays
+     pending) — rerun that rollback, to the revision its "Rollback to N" description names, with
+     the same command. Not to the last `deployed` revision: that may be the bad one it was
+     rolling away from.
+   - **`pending-install`** (the very first install never finished) — remove it:
+     `helm uninstall cafe -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster`,
+     then rerun. Postgres and Kafka live outside the release (Step 6) and are untouched; the
+     synced Secrets come back once the pods mount the CSI volume again.
+   - **`deployed` or `failed`** — the other operation has finished since; just rerun `deploy.sh`.
+9. **The new revision itself is bad** (the upgrade failed, or it succeeded but the services
+   misbehave) — the usual fix is to commit a fix and redeploy. To get back to a working state
+   first, prefer checking out the last good `master` commit (`helm history`'s description names
+   the commit of each deployed revision; for a "Rollback to N" revision, read revision N's
+   description, repeating if N is itself a rollback) and rerunning `deploy.sh`: its images already
+   exist. Otherwise roll back to an explicit revision — after a failed upgrade, the one still
+   `deployed`; after a successful but bad one, the most recent `superseded` — with
+   `helm rollback cafe <revision> -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster --wait=watcher --timeout 22m`
+   (a bare `helm rollback` targets the previous revision even if it failed; if the very first
+   install never succeeded there is nothing to roll back to). Either way only images and
+   manifests go back, not the database schema: Flyway's default `*:future` ignore lets the older
+   image start past migrations it doesn't know, but Hibernate's `ddl-auto: validate` fails its
+   startup if a column or table it maps was dropped, renamed or retyped, and a new `NOT NULL`
+   column without a default breaks its inserts at runtime. Kafka events the newer version already
+   published may also fail to deserialize in the older consumers and land in the DLQ. Nothing
+   replays records in `<topic>.dlq`; they stay for diagnosis. Orders stuck waiting on a reserve
+   or commit reply are re-sent their command by order-service's saga reconciliation job and,
+   after its retry limit, put back to OPEN or CONFIRMED. A dead-lettered release-stock command is
+   not retried, so that stock stays reserved until corrected by hand. If it was the reply that
+   was dead-lettered, inventory-service already applied the command: the order goes back to OPEN
+   or CONFIRMED while the stock stays reserved or deducted — correct it by hand too. Item 8
+   covers a release left `pending-*`.
+10. **A DB-backed pod stays in `Init:0/1`** — its `wait-for-db` initContainer can't connect to the
+    database yet. Read why with `kubectl logs <pod> -n cafe -c wait-for-db`: it logs psql's error
+    whenever it changes (a connection timeout or refused connection means Postgres isn't up or
+    reachable; on the first deploy an authentication error is expected for a while, until CNPG
+    creates the role from the newly synced Secret — see item 6). After 600s it exits with the last
+    error and restarts with a fresh window; the Deployment's 1200s `progressDeadlineSeconds` then
+    fails the rollout if it never gets through.
 
 ---
 
 ## Step 9 — CI pipeline
 
-Builds and pushes each service's image to Artifact Registry on every push to `master` that
-touches `backend/**` or `scripts/**` (or via a manual `workflow_dispatch`), gated by the same
-lint/test/coverage checks a pull request runs. Everything below is already implemented
-in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
+Builds and pushes each service's image to Artifact Registry on every push to `master` on which
+the `test` job runs (see "What the workflow does" below), or via a manual `workflow_dispatch` on
+`master` — only after that same run's lint/test/coverage checks and secret scan pass.
+Everything below is already implemented in
+[backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
 and [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
 — this section documents the GCP-side setup those files assume, and how the pieces fit together.
 
@@ -534,10 +696,18 @@ WIF_POOL=github-actions-pool
 WIF_PROVIDER=github-actions-provider
 GH_REPO=tanhutminh/cafe-microservice-project
 
-# The registry the workflow pushes to
+# The registry the workflow pushes to. --immutable-tags: a pushed content-hash tag can never be
+# moved to a different image, so what deploy.sh checked is what the nodes pull. It also means a
+# tagged image can't be deleted or untagged - turn immutability off first if you ever must.
 gcloud artifacts repositories create "$AR_REPO" \
   --repository-format=docker --location="$REGION" --project="$PROJECT_ID" \
-  --description="Backend service images"
+  --description="Backend service images" --immutable-tags
+
+# A repository created before without the flag: turn it on, then confirm (prints True)
+gcloud artifacts repositories update "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" --immutable-tags
+gcloud artifacts repositories describe "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" --format='value(dockerConfig.immutableTags)'
 
 # Nodes need to pull from it. A node pool with no --service-account set at creation uses the
 # Compute Engine default SA - `gcloud container node-pools describe ... --format="value(config.serviceAccount)"`
@@ -560,7 +730,8 @@ gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
 # Workload Identity Federation for GitHub Actions - a separate trust setup from the per-pod one
 # in Step 2 (that one lets a K8s pod act as a GSA; this one lets a GitHub Actions run act as one,
 # with no per-pod-equivalent component). The attribute-condition restricts it to this exact repo
-# AND to pushes on master, not just anyone who learns the provider's resource name.
+# AND to runs whose ref is master (here, a push or a workflow_dispatch on master; a pull_request
+# run's ref is refs/pull/<n>/merge), not just anyone who learns the provider's resource name.
 gcloud iam workload-identity-pools create "$WIF_POOL" \
   --project="$PROJECT_ID" --location=global --display-name="GitHub Actions"
 gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
@@ -588,32 +759,104 @@ to store or leak in the first place.
 
 Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
 
-- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) decides whether
-  `backend/**`, `scripts/**`, `charts/**`, or `k8s/**` changed (as four separate outputs), so the
-  other jobs can skip when they're not relevant. Deliberately has **no path filter on the
-  workflow's own trigger** (`on.push`/`on.pull_request`) — that would make the whole workflow, not
-  just a job, never run for an unrelated PR (e.g. frontend-only), and once `test`/
-  `validate-manifests` are required status checks (see Branch protection below), a PR with no
-  check run for them is blocked from merging forever, not just correctly skipped.
-- **`gitleaks`** — secret scan (see `.gitleaksignore` below). Runs unconditionally on every push
-  and PR, with no path filter — a secret can land in any file type (a pasted credential in a doc,
-  a stray key in a YAML manifest), not just backend Java source, so it isn't gated behind
-  `changes` the way `test`/`validate-manifests` are.
-- **`test`** — only runs when `backend/**` or `scripts/**` changed (or on `workflow_dispatch`):
-  `spotless:check` (format, meaningful only on a `pull_request` run — see the paragraph after this
-  list), the full `mvn test` reactor, `mvn jacoco:check` against the five modules that opt into a
-  coverage floor (each module's own `pom.xml` sets `jacoco.line.coverage.minimum` — a
-  no-regression ratchet: it matches that module's own current coverage, or the parent's 70%
-  default for a module already at or above it, and only ever moves up as coverage improves), then
-  `shellcheck` against `scripts/image-tag.sh`/`scripts/image-tag.test.sh` and a run of that test
-  script itself.
-- **`validate-manifests`** — guards against a CNPG/Strimzi/Barman resource ever being added under
-  `charts/*/templates/` (that data layer stays outside any Helm release, see "Architecture at a
-  glance"), then `helm lint`/`helm template` (which run whenever `charts/**` or `k8s/**` changed,
-  or on `workflow_dispatch`), then — only when `k8s/**` itself changed, or on `workflow_dispatch`
-  — `kubeconform` against `k8s/data-layer/*.yaml` using the community
-  [CRDs-catalog](https://github.com/datreeio/CRDs-catalog)
-  for the CNPG/Strimzi/Barman schemas `kubeconform`'s own bundled set doesn't include.
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) computes five
+  separate outputs, so the other jobs can skip when they're not relevant (this is the one place
+  that lists the paths; the bullets below refer to the outputs by name):
+  - `backend` — `backend/**`;
+  - `scripts` — `scripts/**` or the root `.gitignore`, whose patterns `deploy.sh`'s repo-state
+    check and `deploy.test.sh`'s cases rely on;
+  - `charts` — `charts/**`;
+  - `k8s` — `k8s/**`;
+  - `workflow` — the workflow file itself. Every job and step gated on the other outputs also
+    runs when it is true, so a PR editing any step exercises that step before merging (and
+    `deploy.test.sh`, which reads the workflow file, reruns).
+
+  On a PR the filter compares against the base branch; on a push to `master`, against the branch
+  tip before that push (so a multi-commit push is judged as a whole). Deliberately has **no path
+  filter on the workflow's own trigger** (`on.push`/`on.pull_request`) — that would make the
+  whole workflow, not just a job, never run for an unrelated PR (e.g. frontend-only), and once
+  `changes`/`gitleaks`/`test`/`validate-manifests` are required status checks (see Branch
+  protection below), a PR with no check run for them is blocked from merging forever, not just
+  correctly skipped.
+- **`gitleaks`** — secret scan (see `.gitleaksignore` below). Runs unconditionally on every run of
+  the workflow (push to `master`, PR or `workflow_dispatch`), with no path filter — a secret can
+  land in any file type (a pasted credential in a doc, a stray key in a YAML manifest), not just
+  backend Java source, so it isn't gated behind `changes` the way `test`/`validate-manifests`
+  are.
+- **`test`** — only runs when the `backend`, `scripts`, `charts`, `k8s` or `workflow` output is true
+  (or on `workflow_dispatch`); `charts` and `k8s` because `deploy.test.sh` checks `deploy.sh`
+  against files under `charts/` and `k8s/data-layer/`, and `charts` also because this job lints and
+  tests the chart's own `wait-for-db` initContainer script. It runs two independent groups of
+  checks; each runs even when the other failed, so one failure never hides the other's result:
+  - the script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`,
+    then the three test suites, `scripts/image-tag.test.sh`,
+    `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`. shellcheck runs
+    from an image pinned by digest; the same command lints locally:
+
+    ```bash
+    docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d -x scripts/*.sh charts/*/files/*.sh
+    ```
+
+    (on Git Bash, prefix it with `MSYS_NO_PATHCONV=1`). `wait-for-db.test.sh` runs the real
+    `wait-for-db.sh` under `sh` with fake `psql`, `date` and `sleep` executables: what it logs
+    and when, the 600s boundary, that `psql` gets no connection flags and that the clock is only
+    read as `date +%s`. Each run of the script is capped at 10s by `timeout`, so a loop that never
+    ends fails its case instead of hanging CI. It also checks that the Deployment template gives
+    the initContainer `PGHOST`, `PGUSER`, `PGPASSWORD` and `PGDATABASE` (the user and password
+    from the credentials Secret's `username`/`password` keys, the host and database from the
+    chart's `db.host`/`db.name`) and a positive `PGCONNECT_TIMEOUT`.
+    `deploy.test.sh` unit-tests `deploy.sh`'s functions (image-reference and `--set-string`
+    assembly, tags computed at the git ref it is given, the bash-version, tool, Helm-version and
+    gcloud-startup checks, and that `main` runs every check in the documented order, before building
+    the chart), then runs the whole script in a throwaway git repo with fake `kubectl`, `helm`,
+    `gcloud` and `gke-gcloud-auth-plugin` executables that record every call, argument by argument.
+    Git there is isolated from your own git config and environment, and guarded so it can only act
+    on that throwaway repo. Each guard (uncommitted, git-hidden or git-ignored files, an unreadable
+    `HEAD` commit, `HEAD` not on `origin/master`, Helm version, a `gcloud` that fails to start,
+    kube-context, a tag that can't be computed, missing image) must abort before any later call; a
+    fully successful run must make exactly the expected calls in order, with nothing on stderr and
+    nothing on stdout but the chart build's, the upgrade's and the pod and Secret listings' output;
+    and a failed upgrade must still point to the runbook. The real tools are never invoked (see Step
+    8 for what `deploy.sh` does). `deploy.test.sh` also fails if the registry path or the list of 6
+    services drifts between `deploy.sh`, `charts/cafe` and this workflow, all of which repeat them;
+    if `k8s/data-layer/` names no namespace, or any other than the one `deploy.sh` deploys into
+    (`cafe`); if the chart's DB-backed `progressDeadlineSeconds` no longer covers `wait-for-db`'s
+    window (read from `wait-for-db.sh`, which the template must inline exactly once) plus the
+    startup probe plus 2 minutes; or if `deploy.sh`'s Helm timeout doesn't exceed the largest
+    deadline in effect (counting the gateway's 600s default) by at least 2 minutes.
+  - the Maven checks, when the `backend` or `workflow` output is true, on every push to
+    `master` on which `test` runs, or on `workflow_dispatch`, each needing the previous one to
+    pass: `spotless:check` (format, meaningful only on a `pull_request` run — see the Spotless
+    note below), the full `mvn test` reactor, and `mvn jacoco:check` against the five
+    modules that opt into a coverage floor (each module's own `pom.xml` sets
+    `jacoco.line.coverage.minimum` — a no-regression ratchet: it matches that module's own
+    current coverage, or the parent's 70% default for a module already at or above it, and only
+    ever moves up as coverage improves).
+
+  A PR that changes neither backend code nor the workflow file therefore skips the roughly
+  two-minute Maven run, while `test` stays a single required check either way. On `master` the Maven
+  checks run whenever `test` does, because that is where `build-and-push` runs: every image it
+  pushes comes from a run that tested the backend tree it was built from, even when the push itself
+  only touched scripts, chart files, manifests under `k8s/` or the root `.gitignore` (which holds
+  ignore patterns for the whole repo, so an edit made for another part of it, e.g. the frontend,
+  costs that Maven run too; `build-and-push` then finds every image already present).
+- **`validate-manifests`** — guards against a CNPG/Strimzi/Barman resource or a StorageClass ever
+  being added under `charts/*/templates/` (that data layer stays outside any Helm release, see
+  "Architecture at a glance"), then `helm dependency build --skip-refresh` (`build` rather than
+  `update`, so an out-of-sync `Chart.lock` fails the check instead of being silently regenerated in
+  the runner), a check that no test suite (`*.test.sh`) leaked into the packaged `cafe-service`
+  subchart (its `.helmignore` keeps them out), and `helm lint`/`helm template` (one render per
+  service, each checking that the service's ConfigMap turns Zipkin span export off), with Helm
+  pinned to v4.3.0 for reproducible results (these run whenever the `charts`, `k8s` or `workflow`
+  output is true, or on `workflow_dispatch`), then — only when the `k8s` or `workflow` output is
+  true, or on `workflow_dispatch` — `kubeconform` against `k8s/data-layer/*.yaml`. kubeconform
+  bundles no schemas; it fetches the built-in kinds' from
+  [yannh/kubernetes-json-schema](https://github.com/yannh/kubernetes-json-schema) and the
+  CNPG/Strimzi/Barman ones from the community
+  [CRDs-catalog](https://github.com/datreeio/CRDs-catalog), both pinned to a commit. Nothing updates
+  those pins automatically: refresh them with `git ls-remote <repo> HEAD`, and always refresh the
+  CRDs-catalog one when the CNPG, Strimzi or barman-cloud version in `k8s/` changes, or the
+  manifests are checked against old CRD schemas.
 - **`build-and-push`** — needs both `test` and `gitleaks` to succeed, and only runs on a push (or
   manual `workflow_dispatch`) to `master`, never on a PR. For each of the 6 services: compute its
   tag with `scripts/image-tag.sh <service>` (a content hash of that service's own directory,
@@ -622,10 +865,25 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   force every service's tag to change when nothing in those hashed inputs did, e.g. after a
   base-image security update), check whether Artifact Registry already has an image at that tag
   (`docker manifest inspect`), and only build+push if not. This makes the job idempotent: a
-  `workflow_dispatch` run (or the next ordinary push) always ends with every service's current
-  content actually present in the registry, regardless of what did or didn't get rebuilt on any
-  prior run — including a commit whose `test` job failed, which a plain "did this commit touch
-  this service" check would otherwise permanently miss.
+  `workflow_dispatch` run on `master`, or any later push to `master` on which `test` runs, builds
+  whatever is missing once that run's own Maven checks pass, regardless of what did or didn't get
+  rebuilt on any prior run — including content left unbuilt because an earlier run's `test` job
+  failed, which a plain "did this commit touch this service" check would otherwise permanently
+  miss. A push on which `test` doesn't run (say, docs only) builds nothing, so after a failed
+  run, trigger `workflow_dispatch` on `master` if the images are needed before the next backend
+  change. The repository's immutable tags (GCP setup above) refuse any push that would move an
+  existing tag, so if `docker manifest inspect` fails transiently for an image that does exist,
+  the rebuilt image (with a different digest) is refused and the job fails — rerun the failed
+  job. Two runs of this job never work on the same service at once (a per-service
+  `concurrency` group), so two `master` runs close together don't both rebuild an unchanged
+  service and have the second push refused. With `queue: max`, runs of this job for one service
+  wait in the group rather than replacing each other, so whichever runs second checks only after
+  the first has finished, and skips the build if the first pushed the image.
+
+Every job sets `timeout-minutes` (5 to 20 minutes, against GitHub's 360-minute default), so a hung
+image pull or push fails the check instead of holding a required status pending for hours; the
+script steps in `test` have their own limit too: 2 minutes, or 5 for `deploy.test.sh`, which
+runs `deploy.sh` end to end dozens of times.
 
 **Why `test`'s Spotless check only means something on a `pull_request` run**: the project's
 `ratchetFrom: origin/master` setting only checks files that differ from `origin/master` — on a
@@ -648,10 +906,12 @@ GitHub Settings → Branches → add a rule for `master`:
 
 - **Require a pull request before merging** — see the Spotless note above for why this matters,
   not just as general good practice.
-- **Require status checks to pass before merging** → add `gitleaks`, `test` and
+- **Require status checks to pass before merging** → add `changes`, `gitleaks`, `test` and
   `validate-manifests` (they only appear once each has run at least once — merge the PR that adds
-  this workflow first, or trigger one `workflow_dispatch` run, before configuring this). **Do
-  not** add `build-and-push` — it never runs on a PR at all, so a PR would show it as
+  this workflow first, or trigger one `workflow_dispatch` run, before configuring this).
+  `changes` is required too because `test` and `validate-manifests` need it: if it fails, both
+  are skipped, and GitHub reports a skipped job as a success that satisfies a required check.
+  **Do not** add `build-and-push` — it never runs on a PR at all, so a PR would show it as
   "Expected — Waiting for status to be reported" forever, with no way to satisfy it.
 - **Do not allow bypassing the above settings** — without this, anyone with admin access
   (including the repository owner) can still push straight to `master`, which is exactly the
@@ -679,7 +939,7 @@ gcloud artifacts docker images list \
 
 From here on, an ordinary push to `master` that touches `backend/**` only rebuilds the services
 whose content actually changed (or all 6, if `common-lib`/the parent `pom.xml` changed) — see
-Step 8 for computing each service's current tag and deploying it.
+Step 8 to deploy it (`scripts/deploy.sh`).
 
 ---
 
@@ -739,7 +999,8 @@ the Notes column for where the mapping breaks down.
 | Zonal cluster | — (EKS has no zonal/regional tier) | EKS's control plane is always multi-AZ within a region, and billed at ~$0.10/hr (~2,625₫/hr) for a standard-support Kubernetes version, with no free-tier waiver — unlike GKE, which waives this fee for one zonal cluster per billing account (a real cost-design factor, see "Architecture at a glance"). |
 | Node pool | Managed node group | A set of worker nodes sharing one config (machine/instance type, disk, taints). |
 | Node autoscaling (`--enable-autoscaling`, min 0) | Cluster Autoscaler / Karpenter | Adds or removes nodes based on pending pods. GKE's autoscaler is built in and configured per node pool; on EKS you typically install Cluster Autoscaler or Karpenter yourself. |
-| GCP machine type (`e2-medium`) | AWS EC2 instance type (e.g. `t3.medium`) | Different per-cloud naming/sizing scheme; `t3.medium` matches `e2-medium`'s shape closely — both 2 vCPU/4GB, both burstable/cost-optimized. |
+| Compute Engine (GKE nodes are Compute Engine VMs) | Amazon EC2 | GCP's VM service. Every GKE Standard node is a Compute Engine VM, so the node-level rows below (machine type, Spot VM, the default service account, the metadata server — covered in the `--workload-metadata` row — and access scopes) are Compute Engine concepts, as their EKS counterparts are EC2 ones. Its API (`compute.googleapis.com`) is enabled alongside GKE's (see Prerequisites). |
+| Compute Engine machine type (`e2-medium`) | AWS EC2 instance type (e.g. `t3.medium`) | Different per-cloud naming/sizing scheme; `t3.medium` matches `e2-medium`'s shape closely — both 2 vCPU/4GB, both burstable/cost-optimized. |
 | GKE node allocatable reservation (1060 mCPU on shared-core E2) | EKS `kube-reserved` (node bootstrap defaults) | Both carve a fixed slice off each node for system components. GKE publishes one tiered CPU formula for all machine types (6% of the first core, 1% of the next core, 0.5% of the next 2 cores, 0.25% of anything above 4 cores) and overrides it with a flat 1060 mCPU on shared-core E2 types; EKS's optimized AMI applies that same tiered CPU formula at node bootstrap, with no shared-core exception. Only CPU lines up — each side computes its memory reservation differently. See "GKE system pods added automatically per node". |
 | Spot VM | EC2 Spot Instance | Same mechanism: spare capacity at a discount, reclaimable with short notice. |
 | Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Network-attached block storage tiers; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` sits roughly between `gp3` and `io1`/`io2` (no exact match); `pd-extreme` (not used here) is the closest analogue of the provisioned-IOPS `io1`/`io2`. |
@@ -749,19 +1010,23 @@ the Notes column for where the mapping breaks down.
 | Security Token Service (`sts.googleapis.com`) + IAM Service Account Credentials API (`iamcredentials.googleapis.com`) | AWS STS (`sts:AssumeRoleWithWebIdentity`) | The APIs that actually perform the OIDC-token-for-access-token exchange behind both Workload Identity Federation rows above — a one-time per-project enablement (see Prerequisites). |
 | `docker login` with username `oauth2accesstoken` and a Workload-Identity-issued access token as the password (Step 9) | `aws ecr get-login-password` | Both turn a short-lived cloud credential into what the Docker CLI needs to push; GCP reuses Docker's generic username/password login instead of a dedicated helper command. |
 | `gke-metadata-server` | EKS Pod Identity Agent | The per-node pod that serves Workload Identity credentials to pods. Closest analogue only: IRSA needs no such per-node pod. |
-| `--workload-metadata=GKE_METADATA` (node pool) | — (no equivalent) | Per-node-pool switch replacing the raw GCE metadata server with the Workload Identity one; without it, pods on that pool fall back to the node's own service account. Turning it on for an existing pool takes effect immediately for workloads already running there, which stops them using the node's service account and can disrupt them. EKS needs no node-level toggle — IRSA/Pod Identity work per pod. |
+| `--workload-metadata=GKE_METADATA` (node pool) | — (no equivalent) | Per-node-pool switch replacing the raw Compute Engine metadata server with the Workload Identity one; without it, pods on that pool fall back to the node's own service account. Turning it on for an existing pool takes effect immediately for workloads already running there, which stops them using the node's service account and can disrupt them. EKS needs no node-level toggle — IRSA/Pod Identity work per pod. |
 | Google Service Account (GSA) | IAM Role | The cloud-side identity a KSA is bound to. |
+| Compute Engine default service account (`<project-number>-compute@developer.gserviceaccount.com`) | EKS node IAM role (attached to the node group's EC2 instances via an instance profile) | The identity GKE nodes run as when a node pool is created without `--service-account`, as both pools here are (`node-pools describe` prints just `default`); Step 9 grants it `roles/artifactregistry.reader` so nodes can pull images, as an EKS node role gets `AmazonEC2ContainerRegistryPullOnly`. GCP creates it automatically with the Compute Engine API and grants it the broad project-wide Editor role unless the `iam.automaticIamGrantsForDefaultServiceAccounts` organization policy is enforced (the default for organizations created on or after May 3, 2024); AWS creates no default, so an EKS managed node group needs a node role you (or `eksctl`) create. Google recommends a dedicated least-privilege node service account (`roles/container.defaultNodeServiceAccount`, plus registry read access) instead; this guide keeps the default. On a `GKE_METADATA` pool, ordinary pods get their Workload Identity instead (see the `--workload-metadata` row), but GKE's logging and monitoring agents and any `hostNetwork: true` pod still use this account. |
 | IAM role bindings (`roles/storage.objectAdmin`, `roles/secretmanager.secretAccessor`, `roles/iam.workloadIdentityUser`, …) | IAM policies (identity/resource-based) + trust policies | A GCP role is a permission set granted to a principal on a resource; an AWS *role* is an assumable identity (see the GSA row). Roughly: `roles/storage.objectAdmin` ≈ a managed policy, bucket- and secret-level bindings ≈ resource-based policies, and the `roles/iam.workloadIdentityUser` binding plays the part of a role's trust policy. |
 | KSA annotation `iam.gke.io/gcp-service-account` | KSA annotation `eks.amazonaws.com/role-arn` | Same binding mechanism, different annotation key. |
 | Google Secret Manager | AWS Secrets Manager | Managed secret storage with IAM-scoped access and versioning. |
 | Secrets Store CSI Driver + **GCP provider** | Secrets Store CSI Driver + **AWS provider** | Same upstream Kubernetes SIGs driver (`secrets-store-csi-driver`); only the cloud-provider plugin differs. |
 | Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — here, where CNPG's Barman Cloud Plugin archives Postgres WAL/backups (the plugin supports S3 natively too). |
 | Artifact Registry | Elastic Container Registry (ECR) | Container image registry holding the 6 service images Step 9's CI pipeline builds and pushes. |
+| Artifact Registry immutable tags (`--immutable-tags`) | ECR tag immutability (`imageTagMutability: IMMUTABLE`) | Both refuse a push that would move an existing tag to a different image. Artifact Registry goes further: a tagged image can't be deleted or untagged (by hand or by a cleanup policy) while the setting is on, whereas ECR still lets you delete images and expire them with lifecycle policies. |
+| Access scopes (node pool / VM: `cloud-platform`, `devstorage.read_only`) | — (no direct equivalent) | Legacy per-VM OAuth scopes that cap what the attached service account can do on top of its IAM roles; pulling from Artifact Registry needs `devstorage.read_only` or `cloud-platform` (the latter defers entirely to IAM). The closest AWS cap is an IAM permissions boundary, set on the role rather than per instance. |
 | Google Managed Prometheus (GMP) | Amazon Managed Service for Prometheus (AMP) | Managed Prometheus-compatible metrics collection, enabled by default on a new GKE Standard cluster. Its `gmp-operator` and per-node `collector` pods run in `gmp-system`. |
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | The managed metric and log stores that `gke-metrics-agent`, `fluentbit-gke` and `event-exporter-gke` write to. On EKS, sending node/pod metrics and container logs to CloudWatch is opt-in (Container Insights / the CloudWatch Observability add-on). |
 | GCP project | AWS account | The resource-isolation, IAM and API-enablement boundary; billing rolls up to a separate billing account (next row). |
 | Billing account | AWS Organizations management (payer) account | The payment instrument projects attach to, separate from the projects themselves: credits, quota and free-tier allowances are counted per billing account, not per project — GKE's free tier is a monthly credit per billing account that only offsets zonal/Autopilot cluster fees (see the Zonal cluster row). AWS has no equivalent split below the account; consolidated billing instead rolls several accounts up under one payer account. |
-| `gcloud` CLI | `aws` CLI + `eksctl` | GCP bundles cluster operations into `gcloud container clusters`; EKS-specific operations on AWS typically need `eksctl` (or Terraform) alongside the base `aws` CLI. |
+| Organization policy (`iam.automaticIamGrantsForDefaultServiceAccounts`) | AWS Organizations policies (SCPs, declarative policies) | Constraints set on an organization, folder or project that restrict what configuration the projects below it may use. This one stops GCP from automatically granting the default service accounts the Editor role, and is enforced by default for organizations created on or after May 3, 2024 (see the Compute Engine default service account row); Google now recommends the stricter `iam.managed.preventPrivilegedBasicRolesForDefaultServiceAccounts`, which also blocks granting them Editor or Owner later. A project with no organization — like this guide's — has no organization policies, so its default compute service account keeps the automatic Editor grant. On AWS, SCPs cap the permissions accounts may use and declarative policies enforce service configuration; neither has an equivalent of this constraint, since AWS creates no default role to grant. |
+| `gcloud` CLI | `aws` CLI + `eksctl` | GCP bundles cluster operations into `gcloud container clusters`; EKS-specific operations on AWS typically need `eksctl` (or Terraform) alongside the base `aws` CLI. Installed as the Google Cloud CLI, one of the tools Google groups under the name Google Cloud SDK (with the client libraries) — hence the `Cloud SDK` install directory and the `CLOUDSDK_*` environment variables such as `CLOUDSDK_PYTHON` (see Prerequisites); `gke-gcloud-auth-plugin` is one of its optional components. It bundles its own Python on Windows and x86_64 Linux; on macOS its installer installs one if needed. On AWS, an "SDK" is a per-language client library; the `aws` CLI is a separate install. |
 | `gcloud services enable` (API enablement) | — (no per-service enablement) | GCP requires enabling each service's API per project; AWS services are generally usable without a separate enablement step (some features, such as opt-in Regions, still need opting in). |
 | `gke-gcloud-auth-plugin` | `aws eks get-token` (via the `aws` CLI) | kubectl exec-credential plugin that turns cloud credentials into cluster auth tokens. `gcloud container clusters get-credentials` corresponds to `aws eks update-kubeconfig`. |
 | `netd` + GKE's default (non-Dataplane V2) datapath | `aws-node` (Amazon VPC CNI plugin) | Each cloud's own per-node networking DaemonSet. `netd` sets up the node's Pod networking — it generates the CNI spec for the PTP plugin from the node's PodCIDR and manages packet redirection on the node; GKE runs it when Workload Identity Federation for GKE (enabled here), intranode visibility or dual-stack is on. `aws-node` does more — it also hands pods real VPC IPs from ENIs. Note that nothing on this cluster enforces NetworkPolicy: on a non-Dataplane V2 cluster that needs `--enable-network-policy`, which installs Calico (`calico-node`) and is off by default. GKE's Dataplane V2 (eBPF/Cilium, not used here) is the closer analogue of running Cilium on EKS. |
@@ -769,6 +1034,7 @@ the Notes column for where the mapping breaks down.
 | `node-local-dns` (NodeLocal DNSCache), `kube-dns-autoscaler` | — (self-managed on EKS) | Upstream Kubernetes add-ons that GKE installs and manages for you; on EKS you deploy and size them yourself. |
 | `kube-dns`, `kube-proxy`, `metrics-server` | CoreDNS, `kube-proxy`, metrics-server (EKS add-ons) | The remaining system pods GKE preinstalls and versions for you. GKE's default cluster DNS is `kube-dns`, not CoreDNS. EKS installs CoreDNS and `kube-proxy` by default too, but as add-ons you version yourself; `metrics-server` is not installed by default on an EKS cluster (recent `eksctl` versions add it as an EKS add-on; otherwise it is an EKS community add-on you add yourself), while GKE ships and auto-resizes it. |
 | GKE Ingress load balancer (`l7-default-backend`) | AWS Load Balancer Controller (ALB) | Provisions an HTTP(S) load balancer from an Ingress. GKE runs the controller for you; on EKS you install it yourself. `l7-default-backend` (the 404 backend) has no pod-level equivalent on ALB. |
+| `BackendConfig` (GKE CRD) | AWS Load Balancer Controller annotations (e.g. `alb.ingress.kubernetes.io/healthcheck-path`) | Per-Service load-balancer settings (health check, timeouts, Cloud CDN, Cloud Armor, IAP, …), attached to a Service with the `cloud.google.com/backend-config` annotation. With the AWS controller, the ALB's equivalents (health check, WAF, OIDC/Cognito authentication, …) are annotations on the Ingress or on the Service itself, a Service's taking priority; there is no per-Service settings resource, and CDN is a separate service (CloudFront). |
 
 **Note**: this project's GCP account is on a Free Trial, which blocks all quota increase
 requests (AWS's equivalent, account-level Service Quotas, allows requesting increases via a
@@ -784,7 +1050,18 @@ general GCP-vs-AWS difference.
   shutdown of Postgres/Kafka).
 - An Artifact Registry cleanup policy — content-hash tags never collide or get overwritten, so
   the registry only grows; nothing here deletes an old image once no deployed release still
-  references it.
+  references it. With immutable tags on (Step 9), a cleanup policy can't delete tagged images
+  either, so such a policy would also need immutability turned off, or old tags handled some
+  other way.
+- The frontend's deployment: a container image and Helm chart for the Angular app, a frontend
+  CI workflow, and the public Ingress (`/` to the frontend, `/api/*` to the gateway, with a
+  `BackendConfig` health check per backend Service). Until then every Service is
+  cluster-internal and nothing is reachable from outside the cluster.
+- A Zipkin collector in the cluster — span export is off on GKE
+  (`global.tracing.export.zipkin.enabled`) until one is deployed along with its endpoint value.
+- A dedicated least-privilege node service account (`roles/container.defaultNodeServiceAccount`
+  plus `roles/artifactregistry.reader`) instead of the Compute Engine default service account the
+  node pools run as.
 
 </details>
 
@@ -795,17 +1072,16 @@ general GCP-vs-AWS difference.
 cluster, operator CNPG (Postgres) và Strimzi (Kafka), secret lấy từ Secret Manager qua Secrets
 Store CSI Driver, và các Helm chart triển khai 6 service Spring Boot.
 
-**Phạm vi**: từ hạ tầng cluster GKE tới khi `helm install` `charts/cafe` thành công (Bước 1-8),
-cộng thêm CI pipeline build và push image container thật cho các pod đó (Bước 9). Tự động hoá
-CD/teardown (bật/tắt `stateful-pool` quanh mỗi lần deploy) là việc riêng, chưa triển khai — xem
-mục "Chưa bao gồm trong tài liệu này" ở cuối.
+**Phạm vi**: từ hạ tầng cluster GKE tới khi deploy `charts/cafe` bằng `scripts/deploy.sh` thành
+công (Bước 1-8), cộng thêm CI pipeline build và push image container thật cho các pod đó (Bước
+9). Tự động hoá CD/teardown (bật/tắt `stateful-pool` quanh mỗi lần deploy) là việc riêng, chưa
+triển khai — xem mục "Chưa bao gồm trong tài liệu này" ở cuối.
 
 Link tới file trong repo trỏ thẳng tới `master` trên GitHub.
 
-Mọi lệnh `gcloud` giả định đã set project mặc định (xem mục "Yêu cầu môi trường"). Các lệnh bên
-dưới được viết dạng bash thuần, không kèm tiền tố. Trên một số cấu hình Git Bash Windows,
-`gcloud` trần không khởi động được; `cmd //c gcloud ...` là cách thay thế dùng được ở đó, kể cả
-với các lệnh pipe dữ liệu vào stdin (`--data-file=-`, như ở Bước 4).
+Mọi lệnh `gcloud` giả định đã set project mặc định (xem mục "Yêu cầu môi trường"). Các lệnh bên dưới
+được viết dạng bash thuần. Trên Git Bash cho Windows, `gcloud` cần đặt `CLOUDSDK_PYTHON` trước (xem
+mục "Yêu cầu môi trường").
 
 ## Kiến trúc tổng quan
 
@@ -835,29 +1111,57 @@ với các lệnh pipe dữ liệu vào stdin (`--data-file=-`, như ở Bước
 ## Yêu cầu môi trường
 
 - Đã cài CLI `gcloud`, `kubectl`, `helm`, `cmctl` (CLI của cert-manager, cài theo tài liệu của
-  cert-manager) và `openssl`; `gcloud` đã đăng nhập.
+  cert-manager) và `openssl`; `gcloud` đã đăng nhập. `helm` phải là Helm 4.1.1 trở lên, mức tối
+  thiểu mà `scripts/deploy.sh` bắt buộc: script chờ bằng cơ chế kiểm tra trạng thái
+  `--wait=watcher`, thứ mà Helm 3 không có, còn các bản Helm 4 cũ hơn sẽ chờ tới hết timeout với 1
+  Deployment đã fail thay vì báo lỗi ngay khi các resource còn lại đã ổn định.
 - `gitleaks` (chỉ cần khi bạn di chuyển cặp khoá JWT dev, hay bất kỳ credential nào khác nằm trong
   `.gitleaksignore`, sang file/dòng khác và phải tạo lại fingerprint — xem `.gitleaksignore` bên
   dưới; bản thân CI chạy nó qua `gitleaks/gitleaks-action`, không cần cài local cho pipeline).
+- `docker` (chỉ cần để chạy lint shellcheck đã pin ở local, Bước 9; CI tự chạy đúng image đó).
 - `gke-gcloud-auth-plugin` nằm trong `PATH` (kiểm tra bằng `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` và `cmctl` đều cần nó để nói chuyện với cluster GKE. Cài bằng
   `gcloud components install gke-gcloud-auth-plugin` (SDK độc lập / bộ cài Windows) hoặc, nếu
   dùng package manager, gói `google-cloud-cli-gke-gcloud-auth-plugin`. `clusters create` (Bước 1)
   tự ghi entry kubeconfig; khi làm tiếp từ shell hoặc máy mới, chạy
   `gcloud container clusters get-credentials cafe-cluster --zone=us-central1-a`.
-- Có shell bash (Git Bash trên Windows dùng được) — các lệnh dùng tính năng của bash như
-  `${var//-/_}` và brace expansion.
+- Có shell bash 4.3+ (Git Bash trên Windows dùng được; bash 3.2 có sẵn trên macOS thì không) —
+  các lệnh dùng tính năng của bash như `${var//-/_}` và brace expansion, và `scripts/deploy.sh`
+  dùng nameref (`local -n`). Các script được kiểm thử trên bash 5.x.
+- Chỉ với Git Bash trên Windows: `CLOUDSDK_PYTHON` trỏ tới Python đi kèm Cloud SDK. Git Bash chạy
+  launcher `gcloud` kiểu POSIX của SDK, launcher này chỉ tìm Python đi kèm ở 1 đường dẫn dành cho
+  Unix, rồi chuyển sang `python3`/`python` trên `PATH`; khi 2 lệnh đó chỉ là alias của Microsoft
+  Store, `gcloud` không khởi động được (exit code 49, "Python was not found"). `scripts/deploy.sh`
+  chạy chính launcher `gcloud` kiểu POSIX đó nên cũng cần biến này, và sẽ dừng kèm gợi ý khi
+  `gcloud` không khởi động được. Thêm biến vào `~/.bashrc`, rồi mở 1 cửa sổ Git Bash mới (hoặc chạy
+  `source ~/.bashrc`):
+
+  ```bash
+  echo 'export CLOUDSDK_PYTHON="$LOCALAPPDATA/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe"' >> ~/.bashrc
+  ```
+
+  Đó là đường dẫn cài đặt mặc định theo user của Cloud SDK; nếu SDK của bạn nằm ở chỗ khác,
+  `gcloud.cmd info --format='value(basic.python_location)'` sẽ in ra đường dẫn đúng.
+- `git` và `sha256sum` nằm trong `PATH` — `scripts/deploy.sh` kiểm tra trạng thái repo bằng git, còn
+  `scripts/image-tag.sh` tính hash bằng `sha256sum` (Git Bash có sẵn cả 2; macOS trước bản 15
+  (Sequoia) không có `sha256sum`).
 - Project GCP đã bật billing.
 - Chạy mọi lệnh từ thư mục gốc của repo — các đường dẫn như `k8s/data-layer/` và `charts/cafe`
   là đường dẫn tương đối so với thư mục đó.
-- Chốt trước project ID, tên/zone cluster, tên bucket backup Postgres. Tên cluster và zone chỉ
-  xuất hiện dưới dạng flag của `gcloud`/`kubectl` trong tài liệu này; project ID và tên bucket
-  còn được đưa vào IAM binding và các file của repo: `global.gcpProjectId` của
-  `charts/cafe/values.yaml` (giá trị này render ra đường dẫn `resourceName:` của từng
-  `SecretProviderClass` và annotation `iam.gke.io/gcp-service-account` của từng ServiceAccount),
-  annotation `serviceAccountTemplate` trong `k8s/data-layer/postgres-cluster.yaml`, và
-  `destinationPath` trong `k8s/data-layer/postgres-backup.yaml`. Tài liệu này dùng đúng giá trị
-  thật của repo này (`cafe-microservices` / `cafe-cluster` / `us-central1-a` /
+- Chốt trước project ID, tên/zone cluster, tên bucket backup Postgres. Các giá trị này còn được đưa
+  vào IAM binding và các file của repo: `gcp_project`, `cluster_zone` và `cluster_name` của
+  `scripts/deploy.sh` (kube-context và gợi ý `get-credentials` mà script dùng); đường dẫn Artifact
+  Registry, được `deploy.test.sh` giữ đồng bộ giữa `image_ref` của `scripts/deploy.sh`,
+  `global.imageRegistry` của `charts/cafe/values.yaml` và `IMAGE` của
+  `.github/workflows/backend-ci.yml`; các giá trị sau của workflow đó: `service_account`,
+  `workload_identity_provider` (chứa project number; phần thiết lập GCP ở Bước 9 in ra tên đầy đủ)
+  và host `registry:` ở bước Docker login (phần host của đường dẫn Artifact Registry, không được
+  `deploy.test.sh` kiểm tra); `global.gcpProjectId` của `charts/cafe/values.yaml` (giá trị này
+  render ra đường dẫn `resourceName:` của từng `SecretProviderClass` và annotation
+  `iam.gke.io/gcp-service-account` của từng ServiceAccount), annotation `serviceAccountTemplate`
+  trong `k8s/data-layer/postgres-cluster.yaml`, và `destinationPath` trong
+  `k8s/data-layer/postgres-backup.yaml`. Tài liệu này dùng đúng giá trị thật của repo này
+  (`cafe-microservices` / `cafe-cluster` / `us-central1-a` /
   `gs://cafe-microservices-cafe-pg-backups`) làm ví dụ; thay bằng giá trị của bạn.
 
 Đặt project mặc định và bật các API mà tài liệu này dùng (trên project mới, lệnh `gcloud` đầu
@@ -865,12 +1169,12 @@ tiên sẽ hỏi hoặc báo lỗi nếu chưa bật):
 
 ```bash
 gcloud config set project cafe-microservices
-gcloud services enable container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com
+gcloud services enable compute.googleapis.com container.googleapis.com secretmanager.googleapis.com storage.googleapis.com iam.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com
 ```
 
 Bước 9 còn cần một repository GitHub đã bật Actions và quyền admin trên repo đó (để cấu hình
-branch protection) — không cần thêm CLI nào ngoài `gcloud`, dù GitHub CLI (`gh`) là cách tiện lợi
-để chạy lần đầu thủ công.
+branch protection) — không cần thêm CLI nào ngoài `gcloud` (và `docker`, chỉ cho bước lint local
+tùy chọn), dù GitHub CLI (`gh`) là cách tiện lợi để chạy lần đầu thủ công.
 
 ---
 
@@ -1190,9 +1494,18 @@ Template ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-proj
 - `strategy.type` là `Recreate` cho service dùng DB (`RollingUpdate` cho các service còn lại)
   — tránh việc 1 pod cũ và 1 pod mới (sau khi Flyway đã migrate) chạy song song; đánh đổi chấp
   nhận được cho 1 dự án không nhắm tới zero-downtime deploy.
-- initContainer `wait-for-db` (chỉ với service dùng DB) thử kết nối `psql` lặp lại tới 600s,
-  dùng `date +%s` — **không phải** `$SECONDS`, vì BusyBox `ash` (shell của image
-  `postgres:16-alpine`) âm thầm coi nó là chuỗi rỗng, biến điều kiện timeout thành dead code.
+- initContainer `wait-for-db` (chỉ với service dùng DB) chạy
+  [wait-for-db.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/files/wait-for-db.sh),
+  được template nhúng vào bằng `.Files.Get` (thiếu file thì render thất bại). Script thử kết nối
+  `psql` lặp lại tới 600s, đọc host, user, database và password từ chính các biến của libpq là
+  `PGHOST`/`PGUSER`/`PGDATABASE`/`PGPASSWORD`, `PGCONNECT_TIMEOUT` giới hạn phần kết nối của mỗi
+  lần thử ở 5s, và tính khung chờ bằng `date +%s` — **không phải** `$SECONDS`, vì BusyBox `ash`
+  (shell của image `postgres:16-alpine`) âm thầm coi nó là chuỗi rỗng, biến điều kiện timeout thành
+  dead code. Nó ghi log lỗi của psql ở lần đầu và mỗi khi lỗi thay đổi, và in lỗi cuối cùng khi hết
+  giờ: `kubectl logs <pod> -n cafe -c wait-for-db`. Bộ test của nó, `wait-for-db.test.sh`, nằm
+  ngay cạnh; `.helmignore` của chart loại `*.test.sh` ra khỏi chart được đóng gói.
+- `progressDeadlineSeconds: 1200` trên các Deployment dùng DB, để 1 pod đang chờ trong
+  `wait-for-db` không làm fail 1 lần rollout đầu hợp lệ (xem Bước 8 để biết cách tính).
 - `startupProbe` (ngân sách 30 × 10s) quyết định khi nào `readinessProbe`/`livenessProbe` mới
   bắt đầu được kiểm tra — chắc chắn hơn việc đoán 1 `initialDelaySeconds` cố định trong lúc JVM
   + Flyway khởi động trên node Spot.
@@ -1217,8 +1530,18 @@ các secret GSM mà instance service đó cần (có điều kiện, theo các c
 vào trước `image.repository` khi render mỗi Deployment) 1 lần duy nhất, cộng thêm 1 block cho mỗi
 alias với giá trị port/db/kafka/jwt thật của service đó và `image.repository` riêng của nó.
 
+- `global.tracing.export.zipkin.enabled` (`false`) — được render vào ConfigMap của mọi service
+  thành `management.tracing.export.zipkin.enabled` của Spring. Chỉ exporter Zipkin bị tắt:
+  sampling, việc truyền trace context và trace ID trong log không bị ảnh hưởng. Không dùng
+  `management.tracing.export.enabled` chung, vì nó còn tắt cả việc truyền trace context và việc
+  gắn trace ID vào log. Chart dùng chung `cafe-service` mặc định là `true`, đúng mặc định của
+  Spring.
+
 ```bash
-helm dependency update charts/cafe
+# `build`, not `update`: packages the file:// subchart against the committed Chart.lock without
+# rewriting it, and fails if Chart.yaml's dependencies no longer match that lock;
+# --skip-refresh: a file:// dependency needs none of the Helm repositories added above
+helm dependency build --skip-refresh charts/cafe
 # render and lint locally before touching the real cluster (rendering is the real check);
 # lint should report 0 failed - an "icon is recommended" INFO and a "templates/ directory does
 # not exist" warning are normal for this umbrella chart
@@ -1230,43 +1553,100 @@ helm template charts/cafe > /dev/null
 
 ## Bước 8 — Deploy thật
 
+Bước này cần có image để deploy: làm phần thiết lập GCP ở Bước 9 và để 1 lần chạy CI build image
+trước.
+
 Tag image của mỗi service là 1 hash nội dung tính từ source của chính nó, `common-lib` và pom
 cha (xem Bước 9), nên — khác với 1 tag release dùng chung — không thể dùng 1 `$TAG` cho cả 6
-service. Tính từng tag rồi xác nhận image đó thực sự tồn tại trên Artifact Registry trước khi
-deploy; set 1 tag mà không có image tương ứng chỉ dẫn tới `ImagePullBackOff` âm thầm về sau:
+service. [scripts/deploy.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/deploy.sh)
+deploy image ứng với commit đang checkout. Trước mọi lần `helm upgrade`, script dừng nếu:
+
+- bash cũ hơn 4.3, hoặc `gcloud`, `helm`, `kubectl`, `gke-gcloud-auth-plugin`, `git` hay
+  `sha256sum` không có trên `PATH` (script nêu tên mọi tool còn thiếu).
+- `backend/`, `charts/` hoặc `scripts/image-tag.sh` có thay đổi chưa commit (bất kể
+  `status.showUntrackedFiles` đặt thế nào), có file mà git status được bảo bỏ qua (assume-unchanged
+  hoặc skip-worktree, được liệt kê với chính tag `h`/`s`/`S` của git; sparse checkout cũng đặt
+  `S`), hoặc `charts/` chứa file bị git-ignore (được liệt kê với tiền tố `!! `). 1 lần deploy phải
+  ứng với đúng 1 commit: image được build từ code `backend/` đã commit, nên sửa đổi backend ở local
+  sẽ âm thầm không được deploy; còn chart và `image-tag.sh` được dùng nguyên trạng từ working tree,
+  nên sửa đổi ở đó sẽ được deploy mà không được ghi lại trong commit nào. Helm đóng gói mọi file
+  trong thư mục chart không bị `.helmignore` của nó loại ra, dù có bị git-ignore hay không; riêng
+  `charts/cafe/charts/*.tgz` được miễn khỏi mọi kiểm tra này, vì lần deploy tự tạo lại nó. Bản
+  thân `scripts/deploy.sh` cũng được miễn, để có thể sửa script rồi thử trước khi commit; nội dung
+  release thuộc về chart, không thuộc về các cờ `helm` của script.
+- không đọc được commit `HEAD`, hoặc nó không nằm trên `master`: không phải commit mà
+  `origin/master` đang trỏ tới (theo lần fetch gần nhất), cũng không phải 1 commit tổ tiên của nó.
+  `HEAD` chỉ được đọc 1 lần, nên bước kiểm tra này, mọi image tag và description của release đều chỉ
+  cùng 1 commit. CI chỉ build image từ `master`, còn chart được deploy từ working tree, vốn phải
+  khớp với `HEAD` theo kiểm tra ở trên, nên 1 commit trên nhánh khác sẽ đưa lên cluster những thay
+  đổi chart chưa được lần merge nào ghi nhận. Hãy merge nó qua 1 PR rồi deploy từ `master`, hoặc
+  chạy `git fetch` nếu nó đã có trên `master`; thiếu ref `origin/master` cũng làm bước kiểm tra này
+  fail. Sửa đổi chưa commit của `scripts/deploy.sh` vẫn thử được từ `master`, vì kiểm tra ở trên
+  miễn cho nó. Các kiểm tra trạng thái repo này chạy trước các kiểm tra môi trường bên dưới, và các
+  biến git được kế thừa (`GIT_DIR` và các biến tương tự) bị xóa trước, nên chúng luôn đọc đúng
+  checkout này.
+- `helm` trên `PATH` cũ hơn 4.1.1 (xem phần Yêu cầu môi trường), hoặc không báo được phiên bản.
+- `gcloud` trên `PATH` không khởi động được (trên Git Bash cho Windows, hãy đặt `CLOUDSDK_PYTHON`
+  — xem phần Yêu cầu môi trường).
+- kube-context `gke_cafe-microservices_us-central1-a_cafe-cluster` không tồn tại (chạy lệnh
+  `get-credentials` ở phần Yêu cầu môi trường). Mọi lệnh làm việc với cluster đều chỉ định rõ
+  context đó, nên 1 lần deploy không bao giờ rơi vào cluster mà context hiện tại đang trỏ tới.
+- không tính được tag của 1 service tại `HEAD` (ví dụ: thư mục `backend/<service>` của nó không có
+  trong commit).
+- image của 1 service nào đó bị thiếu hoặc không truy cập được trên Artifact Registry (script nêu
+  tên image đó). Set 1 tag mà không có image tương ứng chỉ dẫn tới `ImagePullBackOff` âm thầm về
+  sau. Nếu lỗi của chính gcloud in phía trên thông báo không phải lỗi not-found (xác thực, quyền
+  hoặc mạng), hãy sửa lỗi đó trước. Nếu không: tag được tính từ nội dung `backend/` đã commit của
+  `HEAD`, và CI chỉ build image từ `master` (Bước 9). Vậy hoặc `HEAD` là 1 commit `master` mà chưa
+  lần chạy CI nào build (ví dụ 1 commit bên trong 1 nhánh đã merge) — hãy deploy 1 commit mà CI đã
+  build, như đỉnh của `master` hoặc 1 merge commit — hoặc lần chạy `backend-ci` trên `master` cho
+  nó vẫn đang chạy hoặc đã fail (chờ, hoặc sửa lỗi); nếu `master` đã có nội dung đó nhưng chưa lần
+  chạy nào build nó, chạy `workflow_dispatch` cho `backend-ci` trên `master` để build. Bước kiểm
+  tra này dùng credential gcloud của chính bạn; còn node của cluster pull image bằng service
+  account riêng của chúng, được cấp `roles/artifactregistry.reader` ở phần thiết lập GCP của
+  Bước 9.
+
+Nếu không, nó chạy `helm dependency build --skip-refresh` (để subchart `cafe-service` đã đóng gói
+luôn khớp với `charts/cafe-service`), rồi `helm upgrade --install` với
+`-n cafe --wait=watcher --timeout 22m`, ghi commit đang checkout làm description của release
+(`helm history` hiện nó cho mọi revision đã deploy thành công; revision fail thì hiện thông báo lỗi
+của Helm, còn revision do rollback tạo ra thì ghi "Rollback to N"), và liệt kê pod và Secret trong
+namespace `cafe`:
 
 ```bash
-services=(gateway auth-service menu-service order-service inventory-service report-service)
-set_args=()
-for svc in "${services[@]}"; do
-  tag=$(bash scripts/image-tag.sh "$svc")
-  image="us-central1-docker.pkg.dev/cafe-microservices/cafe-images/cafe-${svc}:${tag}"
-  if ! gcloud artifacts docker images describe "$image" > /dev/null 2>&1; then
-    echo "MISSING: $image - run backend-ci via workflow_dispatch on master first (Step 9)" >&2
-    exit 1
-  fi
-  set_args+=(--set-string "${svc}.image.tag=${tag}")
-done
-
-helm upgrade --install cafe charts/cafe -n cafe "${set_args[@]}"
-
-kubectl get pods -n cafe
-kubectl get secret -n cafe
+git checkout master && git pull
+bash scripts/deploy.sh
 ```
 
-Nếu mọi image đều tồn tại, cả 6 app pod sẽ đạt `Running` — các pod dùng DB đi qua `Init:0/1`
-trong lúc initContainer `wait-for-db` của chúng chờ (Bước 6/7) — không còn `ImagePullBackOff`
-nữa; nếu thấy trạng thái đó bây giờ nghĩa là có gì đó thực sự sai (xem mục 7 của phần Xử lý sự cố
-bên dưới), không còn là khoảng trống dự kiến. Các Secret `{service}-db-credentials` và
-`*-jwt-key` phải xuất hiện, còn `cafe-postgres-1` và pod Kafka phải `Running`.
+Script chỉ trả về khi cả 6 app Deployment đã sẵn sàng — các pod dùng DB đi qua `Init:0/1` trong
+lúc initContainer `wait-for-db` của chúng chờ (Bước 6/7) — hoặc thất bại, kèm danh sách pod để
+thấy pod nào đang kẹt (xem phần Xử lý sự cố bên dưới). Chart đặt `progressDeadlineSeconds` của mỗi
+Deployment dùng DB là 1200 (gateway, không có `wait-for-db`, giữ mặc định 600s): 1 pod đang chờ
+trong `wait-for-db` không tạo ra tiến triển rollout nào, và lần rollout đầu chậm nhất mà vẫn hợp lệ
+mất khoảng 930s (1 khung 600s của `wait-for-db` cộng tối đa 8s cho lần thử cuối, 10s back-off
+khởi động lại nếu database lên ngay sau khung đó, tối đa 300s cho startup probe và 1 chu kỳ
+readiness 10s), cộng thời gian pull image và, khi autoscaler phải thêm 1 node cho
+`stateless-pool`, thời gian khởi động node đó kể cả pod CSI driver của nó — 1200s chừa khoảng 4,5
+phút cho các phần đó. `--wait=watcher` của Helm 4.1.1 trở lên đánh dấu 1 Deployment đã quá
+deadline là Failed ("Progress deadline exceeded") và trả về lỗi đó ngay khi mọi resource khác đã
+ổn định; timeout 22 phút cao hơn deadline 2 phút, nên chính deadline, chứ không phải 1 timeout
+trơn, kết thúc 1 lần rollout bị kẹt. Sau 1 lần chạy thành công, các Secret
+`{service}-db-credentials` và `*-jwt-key` phải xuất hiện, còn `cafe-postgres-1` và pod Kafka cũng
+phải `Running`.
 
-`-n cafe` là bắt buộc — không có gì trong chart hardcode namespace (mọi template đều dùng
-`{{ .Release.Namespace }}`), nên bỏ qua nó sẽ âm thầm deploy mọi thứ, kể cả ServiceAccount của
-từng Deployment, vào `default` thay vì `cafe`.
+Trong lúc chờ, script không in gì: 1 pod bị kẹt, chẳng hạn ở `ImagePullBackOff`, vẫn được tính là
+đang tiến hành cho tới deadline của Deployment đó (600s với gateway, 1200s với các service dùng
+DB), không bao giờ vượt quá timeout 22 phút. Theo dõi từ 1 shell khác bằng
+`kubectl get pods -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -w`.
 
-### Xử lý sự cố khi deploy thật lần đầu
+`scripts/deploy.sh` luôn truyền `-n cafe` cho lệnh `helm upgrade --install` của nó — cần thiết vì
+bản thân chart không hardcode namespace nào (mọi template đều dùng `{{ .Release.Namespace }}`), nên
+nếu chạy `helm upgrade --install cafe charts/cafe` mà thiếu `-n cafe` thì mọi thứ, kể cả
+ServiceAccount riêng của từng Deployment, sẽ âm thầm bị deploy vào `default` thay vì `cafe`.
 
-Các triệu chứng có thể gặp khi deploy thật lần đầu, kèm nguyên nhân gốc:
+### Xử lý sự cố khi deploy
+
+Các triệu chứng có thể gặp khi deploy — phần lớn ở lần deploy thật đầu tiên — kèm nguyên nhân gốc:
 
 1. **CSI mount lỗi `driver name secrets-store.csi.k8s.io not found`** trên 1 node rất mới —
    thường chỉ là DaemonSet CSI chưa khởi động xong trên node đó. Kiểm tra tuổi của node trước
@@ -1293,20 +1673,81 @@ Các triệu chứng có thể gặp khi deploy thật lần đầu, kèm nguyê
    Secret `{service}-db-credentials` chỉ tồn tại khi service pod mount volume CSI (xem Bước 6).
    Tự hết khi các pod chạy.
 7. **1 pod ứng dụng bị `ImagePullBackOff`** — cơ chế kiểm tra ở Bước 8 lẽ ra đã phát hiện image
-   thiếu trước khi tới đây, nên trước tiên hãy xác nhận đúng `image:` mà pod đó đang cố pull
-   (`kubectl describe pod <pod> -n cafe`) khớp với những gì `gcloud artifacts docker images
-   describe` báo cho cùng tag đó. Lệch nhau thường nghĩa là `scripts/image-tag.sh` được chạy trên
-   1 commit khác với commit mà Bước 9 build lần gần nhất (ví dụ: có thay đổi local chưa commit) —
-   commit trước, hoặc push rồi để Bước 9 build đúng cho commit đang được deploy.
+   thiếu trước khi tới đây. `kubectl describe pod <pod> -n cafe` cho thấy `image:` mà pod đang cố
+   pull và, trong phần events, lý do pull thất bại:
+   - **not found** — reference không khớp với những gì `gcloud artifacts docker images describe`
+     báo cho tag đó. `deploy.sh` từ chối chạy khi có thay đổi chưa commit trong `backend/`,
+     `charts/` hoặc `scripts/image-tag.sh`, nên nếu lệch thì thường là do image được deploy theo
+     cách khác (ví dụ: chạy `helm upgrade` thủ công với tag tự tính) — deploy lại qua `deploy.sh`,
+     vì bước kiểm tra của nó xác nhận từng image có tồn tại trước.
+   - **403 / denied** — image có tồn tại (bước kiểm tra ở Bước 8, dùng credential của chính bạn,
+     đã pass), nhưng node không đọc được: kiểm tra service account của node có
+     `roles/artifactregistry.reader` trên repository (phần thiết lập GCP ở Bước 9), và access
+     scope của các node pool có gồm `devstorage.read_only` hoặc `cloud-platform`.
+8. **Chạy lại bị lỗi `another operation (install/upgrade/rollback) is in progress`** — Helm từ
+   chối vì revision cuối của release vẫn đang `pending-*`. Hoặc 1 lần deploy hay rollback khác trên
+   release này vẫn đang chạy, hoặc 1 lần trước đó bị cắt ngang trước khi Helm kịp ghi kết quả (đóng
+   terminal hay phiên SSH, process bị kill, mất hẳn kết nối tới cluster, hoặc cluster không kết nối
+   được đúng lúc Helm cố ghi kết quả). Ctrl+C trong lúc `helm upgrade --install` của `deploy.sh`
+   chạy thì thường được xử lý: Helm ghi revision đó là `failed`; nếu nó vẫn hiện `pending-upgrade`
+   thì Helm đã không nhận được tín hiệu — coi như bị cắt ngang (bên dưới). Xem lịch sử release bằng
+   `helm history cafe -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster`.
+   1 thao tác còn sống không thể ở trạng thái pending lâu hơn nhiều so với timeout 22 phút của nó,
+   nên nếu thời điểm UPDATED của revision pending vẫn nằm trong khoảng đó cộng vài phút (khoảng 25
+   phút), có thể 1 lần deploy khác vẫn đang chạy — hãy chờ rồi kiểm tra lại. Khi đã cũ hơn, thao
+   tác đó đã bị cắt ngang:
+   - **`pending-upgrade`** — rollback về revision `deployed` gần nhất (nếu không có revision nào
+     `deployed`, uninstall như với `pending-install`):
+     `helm rollback cafe <revision> -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster --wait=watcher --timeout 22m`,
+     rồi chạy lại.
+   - **`pending-rollback`** (`helm rollback` không xử lý Ctrl+C, nên 1 lần rollback bị ngắt sẽ nằm
+     lại ở pending) — chạy lại đúng lần rollback đó, về revision mà description "Rollback to N" của
+     nó ghi, bằng cùng lệnh trên. Không phải về revision `deployed` gần nhất: đó có thể chính là
+     bản lỗi mà lần rollback đang muốn rời khỏi.
+   - **`pending-install`** (lần install đầu tiên chưa bao giờ xong) — gỡ nó đi:
+     `helm uninstall cafe -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster`,
+     rồi chạy lại. Postgres và Kafka nằm ngoài release (Bước 6) nên không bị ảnh hưởng; các Secret
+     được sync sẽ xuất hiện lại khi pod mount lại volume CSI.
+   - **`deployed` hoặc `failed`** — thao tác kia đã xong trong lúc đó; chỉ cần chạy lại `deploy.sh`.
+9. **Bản thân revision mới bị lỗi** (upgrade fail, hoặc thành công nhưng service chạy sai) — cách
+   thường làm là commit bản sửa rồi deploy lại. Nếu cần quay về trạng thái chạy được trước, ưu tiên
+   checkout commit `master` tốt gần nhất (description trong `helm history` ghi commit của từng
+   revision đã deploy; với 1 revision "Rollback to N", xem description của revision N, lặp lại nếu
+   N cũng là 1 rollback) rồi chạy lại `deploy.sh`: image của nó đã có sẵn. Nếu không, rollback về 1
+   revision cụ thể — sau 1 lần upgrade fail thì là revision vẫn đang `deployed`; sau 1 lần upgrade
+   thành công nhưng chạy sai thì là revision `superseded` gần nhất — bằng
+   `helm rollback cafe <revision> -n cafe --kube-context gke_cafe-microservices_us-central1-a_cafe-cluster --wait=watcher --timeout 22m`
+   (`helm rollback` không kèm revision sẽ quay về revision ngay trước, kể cả khi revision đó fail;
+   nếu lần install đầu tiên chưa từng thành công thì không có gì để rollback). Cách nào thì cũng chỉ
+   image và manifest quay lại, còn schema database thì không: mặc định `*:future` của Flyway để
+   image cũ khởi động qua được các migration nó không biết, nhưng `ddl-auto: validate` của
+   Hibernate làm nó fail lúc khởi động nếu 1 cột hay bảng nó map tới đã bị xóa, đổi tên hoặc đổi
+   kiểu, và 1 cột `NOT NULL` mới không có giá trị mặc định sẽ làm lệnh insert của nó fail lúc
+   chạy. Event Kafka mà bản mới đã publish cũng có thể không deserialize được ở consumer cũ và rơi
+   vào DLQ. Không có gì replay các record trong `<topic>.dlq`; chúng được giữ lại để chẩn đoán. Các
+   order đang chờ reply cho lệnh reserve hoặc commit sẽ được job saga reconciliation của
+   order-service gửi lại lệnh và, sau khi hết số lần retry, đưa về OPEN hoặc CONFIRMED. 1 lệnh
+   release-stock đã rơi vào DLQ thì không được retry, nên lượng stock đó vẫn bị giữ cho tới khi
+   sửa tay. Nếu chính reply mới là thứ rơi vào DLQ thì inventory-service đã thực hiện lệnh rồi:
+   order quay về OPEN hoặc CONFIRMED trong khi stock vẫn bị giữ hoặc đã bị trừ — cũng phải sửa tay.
+   Mục 8 xử lý trường hợp release bị kẹt ở `pending-*`.
+10. **1 pod dùng DB đứng mãi ở `Init:0/1`** — initContainer `wait-for-db` của nó chưa kết nối
+    được tới database. Xem lý do bằng `kubectl logs <pod> -n cafe -c wait-for-db`: nó ghi log lỗi
+    của psql mỗi khi lỗi thay đổi (connection timeout hay connection refused nghĩa là Postgres
+    chưa chạy hoặc chưa truy cập được; ở lần deploy đầu, lỗi xác thực là bình thường trong 1 lúc,
+    cho tới khi CNPG tạo role từ Secret vừa được sync — xem mục 6). Sau 600s nó thoát kèm lỗi cuối
+    cùng và khởi động lại với 1 khung chờ mới; nếu mãi không qua được, `progressDeadlineSeconds`
+    1200s của Deployment sẽ làm fail lần rollout.
 
 ---
 
 ## Bước 9 — CI pipeline
 
-Build và push image của từng service lên Artifact Registry ở mỗi lần push lên `master` có đụng
-tới `backend/**` hoặc `scripts/**` (hoặc qua `workflow_dispatch` thủ công), được gate bởi đúng các
-kiểm tra lint/test/coverage mà 1 pull request chạy. Mọi thứ dưới đây đã được
-implement trong [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
+Build và push image của từng service lên Artifact Registry ở mỗi lần push lên `master` mà job
+`test` có chạy (xem "Workflow làm gì" bên dưới), hoặc qua `workflow_dispatch` thủ công trên
+`master` — chỉ sau khi các kiểm tra lint/test/coverage và bước quét secret của chính lần chạy đó
+pass. Mọi thứ dưới đây đã được implement trong
+[backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
 và [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
 — mục này chỉ ghi lại phần cấu hình phía GCP mà 2 file đó giả định đã có, và cách các phần khớp
 với nhau.
@@ -1322,10 +1763,18 @@ WIF_POOL=github-actions-pool
 WIF_PROVIDER=github-actions-provider
 GH_REPO=tanhutminh/cafe-microservice-project
 
-# The registry the workflow pushes to
+# The registry the workflow pushes to. --immutable-tags: a pushed content-hash tag can never be
+# moved to a different image, so what deploy.sh checked is what the nodes pull. It also means a
+# tagged image can't be deleted or untagged - turn immutability off first if you ever must.
 gcloud artifacts repositories create "$AR_REPO" \
   --repository-format=docker --location="$REGION" --project="$PROJECT_ID" \
-  --description="Backend service images"
+  --description="Backend service images" --immutable-tags
+
+# A repository created before without the flag: turn it on, then confirm (prints True)
+gcloud artifacts repositories update "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" --immutable-tags
+gcloud artifacts repositories describe "$AR_REPO" \
+  --location="$REGION" --project="$PROJECT_ID" --format='value(dockerConfig.immutableTags)'
 
 # Nodes need to pull from it. A node pool with no --service-account set at creation uses the
 # Compute Engine default SA - `gcloud container node-pools describe ... --format="value(config.serviceAccount)"`
@@ -1348,7 +1797,8 @@ gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
 # Workload Identity Federation for GitHub Actions - a separate trust setup from the per-pod one
 # in Step 2 (that one lets a K8s pod act as a GSA; this one lets a GitHub Actions run act as one,
 # with no per-pod-equivalent component). The attribute-condition restricts it to this exact repo
-# AND to pushes on master, not just anyone who learns the provider's resource name.
+# AND to runs whose ref is master (here, a push or a workflow_dispatch on master; a pull_request
+# run's ref is refs/pull/<n>/merge), not just anyone who learns the provider's resource name.
 gcloud iam workload-identity-pools create "$WIF_POOL" \
   --project="$PROJECT_ID" --location=global --display-name="GitHub Actions"
 gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
@@ -1376,32 +1826,102 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
 
 5 job, đều nằm trong [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
 
-- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) quyết định liệu
-  `backend/**`, `scripts/**`, `charts/**`, hay `k8s/**` có thay đổi hay không (4 output riêng
-  biệt), để các job còn lại có thể bỏ qua khi không liên quan. Cố tình **không đặt path filter
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) tính ra 5 output
+  riêng biệt, để các job còn lại có thể bỏ qua khi không liên quan (đây là nơi duy nhất liệt kê
+  các path; các mục bên dưới chỉ gọi output theo tên):
+  - `backend` — `backend/**`;
+  - `scripts` — `scripts/**` hoặc `.gitignore` ở gốc repo, vì cơ chế kiểm tra trạng thái repo của
+    `deploy.sh` và các case của `deploy.test.sh` dựa vào các pattern trong đó;
+  - `charts` — `charts/**`;
+  - `k8s` — `k8s/**`;
+  - `workflow` — chính file workflow. Mọi job và step được gate theo các output kia cũng chạy khi
+    output này là true, nên 1 PR sửa step nào thì step đó được chạy thử trước khi merge (và
+    `deploy.test.sh`, vốn đọc file workflow, cũng chạy lại).
+
+  Trên PR, filter so với nhánh base; trên 1 lần push lên `master`, so với đỉnh nhánh ngay trước
+  lần push đó (nên 1 lần push nhiều commit được xét như 1 khối). Cố tình **không đặt path filter
   trên trigger của chính workflow** (`on.push`/`on.pull_request`) — nếu đặt, cả workflow (chứ
   không chỉ 1 job) sẽ không bao giờ chạy cho 1 PR không liên quan (ví dụ: chỉ sửa frontend), và
-  một khi `test`/`validate-manifests` đã là required status check (xem Branch protection bên
-  dưới), 1 PR không có lần chạy check nào cho chúng sẽ bị chặn merge vĩnh viễn, chứ không chỉ
-  được bỏ qua đúng cách.
-- **`gitleaks`** — quét secret (xem `.gitleaksignore` bên dưới). Chạy vô điều kiện ở mọi lần push
-  và PR, không có path filter nào — secret có thể lọt vào bất kỳ loại file nào (1 credential dán
-  nhầm vào doc, 1 key lạc vào manifest YAML), không riêng gì Java backend, nên không bị gate theo
-  `changes` như `test`/`validate-manifests`.
-- **`test`** — chỉ chạy khi `backend/**` hoặc `scripts/**` có thay đổi (hoặc khi
-  `workflow_dispatch`): `spotless:check` (kiểm tra format, chỉ có ý nghĩa thật trên 1 lần chạy
-  `pull_request` — xem đoạn ngay sau danh sách này), toàn bộ reactor `mvn test`, `mvn jacoco:check`
-  với 5 module có bật sàn coverage (mỗi `pom.xml` của module tự đặt `jacoco.line.coverage.minimum`
-  — 1 ratchet không cho phép thụt lùi: khớp đúng coverage hiện tại của module đó, hoặc mặc định
-  70% của pom cha cho module đã đạt hoặc vượt mức đó, và chỉ tăng dần khi coverage cải thiện), rồi
-  `shellcheck` với `scripts/image-tag.sh`/`scripts/image-tag.test.sh` và chạy chính test script đó.
-- **`validate-manifests`** — chặn việc 1 resource CNPG/Strimzi/Barman bị thêm nhầm vào
-  `charts/*/templates/` (tầng data layer đó nằm ngoài mọi Helm release, xem "Kiến trúc tổng
-  quan"), sau đó `helm lint`/`helm template` (chạy khi `charts/**` hoặc `k8s/**` có thay đổi, hoặc
-  khi `workflow_dispatch`), rồi — chỉ khi `k8s/**` tự nó thay đổi, hoặc khi `workflow_dispatch` —
-  `kubeconform` với `k8s/data-layer/*.yaml` dùng
-  [CRDs-catalog](https://github.com/datreeio/CRDs-catalog) của cộng
-  đồng cho schema CNPG/Strimzi/Barman mà bộ schema có sẵn của `kubeconform` không có.
+  một khi `changes`/`gitleaks`/`test`/`validate-manifests` đã là required status check (xem
+  Branch protection bên dưới), 1 PR không có lần chạy check nào cho chúng sẽ bị chặn merge vĩnh
+  viễn, chứ không chỉ được bỏ qua đúng cách.
+- **`gitleaks`** — quét secret (xem `.gitleaksignore` bên dưới). Chạy vô điều kiện ở mọi lần chạy
+  workflow (push lên `master`, PR hay `workflow_dispatch`), không có path filter nào — secret có
+  thể lọt vào bất kỳ loại file nào (1 credential dán nhầm vào doc, 1 key lạc vào manifest YAML),
+  không riêng gì Java backend, nên không bị gate theo `changes` như `test`/`validate-manifests`.
+- **`test`** — chỉ chạy khi output `backend`, `scripts`, `charts`, `k8s` hoặc `workflow` là true
+  (hoặc khi `workflow_dispatch`); có `charts` và `k8s` vì `deploy.test.sh` đối chiếu `deploy.sh` với
+  các file trong `charts/` và `k8s/data-layer/`, và có `charts` còn vì job này lint và test script
+  initContainer `wait-for-db` của chính chart. Job chạy 2 nhóm kiểm tra độc lập; mỗi nhóm vẫn chạy
+  khi nhóm kia fail, nên 1 lỗi không bao giờ che mất kết quả của nhóm còn lại:
+  - các kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các
+    chart, rồi 3 bộ test `scripts/image-tag.test.sh`,
+    `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`. shellcheck chạy từ
+    1 image được pin theo digest; cùng lệnh đó dùng để lint ở local:
+
+    ```bash
+    docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d -x scripts/*.sh charts/*/files/*.sh
+    ```
+
+    (trên Git Bash, thêm `MSYS_NO_PATHCONV=1` ở đầu lệnh). `wait-for-db.test.sh` chạy chính
+    `wait-for-db.sh` bằng `sh` với các file thực thi giả `psql`, `date` và `sleep`: kiểm tra nó ghi
+    log gì và khi nào, mốc 600s, việc `psql` không nhận cờ kết nối nào, và việc đồng hồ chỉ được
+    đọc bằng `date +%s`. Mỗi lần chạy script bị `timeout` giới hạn ở 10s, nên 1 vòng lặp không bao
+    giờ kết thúc sẽ làm fail test case đó thay vì treo CI. Nó cũng kiểm tra template Deployment cung
+    cấp cho initContainer các biến `PGHOST`, `PGUSER`, `PGPASSWORD` và `PGDATABASE` (user và
+    password lấy từ key `username`/`password` của Secret credentials, host và database lấy từ
+    `db.host`/`db.name` của chart) cùng 1 giá trị `PGCONNECT_TIMEOUT` dương.
+    `deploy.test.sh` unit-test các hàm của `deploy.sh` (cách ráp image reference và các đối số
+    `--set-string`, việc tag được tính tại đúng git ref được truyền vào, kiểm tra phiên bản bash,
+    tool, phiên bản Helm và việc `gcloud` khởi động được, và việc `main` chạy mọi kiểm tra theo đúng
+    thứ tự đã mô tả, trước khi build chart), rồi chạy toàn bộ script trong 1 git repo tạm với các
+    file thực thi giả `kubectl`, `helm`, `gcloud` và `gke-gcloud-auth-plugin` ghi lại mọi lời gọi,
+    tách rõ từng tham số. Git ở đó được cô lập khỏi config và môi trường git của bạn, và được bảo vệ
+    để chỉ có thể tác động lên đúng repo tạm đó. Mỗi cơ chế chặn (file chưa commit, bị git ẩn hoặc
+    bị git-ignore, không đọc được commit `HEAD`, `HEAD` không nằm trên `origin/master`, phiên bản
+    Helm, `gcloud` không khởi động được, kube-context, không tính được tag, thiếu image) phải dừng
+    trước mọi lời gọi phía sau; 1 lần chạy thành công trọn vẹn phải gọi đúng các lệnh mong đợi theo
+    đúng thứ tự, không ghi gì ra stderr, và trên stdout chỉ có output của bước build chart, upgrade
+    và việc liệt kê pod và Secret; còn 1 lần upgrade thất bại vẫn phải trỏ tới runbook. Các tool
+    thật không bao giờ được gọi (xem Bước 8 để biết `deploy.sh` làm gì). `deploy.test.sh` cũng fail
+    nếu đường dẫn registry hoặc danh sách 6 service bị lệch giữa `deploy.sh`, `charts/cafe` và
+    workflow này, vì cả 3 đều lặp lại chúng; nếu `k8s/data-layer/` không ghi namespace nào, hoặc ghi
+    1 namespace khác với namespace mà `deploy.sh` deploy vào (`cafe`); nếu `progressDeadlineSeconds`
+    của các Deployment dùng DB không còn đủ cho khung chờ của `wait-for-db` (đọc từ
+    `wait-for-db.sh`, file mà template phải nhúng đúng 1 lần) cộng startup probe cộng 2 phút; hoặc
+    nếu timeout Helm của `deploy.sh` không lớn hơn deadline lớn nhất đang có hiệu lực (tính cả mặc
+    định 600s của gateway) ít nhất 2 phút.
+  - các kiểm tra Maven, khi output `backend` hoặc `workflow` là true, ở mọi lần push lên
+    `master` mà `test` có chạy, hoặc khi `workflow_dispatch`, bước sau chỉ chạy khi bước trước
+    pass: `spotless:check` (kiểm tra format, chỉ có ý nghĩa thật trên 1 lần chạy `pull_request` —
+    xem ghi chú về Spotless ở dưới), toàn bộ reactor `mvn test`, và `mvn jacoco:check` với 5 module
+    có bật sàn coverage (mỗi `pom.xml` của module tự đặt `jacoco.line.coverage.minimum` — 1
+    ratchet không cho phép thụt lùi: khớp đúng coverage hiện tại của module đó, hoặc mặc định 70%
+    của pom cha cho module đã đạt hoặc vượt mức đó, và chỉ tăng dần khi coverage cải thiện).
+
+  Vì vậy 1 PR không đổi code backend, cũng không đổi file workflow, sẽ bỏ qua lần chạy Maven khoảng
+  2 phút, trong khi `test` vẫn là 1 required check duy nhất. Trên `master` các kiểm tra Maven chạy
+  mỗi khi `test` chạy, vì đó là nơi `build-and-push` chạy: mọi image nó push đều đến từ 1 lần chạy
+  đã test đúng cây backend mà image đó được build ra, kể cả khi bản thân lần push chỉ đụng tới
+  script, file chart, manifest trong `k8s/` hay `.gitignore` ở gốc repo (file này chứa pattern
+  ignore cho toàn bộ repo, nên 1 thay đổi trong đó dành cho phần khác của repo, ví dụ frontend, cũng
+  tốn lần chạy Maven đó; `build-and-push` sau đó thấy mọi image đã có sẵn).
+- **`validate-manifests`** — chặn việc 1 resource CNPG/Strimzi/Barman hoặc 1 StorageClass bị thêm
+  nhầm vào `charts/*/templates/` (tầng data layer đó nằm ngoài mọi Helm release, xem "Kiến trúc tổng
+  quan"), sau đó `helm dependency build --skip-refresh` (dùng `build` thay vì `update`, để 1
+  `Chart.lock` bị lệch làm check fail thay vì được tạo lại âm thầm trên runner), 1 bước kiểm tra
+  không có bộ test nào (`*.test.sh`) lọt vào subchart `cafe-service` đã đóng gói (`.helmignore` của
+  nó loại chúng ra), và `helm lint`/`helm template` (render 1 lần cho mỗi service, mỗi lần kiểm tra
+  ConfigMap của service đó có tắt export span sang Zipkin), với Helm được pin ở v4.3.0 để kết quả
+  tái lập được (các bước này chạy khi output `charts`, `k8s` hoặc `workflow` là true, hoặc khi
+  `workflow_dispatch`), rồi — chỉ khi output `k8s` hoặc `workflow` là true, hoặc khi
+  `workflow_dispatch` — `kubeconform` với `k8s/data-layer/*.yaml`. kubeconform không đi kèm schema
+  nào; nó tải schema của các kind có sẵn từ
+  [yannh/kubernetes-json-schema](https://github.com/yannh/kubernetes-json-schema) và schema
+  CNPG/Strimzi/Barman từ [CRDs-catalog](https://github.com/datreeio/CRDs-catalog) của cộng đồng, cả
+  2 đều được pin theo 1 commit. Không có gì tự cập nhật các pin đó: làm mới bằng
+  `git ls-remote <repo> HEAD`, và luôn làm mới pin của CRDs-catalog khi phiên bản CNPG, Strimzi hay
+  barman-cloud trong `k8s/` thay đổi, nếu không manifest sẽ bị kiểm theo schema CRD cũ.
 - **`build-and-push`** — cần cả `test` lẫn `gitleaks` cùng thành công, và chỉ chạy khi push (hoặc
   `workflow_dispatch` thủ công) lên `master`, không bao giờ chạy trên PR. Với mỗi trong 6 service:
   tính tag bằng `scripts/image-tag.sh <service>` (hash nội dung của thư mục service đó,
@@ -1410,10 +1930,26 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   của mọi service đổi ngay cả khi không input nào trong số đó thay đổi, ví dụ sau khi vá bảo mật
   base image), kiểm tra xem Artifact Registry đã có image ở tag đó chưa
   (`docker manifest inspect`), và chỉ build+push nếu chưa có. Điều này làm job trở nên idempotent:
-  1 lần chạy `workflow_dispatch` (hoặc lần push bình thường tiếp theo) luôn kết thúc với nội dung
-  hiện tại của mọi service thực sự có mặt trên registry, bất kể lần chạy trước đã build hay chưa
-  build gì — kể cả 1 commit có job `test` thất bại, thứ mà 1 kiểm tra kiểu "commit này có đụng
-  tới service này không" đơn thuần sẽ bỏ sót vĩnh viễn.
+  1 lần chạy `workflow_dispatch` trên `master`, hoặc bất kỳ lần push nào sau đó lên `master` mà
+  `test` có chạy, sẽ build những gì còn thiếu sau khi các kiểm tra Maven của chính lần chạy đó
+  pass, bất kể lần chạy trước đã build hay chưa build gì — kể cả nội dung còn chưa được build vì
+  job `test` của 1 lần chạy trước thất bại, thứ mà 1 kiểm tra kiểu "commit này có đụng tới
+  service này không" đơn thuần sẽ bỏ sót vĩnh viễn. Push nào mà `test` không chạy (ví dụ chỉ sửa
+  docs) thì không build gì, nên sau 1 lần chạy thất bại, hãy kích hoạt `workflow_dispatch` trên
+  `master` nếu cần image trước lần đổi backend kế tiếp. Immutable tags của repository (phần thiết
+  lập GCP ở trên) từ chối mọi lần push làm 1 tag đã có trỏ sang image khác, nên nếu
+  `docker manifest inspect` lỗi tạm thời với 1 image thật ra đã có, image build lại (với digest
+  khác) bị từ chối và job fail — hãy chạy lại job bị fail. 2 lần chạy của job này không bao giờ
+  làm cùng 1 service cùng lúc (1 nhóm `concurrency` cho mỗi service), nên 2 lần chạy trên `master`
+  sát nhau không cùng build lại 1 service không đổi rồi bị từ chối lần push thứ 2. Với
+  `queue: max`, các lần chạy job này cho cùng 1 service chờ trong nhóm thay vì thay thế nhau, nên
+  lần nào chạy sau chỉ kiểm tra khi lần trước đã xong, và bỏ qua bước build nếu lần trước đã push
+  image.
+
+Mọi job đều đặt `timeout-minutes` (từ 5 đến 20 phút, thay cho mặc định 360 phút của GitHub), nên
+1 lần pull/push image bị treo sẽ làm check fail thay vì giữ 1 required status ở trạng thái chờ
+hàng giờ; các step script trong `test` cũng có giới hạn riêng: 2 phút, hoặc 5 phút với
+`deploy.test.sh`, vì nó chạy `deploy.sh` từ đầu tới cuối hàng chục lần.
 
 **Vì sao kiểm tra Spotless của `test` chỉ có ý nghĩa thật trên 1 lần chạy `pull_request`**: cấu
 hình `ratchetFrom: origin/master` của dự án chỉ kiểm tra các file khác biệt so với
@@ -1435,9 +1971,11 @@ GitHub Settings → Branches → thêm rule cho `master`:
 
 - **Require a pull request before merging** — xem ghi chú về Spotless ở trên để biết vì sao điều
   này quan trọng, không chỉ là thông lệ tốt chung chung.
-- **Require status checks to pass before merging** → thêm `gitleaks`, `test` và
+- **Require status checks to pass before merging** → thêm `changes`, `gitleaks`, `test` và
   `validate-manifests` (chúng chỉ xuất hiện sau khi đã chạy ít nhất 1 lần — merge PR thêm workflow
-  này trước, hoặc chạy 1 lần `workflow_dispatch`, trước khi cấu hình mục này). **Không** thêm
+  này trước, hoặc chạy 1 lần `workflow_dispatch`, trước khi cấu hình mục này). Cần cả `changes`
+  vì `test` và `validate-manifests` phụ thuộc vào nó: nếu nó fail, cả 2 bị bỏ qua, và GitHub tính
+  1 job bị bỏ qua là thành công, đủ để thoả 1 required check. **Không** thêm
   `build-and-push` — nó không bao giờ chạy trên PR, nên 1 PR sẽ hiển thị nó là "Expected — Waiting
   for status to be reported" mãi mãi, không có cách nào thoả mãn được.
 - **Do not allow bypassing the above settings** — nếu không có mục này, bất kỳ ai có quyền admin
@@ -1466,7 +2004,7 @@ gcloud artifacts docker images list \
 
 Từ đây trở đi, 1 lần push bình thường lên `master` có đụng tới `backend/**` chỉ rebuild những
 service có nội dung thực sự thay đổi (hoặc cả 6, nếu `common-lib`/`pom.xml` cha thay đổi) — xem
-Bước 8 để tính tag hiện tại của từng service và deploy nó.
+Bước 8 để deploy nó (`scripts/deploy.sh`).
 
 ---
 
@@ -1525,29 +2063,34 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | Zonal cluster | — (EKS has no zonal/regional tier) | Control plane của EKS luôn multi-AZ trong 1 region, và tính phí ~$0.10/giờ (~2.625₫/giờ) cho phiên bản Kubernetes trong thời gian hỗ trợ tiêu chuẩn, không có ưu đãi miễn phí nào — khác với GKE, vốn miễn phí phí này cho 1 cluster zonal mỗi billing account (1 yếu tố thật sự ảnh hưởng tới thiết kế chi phí, xem "Kiến trúc tổng quan"). |
 | Node pool | Managed node group | 1 tập hợp worker node dùng chung 1 cấu hình (loại máy, đĩa, taint). |
 | Node autoscaling (`--enable-autoscaling`, min 0) | Cluster Autoscaler / Karpenter | Thêm hoặc bớt node theo số pod đang chờ. Autoscaler của GKE có sẵn và cấu hình theo từng node pool; trên EKS bạn thường phải tự cài Cluster Autoscaler hoặc Karpenter. |
-| GCP machine type (`e2-medium`) | AWS EC2 instance type (e.g. `t3.medium`) | Cách đặt tên/phân loại kích thước khác nhau giữa 2 cloud; `t3.medium` khớp khá sát hình dạng của `e2-medium` — cả 2 đều 2 vCPU/4GB, đều thuộc nhóm burstable/tối ưu chi phí. |
+| Compute Engine (GKE nodes are Compute Engine VMs) | Amazon EC2 | Dịch vụ VM của GCP. Mọi node GKE Standard đều là 1 VM Compute Engine, nên các dòng cấp node bên dưới (machine type, Spot VM, service account mặc định, metadata server — xem dòng `--workload-metadata` — và access scopes) là khái niệm của Compute Engine, cũng như các khái niệm tương ứng bên EKS thuộc về EC2. API của nó (`compute.googleapis.com`) được bật cùng với API của GKE (xem Yêu cầu môi trường). |
+| Compute Engine machine type (`e2-medium`) | AWS EC2 instance type (e.g. `t3.medium`) | Cách đặt tên/phân loại kích thước khác nhau giữa 2 cloud; `t3.medium` khớp khá sát hình dạng của `e2-medium` — cả 2 đều 2 vCPU/4GB, đều thuộc nhóm burstable/tối ưu chi phí. |
 | GKE node allocatable reservation (1060 mCPU on shared-core E2) | EKS `kube-reserved` (node bootstrap defaults) | Cả 2 đều cắt 1 phần cố định của mỗi node cho thành phần hệ thống. GKE công bố 1 công thức CPU theo bậc dùng chung cho mọi loại máy (6% core đầu tiên, 1% core kế tiếp, 0,5% cho 2 core kế, 0,25% cho phần vượt quá 4 core) và ghi đè bằng mức cố định 1060 mCPU trên các máy E2 shared-core; AMI tối ưu của EKS áp dụng đúng công thức CPU theo bậc đó lúc bootstrap node, không có ngoại lệ nào cho máy shared-core. Chỉ riêng CPU là khớp — phần memory thì mỗi bên tính theo cách khác nhau. Xem phụ lục "các pod hệ thống GKE tự động thêm vào mỗi node". |
 | Spot VM | EC2 Spot Instance | Cùng cơ chế: dùng capacity dư thừa với giá rẻ hơn, có thể bị thu hồi với báo trước ngắn. |
 | Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Các tier lưu trữ block gắn qua mạng; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` nằm khoảng giữa `gp3` và `io1`/`io2` (không có tương đương chính xác); `pd-extreme` (không dùng ở đây) là tương đương gần nhất của `io1`/`io2` provisioned-IOPS. |
 | PD CSI driver (`pdcsi-node`) + default StorageClass (`standard-rwo`) | EBS CSI driver (EKS add-on) + default StorageClass (commonly `gp2`) | Cấp PersistentVolume từ block storage (dòng Persistent Disk đã nói về các tier đĩa). GKE cài sẵn driver; trên EKS đây là add-on cần cấu hình IAM riêng. |
 | Workload Identity Federation | IAM Roles for Service Accounts (IRSA) / EKS Pod Identity | Cả 2 đều cho phép 1 pod nhận danh tính IAM của cloud mà không cần static key. IRSA nối qua 1 OIDC provider đăng ký với cluster; EKS Pod Identity (mới hơn) đơn giản hoá cùng ý tưởng đó. Workload pool (`<project>.svc.id.goog`, dùng trong member `serviceAccount:<pool>[ns/ksa]`) là điểm neo tin cậy, giống IAM OIDC provider của IRSA; Pod Identity không có khái niệm tương ứng. GCP tự tạo pool, 1 lần cho mỗi project. |
-| Workload Identity Federation **cho danh tính bên ngoài** (GitHub Actions OIDC, Bước 9) | IAM OIDC identity provider + `AssumeRoleWithWebIdentity` | Cùng cơ chế nền tảng với dòng phía trên, nhưng bên gọi là 1 lần chạy GitHub Actions xác thực qua token OIDC của chính nó, không phải 1 pod Kubernetes — không có thành phần nào theo pod/node, chỉ cần 1 workload identity pool + provider + 1 IAM binding. IAM OIDC identity provider của AWS đóng vai trò điểm neo tin cậy giống pool ở đây. |
+| Workload Identity Federation **for external identities** (GitHub Actions OIDC, Step 9) | IAM OIDC identity provider + `AssumeRoleWithWebIdentity` | Cùng cơ chế nền tảng với dòng phía trên, nhưng bên gọi là 1 lần chạy GitHub Actions xác thực qua token OIDC của chính nó, không phải 1 pod Kubernetes — không có thành phần nào theo pod/node, chỉ cần 1 workload identity pool + provider + 1 IAM binding. IAM OIDC identity provider của AWS đóng vai trò điểm neo tin cậy giống pool ở đây. |
 | Security Token Service (`sts.googleapis.com`) + IAM Service Account Credentials API (`iamcredentials.googleapis.com`) | AWS STS (`sts:AssumeRoleWithWebIdentity`) | Các API thực sự thực hiện việc đổi token OIDC lấy access token đứng sau cả 2 dòng Workload Identity Federation ở trên — chỉ cần bật 1 lần cho mỗi project (xem Yêu cầu môi trường). |
-| `docker login` với username `oauth2accesstoken` và access token do Workload Identity cấp làm password (Bước 9) | `aws ecr get-login-password` | Cả 2 đều biến 1 credential cloud có thời hạn ngắn thành thứ Docker CLI cần để push; GCP tái dùng cơ chế login username/password chung của Docker thay vì 1 lệnh helper riêng. |
+| `docker login` with username `oauth2accesstoken` and a Workload-Identity-issued access token as the password (Step 9) | `aws ecr get-login-password` | Cả 2 đều biến 1 credential cloud có thời hạn ngắn thành thứ Docker CLI cần để push; GCP tái dùng cơ chế login username/password chung của Docker thay vì 1 lệnh helper riêng. |
 | `gke-metadata-server` | EKS Pod Identity Agent | Pod chạy trên mỗi node, cấp credential Workload Identity cho các pod. Chỉ là tương đương gần nhất: IRSA không cần pod theo node như vậy. |
-| `--workload-metadata=GKE_METADATA` (node pool) | — (no equivalent) | Công tắc theo từng node pool, thay metadata server GCE thô bằng metadata server của Workload Identity; không có nó, pod trên pool đó rơi về dùng service account của chính node. Bật nó trên pool đã tồn tại có hiệu lực ngay với các workload đang chạy ở đó, khiến chúng không còn dùng được service account của node và có thể gây gián đoạn. EKS không cần công tắc cấp node như vậy — IRSA/Pod Identity hoạt động theo từng pod. |
+| `--workload-metadata=GKE_METADATA` (node pool) | — (no equivalent) | Công tắc theo từng node pool, thay metadata server Compute Engine thô bằng metadata server của Workload Identity; không có nó, pod trên pool đó rơi về dùng service account của chính node. Bật nó trên pool đã tồn tại có hiệu lực ngay với các workload đang chạy ở đó, khiến chúng không còn dùng được service account của node và có thể gây gián đoạn. EKS không cần công tắc cấp node như vậy — IRSA/Pod Identity hoạt động theo từng pod. |
 | Google Service Account (GSA) | IAM Role | Danh tính phía cloud mà 1 KSA được gắn vào. |
+| Compute Engine default service account (`<project-number>-compute@developer.gserviceaccount.com`) | EKS node IAM role (attached to the node group's EC2 instances via an instance profile) | Danh tính mà các node GKE dùng khi node pool được tạo không có `--service-account`, như cả 2 pool ở đây (`node-pools describe` chỉ in ra `default`); Bước 9 cấp cho nó `roles/artifactregistry.reader` để node pull được image, giống như node role của EKS được gắn `AmazonEC2ContainerRegistryPullOnly`. GCP tự tạo nó cùng Compute Engine API và cấp cho nó role Editor rộng trên toàn project, trừ khi organization policy `iam.automaticIamGrantsForDefaultServiceAccounts` được enforce (mặc định với các organization tạo từ ngày 3/5/2024 trở đi); AWS không tạo sẵn role mặc định nào, nên managed node group của EKS cần 1 node role do bạn (hoặc `eksctl`) tạo. Google khuyến nghị dùng 1 node service account riêng với quyền tối thiểu (`roles/container.defaultNodeServiceAccount`, cộng quyền đọc registry) thay cho nó; tài liệu này giữ SA mặc định. Trên 1 pool `GKE_METADATA`, các pod thông thường dùng Workload Identity của chúng thay vì SA này (xem dòng `--workload-metadata`), nhưng các agent logging và monitoring của GKE và mọi pod `hostNetwork: true` vẫn dùng SA này. |
 | IAM role bindings (`roles/storage.objectAdmin`, `roles/secretmanager.secretAccessor`, `roles/iam.workloadIdentityUser`, …) | IAM policies (identity/resource-based) + trust policies | 1 role của GCP là tập quyền được cấp cho 1 principal trên 1 resource; *role* của AWS là 1 danh tính có thể assume (xem dòng GSA). Đại khái: `roles/storage.objectAdmin` ≈ 1 managed policy, binding ở cấp bucket/secret ≈ resource-based policy, và binding `roles/iam.workloadIdentityUser` đóng vai trò của trust policy của role. |
 | KSA annotation `iam.gke.io/gcp-service-account` | KSA annotation `eks.amazonaws.com/role-arn` | Cùng cơ chế gắn kết, khác tên annotation. |
 | Google Secret Manager | AWS Secrets Manager | Kho lưu secret được quản lý, quyền truy cập qua IAM, có versioning. |
 | Secrets Store CSI Driver + **GCP provider** | Secrets Store CSI Driver + **AWS provider** | Cùng 1 driver Kubernetes SIGs gốc (`secrets-store-csi-driver`); chỉ khác plugin theo từng cloud. |
 | Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — ở đây là nơi Barman Cloud Plugin của CNPG lưu WAL/backup của Postgres (plugin này cũng hỗ trợ S3 trực tiếp). |
 | Artifact Registry | Elastic Container Registry (ECR) | Registry lưu image container — chứa 6 image service mà CI pipeline ở Bước 9 build và push. |
+| Artifact Registry immutable tags (`--immutable-tags`) | ECR tag immutability (`imageTagMutability: IMMUTABLE`) | Cả 2 đều từ chối lần push làm 1 tag đã có trỏ sang image khác. Artifact Registry chặt hơn: khi bật, không xóa hay gỡ tag được khỏi 1 image còn tag (dù làm tay hay qua cleanup policy), còn ECR vẫn cho xóa image và cho lifecycle policy dọn chúng. |
+| Access scopes (node pool / VM: `cloud-platform`, `devstorage.read_only`) | — (no direct equivalent) | Các OAuth scope kiểu cũ, gắn theo từng VM, giới hạn những gì service account gắn với VM được làm, chồng lên trên các IAM role của nó; pull từ Artifact Registry cần `devstorage.read_only` hoặc `cloud-platform` (scope sau giao toàn quyền quyết định cho IAM). Giới hạn gần nhất bên AWS là 1 IAM permissions boundary, đặt trên role chứ không theo từng instance. |
 | Google Managed Prometheus (GMP) | Amazon Managed Service for Prometheus (AMP) | Dịch vụ thu thập metric tương thích Prometheus được quản lý, mặc định bật sẵn trên cluster GKE Standard mới. Các pod `gmp-operator` và `collector` (mỗi node 1 pod) của nó chạy trong `gmp-system`. |
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | Nơi lưu metric và log được quản lý mà `gke-metrics-agent`, `fluentbit-gke` và `event-exporter-gke` ghi vào. Trên EKS, việc đẩy metric node/pod và log container sang CloudWatch phải bật thêm (Container Insights / add-on CloudWatch Observability). |
 | GCP project | AWS account | Ranh giới cô lập tài nguyên, IAM và bật API; phần billing được gom về 1 billing account riêng (dòng kế tiếp). |
 | Billing account | AWS Organizations management (payer) account | Phương tiện thanh toán mà các project gắn vào, tách rời khỏi bản thân project: credit, quota và các ưu đãi miễn phí được tính theo billing account chứ không theo project — ưu đãi miễn phí của GKE là 1 khoản credit hàng tháng cho mỗi billing account, chỉ bù được phí cluster zonal/Autopilot (xem dòng Zonal cluster). Bên AWS không có sự tách bạch tương ứng dưới cấp account; thay vào đó consolidated billing gom nhiều account về 1 payer account. |
-| `gcloud` CLI | `aws` CLI + `eksctl` | GCP gộp thao tác cluster vào `gcloud container clusters`; các thao tác riêng cho EKS bên AWS thường cần thêm `eksctl` (hoặc Terraform) cùng với CLI `aws` gốc. |
+| Organization policy (`iam.automaticIamGrantsForDefaultServiceAccounts`) | AWS Organizations policies (SCPs, declarative policies) | Các ràng buộc đặt ở cấp organization, folder hoặc project, giới hạn cấu hình mà các project bên dưới được phép dùng. Constraint này ngăn GCP tự động cấp role Editor cho các service account mặc định, và được enforce mặc định với các organization tạo từ ngày 3/5/2024 trở đi (xem dòng Compute Engine default service account); Google hiện khuyến nghị constraint chặt hơn `iam.managed.preventPrivilegedBasicRolesForDefaultServiceAccounts`, chặn cả việc cấp Editor hoặc Owner cho chúng về sau. 1 project không thuộc organization nào — như project của tài liệu này — thì không có organization policy, nên service account compute mặc định của nó vẫn giữ role Editor được cấp tự động. Bên AWS, SCP giới hạn quyền mà các account được dùng, còn declarative policy enforce cấu hình dịch vụ; cả 2 đều không có constraint tương đương, vì AWS không tạo role mặc định nào để cấp. |
+| `gcloud` CLI | `aws` CLI + `eksctl` | GCP gộp thao tác cluster vào `gcloud container clusters`; các thao tác riêng cho EKS bên AWS thường cần thêm `eksctl` (hoặc Terraform) cùng với CLI `aws` gốc. Được cài dưới dạng Google Cloud CLI, 1 trong các công cụ Google gộp dưới tên Google Cloud SDK (cùng với các thư viện client) — vì thế mới có thư mục cài đặt `Cloud SDK` và các biến môi trường `CLOUDSDK_*` như `CLOUDSDK_PYTHON` (xem Yêu cầu môi trường); `gke-gcloud-auth-plugin` là 1 trong các component tùy chọn của nó. Nó tự mang theo Python trên Windows và Linux x86_64; trên macOS, installer sẽ cài 1 bản nếu cần. Bên AWS, 1 "SDK" là 1 thư viện client theo từng ngôn ngữ; CLI `aws` được cài riêng. |
 | `gcloud services enable` (API enablement) | — (no per-service enablement) | GCP yêu cầu bật API của từng dịch vụ cho mỗi project; các dịch vụ AWS nhìn chung dùng được mà không cần bước bật riêng (vài tính năng, như Region opt-in, vẫn cần opt-in). |
 | `gke-gcloud-auth-plugin` | `aws eks get-token` (via the `aws` CLI) | Plugin exec-credential của kubectl, đổi credential cloud thành token xác thực với cluster. `gcloud container clusters get-credentials` tương ứng với `aws eks update-kubeconfig`. |
 | `netd` + GKE's default (non-Dataplane V2) datapath | `aws-node` (Amazon VPC CNI plugin) | DaemonSet networking riêng của từng cloud, chạy trên mỗi node. `netd` thiết lập pod networking của node — sinh CNI spec cho plugin PTP từ PodCIDR của node và quản lý việc chuyển hướng gói tin trên node; GKE chạy nó khi bật Workload Identity Federation for GKE (bật ở đây), intranode visibility hoặc dual-stack. `aws-node` làm nhiều hơn — nó còn cấp cho pod IP thật trong VPC lấy từ ENI. Lưu ý là không có gì trên cluster này thực thi NetworkPolicy: với cluster không dùng Dataplane V2, việc đó cần `--enable-network-policy`, cờ này cài Calico (`calico-node`) và mặc định tắt. Dataplane V2 của GKE (eBPF/Cilium, không dùng ở đây) mới là tương đồng gần của việc chạy Cilium trên EKS. |
@@ -1555,6 +2098,7 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | `node-local-dns` (NodeLocal DNSCache), `kube-dns-autoscaler` | — (self-managed on EKS) | Các add-on Kubernetes gốc mà GKE cài và quản lý sẵn; trên EKS bạn tự deploy và tự chỉnh kích thước. |
 | `kube-dns`, `kube-proxy`, `metrics-server` | CoreDNS, `kube-proxy`, metrics-server (EKS add-ons) | Các pod hệ thống còn lại mà GKE cài sẵn và tự nâng phiên bản giúp bạn. DNS mặc định của cluster GKE là `kube-dns` chứ không phải CoreDNS. EKS cũng cài sẵn CoreDNS và `kube-proxy` theo mặc định, nhưng dưới dạng add-on mà bạn tự nâng phiên bản; `metrics-server` thì cluster EKS không cài mặc định (`eksctl` bản mới thêm nó như 1 add-on của EKS; nếu không, đó là community add-on bạn tự thêm), còn GKE cài sẵn và tự chỉnh kích thước nó. |
 | GKE Ingress load balancer (`l7-default-backend`) | AWS Load Balancer Controller (ALB) | Tạo HTTP(S) load balancer từ 1 Ingress. GKE tự chạy controller giúp bạn; trên EKS bạn tự cài. `l7-default-backend` (backend trả 404) không có pod tương đương bên ALB. |
+| `BackendConfig` (GKE CRD) | AWS Load Balancer Controller annotations (e.g. `alb.ingress.kubernetes.io/healthcheck-path`) | Cấu hình load balancer theo từng Service (health check, timeout, Cloud CDN, Cloud Armor, IAP, …), gắn vào Service bằng annotation `cloud.google.com/backend-config`. Với controller của AWS, các cấu hình tương đương của ALB (health check, WAF, xác thực OIDC/Cognito, …) là annotation đặt trên Ingress hoặc trên chính Service, annotation của Service được ưu tiên; không có resource riêng chứa cấu hình theo từng Service, và CDN là 1 dịch vụ riêng (CloudFront). |
 
 **Ghi chú**: tài khoản GCP của dự án này đang ở dạng Free Trial, chặn hết mọi yêu cầu tăng quota
 (bên AWS, Service Quotas cấp account, cho phép xin tăng qua support case). Cách né quota-cạn dùng
@@ -1569,6 +2113,17 @@ là đặc thù của giới hạn Free Trial đó, không phải khác biệt c
   thứ tự, không đột ngột).
 - Chính sách dọn dẹp Artifact Registry — tag content-hash không bao giờ trùng hay bị ghi đè, nên
   registry chỉ có tăng lên; không có gì ở đây xoá 1 image cũ khi không còn release nào đang deploy
-  tham chiếu tới nó nữa.
+  tham chiếu tới nó nữa. Khi đã bật immutable tags (Bước 9), cleanup policy cũng không xóa được
+  image còn tag, nên 1 policy như vậy còn cần tắt immutability, hoặc xử lý tag cũ theo cách khác.
+- Việc deploy frontend: image container và Helm chart cho app Angular, 1 workflow CI cho frontend,
+  và Ingress công khai (`/` tới frontend, `/api/*` tới gateway, kèm 1 `BackendConfig` health check
+  cho mỗi Service backend). Cho tới lúc đó mọi Service chỉ dùng được bên trong cluster, và không có
+  gì truy cập được từ bên ngoài cluster.
+- 1 Zipkin collector trong cluster — việc export span đang tắt trên GKE
+  (`global.tracing.export.zipkin.enabled`) cho tới khi deploy collector cùng giá trị endpoint của
+  nó.
+- 1 node service account riêng với quyền tối thiểu (`roles/container.defaultNodeServiceAccount`
+  cộng `roles/artifactregistry.reader`) thay cho Compute Engine default service account mà các
+  node pool đang dùng.
 
 </details>
