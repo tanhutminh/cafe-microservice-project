@@ -13,11 +13,13 @@ permissions:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       scripts: ${{ steps.filter.outputs.scripts }}
       charts: ${{ steps.filter.outputs.charts }}
       k8s: ${{ steps.filter.outputs.k8s }}
+      workflow: ${{ steps.filter.outputs.workflow }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -26,15 +28,24 @@ jobs:
           filters: |
             backend:
               - 'backend/**'
+            # .gitignore too: deploy.sh's repo-state check and deploy.test.sh's cases rely on its
+            # patterns (target/, *-local.yml, charts/*/charts/*.tgz).
             scripts:
               - 'scripts/**'
+              - '.gitignore'
             charts:
               - 'charts/**'
             k8s:
               - 'k8s/**'
+            # This file itself: every job and step gated on the outputs above also runs when it
+            # changes, so an edit to any step is exercised on the same PR (and deploy.test.sh,
+            # which reads this file, reruns).
+            workflow:
+              - '.github/workflows/backend-ci.yml'
 
   gitleaks:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,42 +59,113 @@ jobs:
 
   test:
     needs: changes
-    if: success() && (needs.changes.outputs.backend == 'true' || needs.changes.outputs.scripts == 'true' || github.event_name == 'workflow_dispatch')
+    # `charts` and `k8s` too: deploy.test.sh checks deploy.sh against files under charts/ and
+    # k8s/data-layer/, and this job lints and tests the chart's own wait-for-db initContainer script
+    # (charts/*/files/).
+    if: >-
+      success() && (
+        needs.changes.outputs.backend == 'true' ||
+        needs.changes.outputs.scripts == 'true' ||
+        needs.changes.outputs.charts == 'true' ||
+        needs.changes.outputs.k8s == 'true' ||
+        needs.changes.outputs.workflow == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The Maven checks take ~2 minutes, so a PR that changes neither backend code nor this file
+      # skips them. On master they run whenever this job does, matching build-and-push's own gate:
+      # an image is only ever pushed from a run that tested the backend tree it was built from.
+      RUN_BACKEND: >-
+        ${{
+          needs.changes.outputs.backend == 'true' ||
+          needs.changes.outputs.workflow == 'true' ||
+          github.event_name == 'workflow_dispatch' ||
+          github.ref == 'refs/heads/master'
+        }}
+    # The script checks and the Maven checks are two independent groups: each runs even if the
+    # other failed (`!cancelled()` instead of the default `success()`), so a failure in one group
+    # never hides the other's result. Each Maven check still needs the previous one to succeed.
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      # Pinned by image digest rather than whatever shellcheck the runner image ships; the runbook
+      # documents the same command for running the lint locally. GitHub documents Docker Hub's rate
+      # limit as not applied to public pulls from GitHub-hosted runners; an outage or a rare 429
+      # fails this step - rerun the failed job.
+      - name: Lint scripts (shellcheck)
+        timeout-minutes: 2
+        run: >-
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt
+          koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+          -x scripts/*.sh charts/*/files/*.sh
+
+      - name: Test the image-tag script
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        run: bash scripts/image-tag.test.sh
+
+      - name: Test the wait-for-db script
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        run: bash charts/cafe-service/files/wait-for-db.test.sh
+
+      # It runs deploy.sh end to end dozens of times, each spawning git and the fakes: seconds on
+      # Linux, about 2 minutes under Git Bash on Windows. Its 5-minute limit, above the other script
+      # steps' 2, is headroom for a slow or contended runner, not an expected duration.
+      - name: Test the deploy script
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 5
+        run: bash scripts/deploy.test.sh
+
+      - id: java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && env.RUN_BACKEND == 'true' }}
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
           cache-dependency-path: backend/pom.xml
 
-      - name: Check code formatting (Spotless)
+      - id: spotless
+        name: Check code formatting (Spotless)
+        if: ${{ !cancelled() && steps.java.outcome == 'success' }}
         working-directory: backend
         run: mvn -q spotless:check
 
-      - name: Run full reactor test suite
+      - id: mvntest
+        name: Run full reactor test suite
+        if: ${{ !cancelled() && steps.spotless.outcome == 'success' }}
         working-directory: backend
         run: mvn -q test
 
       - name: Enforce per-module coverage floor (no-regression ratchet)
+        if: ${{ !cancelled() && steps.mvntest.outcome == 'success' }}
         working-directory: backend
         run: mvn -q -pl common-lib,auth-service,menu-service,order-service,inventory-service jacoco:check
 
-      - name: Lint the image-tag script (shellcheck)
-        run: shellcheck scripts/image-tag.sh scripts/image-tag.test.sh
-
-      - name: Test the image-tag script
-        run: bash scripts/image-tag.test.sh
-
   validate-manifests:
     needs: changes
-    if: success() && (needs.changes.outputs.charts == 'true' || needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch')
+    if: >-
+      success() && (
+        needs.changes.outputs.charts == 'true' ||
+        needs.changes.outputs.k8s == 'true' ||
+        needs.changes.outputs.workflow == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUN_KUBECONFORM: >-
+        ${{
+          needs.changes.outputs.k8s == 'true' ||
+          needs.changes.outputs.workflow == 'true' ||
+          github.event_name == 'workflow_dispatch'
+        }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -95,41 +177,79 @@ jobs:
           fi
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        # Pinned for reproducible lint/render results; the default is whatever Helm is latest.
+        with:
+          version: v4.3.0
+
+      - name: helm dependency build
+        run: helm dependency build --skip-refresh charts/cafe
+
+      # The render check below already fails if files/wait-for-db.sh is missing (`required` in the
+      # Deployment template); this catches the opposite leak: test suites Helm should have ignored.
+      - name: Check the packaged cafe-service subchart's files
+        run: |
+          contents=$(tar tzf charts/cafe/charts/cafe-service-*.tgz)
+          if grep -E '\.test\.sh$' <<< "$contents"; then
+            echo "::error::test suites leaked into the packaged cafe-service chart (.helmignore)"
+            exit 1
+          fi
 
       - name: helm lint
-        run: helm dependency update charts/cafe && helm lint charts/cafe
+        run: helm lint charts/cafe
 
+      # One full render per service, printing only that service's ConfigMap: each render fails on a
+      # template error, and each ConfigMap must turn Zipkin span export off, since no Zipkin
+      # collector runs in the cluster (global.tracing.export.zipkin.enabled in charts/cafe).
       - name: helm template (render check)
         run: |
-          helm template charts/cafe -n cafe \
-            --set gateway.image.tag=ci-check \
-            --set auth-service.image.tag=ci-check \
-            --set menu-service.image.tag=ci-check \
-            --set order-service.image.tag=ci-check \
-            --set inventory-service.image.tag=ci-check \
-            --set report-service.image.tag=ci-check \
-            > /dev/null
+          services=(gateway auth-service menu-service order-service inventory-service report-service)
+          set_args=()
+          for svc in "${services[@]}"; do
+            set_args+=(--set-string "${svc}.image.tag=ci-check")
+          done
+          for svc in "${services[@]}"; do
+            rendered=$(helm template charts/cafe -n cafe "${set_args[@]}" \
+              --show-only "charts/$svc/templates/configmap.yaml")
+            if ! grep -A1 'zipkin:' <<< "$rendered" | grep -q 'enabled: false'; then
+              echo "::error::$svc's ConfigMap doesn't turn Zipkin span export off"
+              exit 1
+            fi
+          done
 
       - name: Install kubeconform
-        if: needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch'
+        if: env.RUN_KUBECONFORM == 'true'
         run: |
           curl -sL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz -o kubeconform.tar.gz
           echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  kubeconform.tar.gz" | sha256sum -c -
           tar xzf kubeconform.tar.gz kubeconform
           sudo mv kubeconform /usr/local/bin/
 
+      # Both schema sources are pinned to a commit (the first is kubeconform's own default location,
+      # which otherwise tracks master). Nothing updates these automatically: refresh with
+      # `git ls-remote <repo> HEAD`, and always refresh the CRDs-catalog pin when the CNPG, Strimzi
+      # or barman-cloud version pinned in k8s/ changes, or their manifests are checked against old
+      # CRD schemas.
       - name: Validate k8s/data-layer manifests against real CRD schemas
-        if: needs.changes.outputs.k8s == 'true' || github.event_name == 'workflow_dispatch'
+        if: env.RUN_KUBECONFORM == 'true'
         run: |
           kubeconform -strict \
-            -schema-location default \
-            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -schema-location 'https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json' \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/ad3b08c5045129d7bb1eeffd8e61719b2c8dd1e2/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             k8s/data-layer/*.yaml
 
   build-and-push:
     needs: [test, gitleaks]
     if: success() && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # One run at a time per service: two master runs close together compute the same tag for an
+    # unchanged service, and without this the second could check before the first pushed, rebuild,
+    # and have its push refused by the immutable tags. With `queue: max`, runs of this job for one
+    # service wait in the group rather than replacing each other, so whichever runs second checks
+    # only after the first has finished, and skips the build if the first pushed the image.
+    concurrency:
+      group: build-and-push-${{ matrix.service }}
+      queue: max
     permissions:
       contents: read
       id-token: write
@@ -151,7 +271,7 @@ jobs:
           echo "value=$tag" >> "$GITHUB_OUTPUT"
 
       - id: auth
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: projects/271893052132/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
           service_account: github-actions-ci@cafe-microservices.iam.gserviceaccount.com
@@ -166,7 +286,10 @@ jobs:
           password: ${{ steps.auth.outputs.access_token }}
 
       # Any failure here (not only "no such tag") counts as "missing" and falls through to the
-      # build; a real auth or network problem then fails loudly at the push instead.
+      # build; a real auth or network problem then fails loudly at the push instead. If the image
+      # did exist and only this check failed transiently, the rebuilt image has a different
+      # digest and the repository's immutable tags refuse the push, so the job fails - rerun the
+      # failed job.
       - name: Check whether this content already has an image
         id: exists
         env:
