@@ -281,7 +281,7 @@ These five all defend the same Kafka exchange (the saga above) against the same 
 
 ### Observability
 
-- **Distributed Tracing** — every service exports spans to Zipkin (`http://localhost:9411`) via Micrometer Tracing + Brave; HTTP (gateway routing, WebClient calls) and Kafka produce/consume are auto-instrumented (`spring.kafka.template`/`listener.observation-enabled`), so a request's `traceId` survives every network hop for free.
+- **Distributed Tracing** — every service exports spans to Zipkin (`http://localhost:9411`) via Micrometer Tracing + Brave; HTTP (gateway routing, WebClient calls) and Kafka produce/consume are auto-instrumented (`spring.kafka.template`/`listener.observation-enabled`), so a request's `traceId` survives every network hop for free. That export happens under Docker Compose; on GKE, span export is off (`global.tracing.export.zipkin.enabled: false`) until Zipkin is deployed in the cluster, while trace/span IDs still propagate and appear in logs.
   - The one hop auto-instrumentation can't bridge on its own: the order saga's async relay threads (`OutboxPoller`→`OutboxMessagePublisher`, `InboxPoller`→`InboxMessageProcessor`) run detached from the Kafka consumer thread that received the triggering message, so there's no live span to inherit there. `OutboxMessage`/`InboxMessage` rows carry a `traceparent` column (W3C format): the *enqueuing* code (`OrderSaga.enqueue`, `StockReservationListener.enqueue`, `InboxMessageProcessor.enqueueReply`) captures the currently-active span into that column at write time, and the *relaying* code (`OutboxMessagePublisher.publishOne`, `InboxMessageProcessor.processOne`) restores it into a fresh child span before doing its work — stitching the async gap back into the same trace instead of starting a disconnected one.
   - A row with no stored traceparent (no live span to capture at enqueue time — e.g. `OrderSagaReconciliationJob`'s scheduled sweep re-queuing a stuck saga) falls back to a fresh root span instead of failing; each reconciliation retry is its own complete, freestanding trace rather than a broken link in the original one.
   - Docker's own health-check polling (`GET /actuator/health`, every few seconds per container) is excluded from tracing on every service. `OrderSagaReconciliationJob`'s recurring sweep gets the same treatment on order-service, via an `ObservationPredicate` bean rather than filtering by observation *name* — every `@Scheduled` method shares the single name `tasks.scheduled.execution` (just like every HTTP request shares `http.server.requests`), so filtering by name would silently suppress tracing for every other scheduled method too, not just this one. The scheduled-poller predicate (`ScheduledPollerObservationPredicates`, package-private in order-service's own `config` package) matches on the observation's target class instead — populated only for tasks Spring wraps via its `@Scheduled` machinery (`ScheduledMethodRunnable`). The outbox/inbox pollers (order-service's and inventory-service's `OutboxPoller`, inventory-service's `InboxPoller`) don't need this predicate and aren't in it: they register their fixed delay via `SchedulingConfigurer`/`ScheduledTaskRegistrar.addFixedDelayTask` instead of `@Scheduled`, so each can source its interval from a bound `@ConfigurationProperties` value rather than a second, separately-defaulted placeholder. That registration path also never produces a `tasks.scheduled.execution` observation in the first place, so there's nothing to filter for them.
@@ -301,12 +301,16 @@ backend/    Maven multi-module reactor: 5 domain services + gateway + common-lib
 frontend/   Angular (standalone components)
 docker/     Postgres init scripts
 charts/     Helm charts for the real GKE deployment: cafe-service (reusable per-service chart)
-            + cafe (umbrella chart aliasing it 6 times, one per service)
+            + cafe (umbrella chart aliasing it 6 times, one per service); cafe-service's
+            wait-for-db initContainer script lives in its files/ (wait-for-db.sh, tested
+            by a sibling wait-for-db.test.sh suite that CI runs)
 k8s/        Plain K8s/CNPG/Strimzi manifests for the data layer (Postgres cluster +
             storage class + backups, Kafka cluster) and Helm values overrides for
             cluster-wide operators (currently just Strimzi's)
-scripts/    Standalone scripts shared between local use and CI, e.g. image-tag.sh
-            (computes a backend service's content-hash image tag)
+scripts/    Standalone shell scripts: image-tag.sh (computes a backend service's
+            content-hash image tag; used by CI and by local deploys) and deploy.sh (deploys
+            the 6 backend services' images for the checked-out commit to the real GKE
+            cluster from a local shell), each tested by a sibling *.test.sh suite that CI runs
 .github/    GitHub Actions workflows (currently: backend-ci.yml, see Testing below and
             docs/gke-cicd-runbook.md's Step 9)
 docs/       Step-by-step setup runbooks (currently: the GKE/CI-CD build, see
@@ -322,8 +326,9 @@ Until config-server's retirement, its native config lived at `backend/config-ser
 - Java 21
 - Node.js 20+ (Angular 21 / npm 11)
 - Docker & Docker Compose
-- Helm & kubectl, and access to a Kubernetes cluster — only needed for the `charts/`/`k8s/` GKE
-  deployment, not for running locally via Docker Compose below
+- Helm 4.1.1+, kubectl and gcloud, and access to the GKE cluster — only needed for the
+  `charts/`/`k8s/` GKE deployment, not for running locally via Docker Compose below (full list
+  in the runbook's Prerequisites)
 
 ## Running locally
 
@@ -373,7 +378,16 @@ Some modules are the exception: certain test classes run against a real Postgres
 
 Modules that opt into the `jacoco-maven-plugin` (declared once in the parent `pom.xml`'s `pluginManagement`; `common-lib`, `auth-service`, `menu-service`, `order-service`, and `inventory-service` activate it so far) write a drill-down HTML coverage report on every `mvn test` run, at `<module>/target/site/jacoco/index.html` — e.g. `backend/inventory-service/target/site/jacoco/index.html`. It's a plain static file, not served by anything: open it as a `file://` URL, e.g. `file:///<path-to-repo>/backend/inventory-service/target/site/jacoco/index.html` (substitute your own absolute repo path), or just double-click the file. You'll see coverage per package, then per class, then per line (same drill-down shape as the frontend's report; uncovered lines are highlighted red). To check a different module once it opts in, swap the `-pl` module name and the path accordingly. Each opted-in module sets its own `jacoco.line.coverage.minimum` property — a no-regression ratchet at that module's current coverage, or the parent's 70% default for a module already at or above it — enforced by `mvn jacoco:check`; backend test coverage is being raised module by module rather than all at once, so check the codebase for the current per-module floor instead of treating this README as the tracker.
 
-[`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) runs a `gitleaks` secret scan on every push and pull request. Its `test` job — which only runs when `backend/**` or `scripts/**` changed (or on a manual `workflow_dispatch`) — additionally runs `spotless:check`, the full `mvn test` reactor, `mvn jacoco:check` against the per-module floors above, and `shellcheck`/a self-test of `scripts/image-tag.sh`. On a push to `master` it also builds and pushes each service's image to Artifact Registry, tagged by content hash (see [`scripts/image-tag.sh`](scripts/image-tag.sh)) — see `docs/gke-cicd-runbook.md`'s Step 9 for the full pipeline, its path-based job gating, and the one-time GCP setup it depends on.
+[`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) runs these jobs:
+
+- `changes`: computes which parts of the repo changed (backend, scripts, charts, k8s, the workflow file); `test` and `validate-manifests` gate on its outputs.
+- `gitleaks`: a secret scan on every push to `master`, every pull request update and every manual `workflow_dispatch` run.
+- `test`, script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`, plus the three test suites `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`.
+- `test`, Maven checks: `spotless:check`, the full `mvn test` reactor and `mvn jacoco:check` against the per-module floors above; they run when `backend/` or the workflow file changed, on `workflow_dispatch`, and on every push to `master` on which `test` runs.
+- `validate-manifests`: a guard that no data-layer resource (CNPG, Strimzi or Barman resources, or a StorageClass) is added under `charts/*/templates/`, then a check that no test suite leaks into the packaged subchart, `helm lint`, a per-service render check of the charts, and `kubeconform` validation of the `k8s/data-layer/` manifests against their schemas; `kubeconform` runs only when `k8s/` or the workflow file changed, or on `workflow_dispatch`.
+- `build-and-push`: on `master`, once `test` and `gitleaks` pass, builds and pushes each service's image not already in Artifact Registry, tagged by content hash (see [`scripts/image-tag.sh`](scripts/image-tag.sh)); a push on which `test` doesn't run builds nothing.
+
+`test` and `validate-manifests` run only when the paths they cover change (as computed by `changes`), or on `workflow_dispatch`; see `docs/gke-cicd-runbook.md`'s Step 9 for the full pipeline, its exact path-based job gating, and the one-time GCP setup it depends on.
 
 ## Code formatting
 
@@ -693,7 +707,7 @@ Cả 5 pattern dưới đây đều bảo vệ cùng 1 luồng trao đổi qua K
 
 ### Khả năng quan sát (Observability)
 
-- **Truy vết phân tán (Distributed Tracing)** — mọi service đều export span sang Zipkin (`http://localhost:9411`) qua Micrometer Tracing + Brave; HTTP (routing ở gateway, các lời gọi WebClient) và Kafka produce/consume được tự động instrument (`spring.kafka.template`/`listener.observation-enabled`), nên `traceId` của 1 request sống sót qua mọi hop mạng mà không cần code thêm gì.
+- **Truy vết phân tán (Distributed Tracing)** — mọi service đều export span sang Zipkin (`http://localhost:9411`) qua Micrometer Tracing + Brave; HTTP (routing ở gateway, các lời gọi WebClient) và Kafka produce/consume được tự động instrument (`spring.kafka.template`/`listener.observation-enabled`), nên `traceId` của 1 request sống sót qua mọi hop mạng mà không cần code thêm gì. Việc export đó diễn ra khi chạy bằng Docker Compose; trên GKE, export span đang tắt (`global.tracing.export.zipkin.enabled: false`) cho tới khi Zipkin được deploy trong cluster, còn trace/span ID vẫn được truyền đi và vẫn xuất hiện trong log.
   - Có 1 khoảng mà auto-instrumentation không tự nối được: các thread relay bất đồng bộ của saga đơn hàng (`OutboxPoller`→`OutboxMessagePublisher`, `InboxPoller`→`InboxMessageProcessor`) chạy tách rời khỏi thread Kafka consumer đã nhận message kích hoạt, nên không có span nào đang sống để kế thừa ở đó. `OutboxMessage`/`InboxMessage` có thêm cột `traceparent` (định dạng W3C): phía *enqueue* (`OrderSaga.enqueue`, `StockReservationListener.enqueue`, `InboxMessageProcessor.enqueueReply`) chụp lại span đang active vào cột đó lúc ghi, còn phía *relay* (`OutboxMessagePublisher.publishOne`, `InboxMessageProcessor.processOne`) khôi phục nó thành 1 span con mới trước khi làm việc — khâu lại khoảng trống bất đồng bộ vào cùng 1 trace thay vì tạo ra 1 trace rời rạc mới.
   - 1 dòng không có traceparent lưu sẵn (không có span nào đang sống lúc enqueue — ví dụ vòng sweep định kỳ của `OrderSagaReconciliationJob` khi re-queue 1 saga bị kẹt) sẽ rơi về khởi tạo 1 span gốc mới thay vì lỗi; mỗi lần retry của reconciliation là 1 trace hoàn chỉnh, độc lập riêng, chứ không phải 1 liên kết gãy trong trace gốc.
   - Health-check polling của Docker (`GET /actuator/health`, gọi mỗi vài giây/container) bị loại khỏi tracing ở mọi service. Vòng sweep định kỳ của `OrderSagaReconciliationJob` bên order-service cũng bị loại tương tự, qua 1 bean `ObservationPredicate` thay vì lọc theo *tên* observation — mọi method `@Scheduled` dùng chung 1 tên `tasks.scheduled.execution` (giống hệt cách mọi HTTP request dùng chung `http.server.requests`), nên lọc theo tên sẽ âm thầm tắt tracing của mọi scheduled method khác, không chỉ riêng cái này. Predicate scheduled-poller (`ScheduledPollerObservationPredicates`, package-private trong package `config` riêng của order-service) thay vào đó match theo target class của observation — chỉ được điền cho các task Spring bọc qua cơ chế `@Scheduled` (`ScheduledMethodRunnable`). Các poller outbox/inbox (`OutboxPoller` của order-service và inventory-service, `InboxPoller` của inventory-service) không cần predicate này và cũng không nằm trong đó: chúng đăng ký fixed delay qua `SchedulingConfigurer`/`ScheduledTaskRegistrar.addFixedDelayTask` thay vì `@Scheduled`, để mỗi cái lấy interval từ 1 giá trị `@ConfigurationProperties` đã bind thay vì 1 placeholder mặc định riêng dễ lệch. Đường đăng ký đó cũng không bao giờ tạo ra observation `tasks.scheduled.execution` nào cả, nên chẳng có gì để lọc cho chúng.
@@ -713,12 +727,16 @@ backend/    Maven multi-module reactor: 5 domain services + gateway + common-lib
 frontend/   Angular (standalone components)
 docker/     Script khởi tạo Postgres
 charts/     Helm chart cho deploy thật lên GKE: cafe-service (chart tái sử dụng cho từng service)
-            + cafe (umbrella chart alias nó 6 lần, mỗi service 1 alias)
+            + cafe (umbrella chart alias nó 6 lần, mỗi service 1 alias); script initContainer
+            wait-for-db của cafe-service nằm trong files/ của nó (wait-for-db.sh, được kiểm
+            thử bởi bộ wait-for-db.test.sh đi kèm do CI chạy)
 k8s/        Manifest K8s/CNPG/Strimzi thuần cho tầng dữ liệu (Postgres cluster +
             storage class + backup, Kafka cluster) và các file values override Helm
             cho operator dùng chung toàn cluster (hiện chỉ có của Strimzi)
-scripts/    Script dùng chung giữa máy local và CI, vd. image-tag.sh (tính tag
-            content-hash cho image của 1 backend service)
+scripts/    Shell script độc lập: image-tag.sh (tính tag content-hash cho image của 1 backend
+            service; dùng bởi cả CI lẫn deploy local) và deploy.sh (deploy image của 6 backend
+            service ứng với commit đang checkout lên cluster GKE thật từ shell local), mỗi
+            script được kiểm thử bởi 1 bộ *.test.sh đi kèm do CI chạy
 .github/    Workflow GitHub Actions (hiện có: backend-ci.yml, xem mục Kiểm thử bên dưới
             và Bước 9 của docs/gke-cicd-runbook.md)
 docs/       Tài liệu hướng dẫn từng bước (hiện có: quá trình build GKE/CI-CD, xem
@@ -734,8 +752,9 @@ Tới trước khi config-server bị retired, config native của nó nằm ở
 - Java 21
 - Node.js 20+ (Angular 21 / npm 11)
 - Docker & Docker Compose
-- Helm & kubectl, và quyền truy cập 1 Kubernetes cluster — chỉ cần cho việc deploy `charts/`/`k8s/`
-  lên GKE, không cần khi chạy local qua Docker Compose bên dưới
+- Helm 4.1.1+, kubectl và gcloud, và quyền truy cập cluster GKE — chỉ cần cho việc deploy
+  `charts/`/`k8s/` lên GKE, không cần khi chạy local qua Docker Compose bên dưới (danh sách đầy
+  đủ ở phần Yêu cầu môi trường của runbook)
 
 ## Chạy ở local
 
@@ -785,7 +804,16 @@ Một số module là ngoại lệ: 1 số class test chạy trên Postgres và/
 
 Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement` của `pom.xml` gốc; hiện `common-lib`, `auth-service`, `menu-service`, `order-service`, và `inventory-service` đã kích hoạt) sẽ ghi ra báo cáo coverage dạng HTML drill-down sau mỗi lần `mvn test`, tại `<module>/target/site/jacoco/index.html` — ví dụ `backend/inventory-service/target/site/jacoco/index.html`. Đây chỉ là file tĩnh, không có server nào phục vụ cả: mở dạng URL `file://`, ví dụ `file:///<đường-dẫn-repo>/backend/inventory-service/target/site/jacoco/index.html` (thay bằng đường dẫn tuyệt đối repo của bạn), hoặc double-click file đó cũng được. Bạn sẽ thấy coverage theo từng package, rồi từng class, rồi từng dòng code (cùng kiểu drill-down như báo cáo bên frontend; dòng chưa được test sẽ tô đỏ). Muốn xem module khác khi module đó bật jacoco, chỉ cần đổi tên module ở `-pl` và đường dẫn tương ứng. Mỗi module đã opt-in tự đặt property `jacoco.line.coverage.minimum` riêng — 1 ratchet không cho phép thụt lùi, khớp đúng coverage hiện tại của module đó, hoặc mặc định 70% của pom cha cho module đã đạt hoặc vượt mức đó — được `mvn jacoco:check` enforce; coverage backend đang được nâng dần từng module một chứ chưa phủ hết cùng lúc, nên xem trực tiếp codebase để biết sàn coverage hiện tại của từng module thay vì coi README này là nơi theo dõi.
 
-[`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) quét secret bằng `gitleaks` ở mọi lần push và pull request. Job `test` của nó — chỉ chạy khi `backend/**` hoặc `scripts/**` có thay đổi (hoặc khi chạy `workflow_dispatch` thủ công) — chạy thêm `spotless:check`, toàn bộ reactor `mvn test`, `mvn jacoco:check` với các sàn coverage theo từng module ở trên, và `shellcheck`/tự kiểm `scripts/image-tag.sh`. Khi push lên `master`, nó còn build và push image của từng service lên Artifact Registry, gắn tag theo content hash (xem [`scripts/image-tag.sh`](scripts/image-tag.sh)) — xem Bước 9 của `docs/gke-cicd-runbook.md` để biết toàn bộ pipeline, cách gating theo path, và phần cấu hình GCP 1 lần mà nó cần.
+[`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) gồm các job sau:
+
+- `changes`: xác định những phần nào của repo có thay đổi (backend, scripts, charts, k8s, chính file workflow); `test` và `validate-manifests` dựa vào output của job này để quyết định có chạy hay không.
+- `gitleaks`: quét secret ở mọi lần push lên `master`, mỗi lần cập nhật pull request và mọi lần chạy `workflow_dispatch` thủ công.
+- `test`, phần kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các chart, cùng 3 bộ test `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`.
+- `test`, các kiểm tra Maven: `spotless:check`, toàn bộ reactor `mvn test` và `mvn jacoco:check` với các sàn coverage theo từng module ở trên; chúng chạy khi `backend/` hoặc file workflow có thay đổi, khi chạy `workflow_dispatch`, và ở mọi lần push lên `master` mà `test` có chạy.
+- `validate-manifests`: kiểm tra không có resource tầng dữ liệu nào (resource CNPG, Strimzi hoặc Barman, hay 1 StorageClass) bị thêm vào `charts/*/templates/`, rồi kiểm tra không có bộ test nào lọt vào subchart đã đóng gói, `helm lint`, kiểm tra render chart cho từng service, và dùng `kubeconform` kiểm tra các manifest trong `k8s/data-layer/` theo schema của chúng; `kubeconform` chỉ chạy khi `k8s/` hoặc file workflow có thay đổi, hoặc khi chạy `workflow_dispatch`.
+- `build-and-push`: trên `master`, sau khi `test` và `gitleaks` pass, build và push image của từng service chưa có sẵn trên Artifact Registry, gắn tag theo content hash (xem [`scripts/image-tag.sh`](scripts/image-tag.sh)); 1 lần push mà `test` không chạy thì không build gì.
+
+`test` và `validate-manifests` chỉ chạy khi các path mà mỗi job phụ trách có thay đổi (theo kết quả của `changes`), hoặc khi chạy `workflow_dispatch`; xem Bước 9 của `docs/gke-cicd-runbook.md` để biết toàn bộ pipeline, cách gating theo path chi tiết, và phần cấu hình GCP 1 lần mà nó cần.
 
 ## Định dạng code (Code formatting)
 
