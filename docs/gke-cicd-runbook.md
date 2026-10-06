@@ -13,8 +13,9 @@ that deploy the 6 Spring Boot services.
 
 **Scope**: GKE cluster foundation through a successful deploy of `charts/cafe` with
 `scripts/deploy.sh` (Steps 1-8), plus the CI pipeline that builds and pushes the real container
-images those pods run (Step 9). CD/teardown automation (scaling `stateful-pool` up/down around a
-deploy) is separate, not-yet-implemented work — see "Not covered here" at the end.
+images those pods run (Step 9). Pausing and resuming the cluster between sessions is a manual
+procedure (its own section, after Step 9); automating it is separate, not-yet-implemented work — see
+"Not covered here" at the end.
 
 Links to repo files point at `master` on GitHub.
 
@@ -142,7 +143,8 @@ Create the two node pools, then delete the default pool that `clusters create` m
 doesn't linger as a third, unused pool:
 
 ```bash
-# Stateful: Postgres + Kafka. No autoscaling — fixed size, scaled to 0 manually between sessions.
+# Stateful: Postgres + Kafka. No autoscaling — fixed size; to pause it at 0 nodes, hibernate
+# Postgres first (see "Pausing and resuming the cluster between sessions").
 gcloud container node-pools create stateful-pool \
   --cluster=cafe-cluster --zone=us-central1-a \
   --machine-type=e2-medium --disk-type=pd-balanced --disk-size=100 \
@@ -150,7 +152,9 @@ gcloud container node-pools create stateful-pool \
   --node-taints=workload=stateful:NoSchedule \
   --workload-metadata=GKE_METADATA
 
-# Stateless: everything else. Spot + autoscaling min 0 is the real cost lever.
+# Stateless: everything else, on Spot. Autoscaling removes idle nodes but not the last 2-3
+# (system-pods appendix); pausing to 0 nodes is manual (see "Pausing and resuming the cluster
+# between sessions").
 gcloud container node-pools create stateless-pool \
   --cluster=cafe-cluster --zone=us-central1-a \
   --machine-type=e2-medium --spot --disk-type=pd-standard --disk-size=50 \
@@ -941,6 +945,117 @@ From here on, an ordinary push to `master` that touches `backend/**` only rebuil
 whose content actually changed (or all 6, if `common-lib`/the parent `pom.xml` changed) — see
 Step 8 to deploy it (`scripts/deploy.sh`).
 
+## Pausing and resuming the cluster between sessions
+
+Nothing here needs to run around the clock, so between work sessions both node pools can go down to
+0 nodes. What still bills then: the Postgres and Kafka PVCs' persistent disks, the GCS backup
+bucket, Artifact Registry storage and the Secret Manager secret versions. The zonal cluster's
+control-plane fee stays offset by the free-tier credit (see the Zonal cluster row in the GCP ↔ AWS
+appendix).
+
+`stateless-pool`'s autoscaler can't get there by itself: GKE's system pods and the Step 3 operators
+(cert-manager, the CNPG operator with its Barman Cloud Plugin, and Strimzi) always need somewhere to
+run, so it settles at 2-3 nodes (see "GKE system pods added automatically per node"). Pausing
+therefore turns its autoscaling off and resizes it by hand — GKE's own guidance is not to mix the
+cluster autoscaler and manual resizes on one node pool.
+
+### Pausing
+
+Stop the services first, so no Postgres or Kafka client is left; then hibernate Postgres, so
+CloudNativePG shuts it down cleanly and keeps its PVC; then remove the nodes — `stateful-pool`
+before `stateless-pool`, because the CNPG operator that carries out the hibernation runs on
+`stateless-pool`:
+
+```bash
+kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl annotate cluster cafe-postgres cnpg.io/hibernation=on --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=5m &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=0 --zone=us-central1-a --quiet &&
+  gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --no-enable-autoscaling &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=0 --zone=us-central1-a --quiet
+gcloud compute instances list --filter="name~^gke-cafe-cluster-"
+```
+
+The last command should list no instances. The `&&` chain stops at the first command that fails, so
+if Postgres hasn't finished hibernating within 5 minutes, both pools keep running. This shows how
+far the hibernation got:
+
+```bash
+kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.conditions[?(@.type=="cnpg.io/hibernation")].reason}{"\n"}'
+```
+
+- `Hibernated`: it has finished in the meantime.
+- `DeletingPods` or `WaitingPodsDeletion`: Postgres is still shutting down.
+- `WaitingForHealthy`: CNPG doesn't start hibernating until the Cluster is healthy
+  (`kubectl get cluster cafe-postgres` shows its status), and then starts by itself.
+- An empty line: the CNPG operator hasn't acted on the annotation yet — check that the pods in
+  `cnpg-system` (the operator and the Barman Cloud Plugin) are running.
+
+Then rerun from the `kubectl wait` line.
+
+Don't resize `stateful-pool` without hibernating first: the Postgres instance's PodDisruptionBudget
+blocks the node drain for up to an hour, after which Postgres is killed without a clean shutdown.
+Kafka needs nothing special — its single broker pod is evicted when `stateful-pool`'s node is
+drained, Strimzi recreates it at once, and the new pod stays `Pending` until `stateful-pool` has a
+node again.
+
+With the CNPG operator down, the nightly `ScheduledBackup` (`cafe-postgres-daily-backup`) takes no
+backup while the cluster is paused. If its time passed during the pause, the operator creates one
+catch-up backup as soon as it is back — before Postgres wakes — and that backup fails, since CNPG
+can't back up a hibernated cluster. So a scheduled backup succeeds only on a night the cluster is
+running at 00:00 UTC.
+
+### Resuming
+
+In reverse: `stateless-pool` first, so the operators and GKE's system pods have somewhere to run —
+the CNPG operator must be up to wake Postgres — then `stateful-pool`, then Postgres, then the
+services:
+
+```bash
+gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=1 --zone=us-central1-a --quiet
+gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --enable-autoscaling --min-nodes=0 --max-nodes=6
+gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=1 --zone=us-central1-a --quiet
+for ns in cert-manager cnpg-system strimzi-system; do
+  kubectl wait --for=condition=Available deployment --all -n "$ns" --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=300s
+done
+kubectl annotate cluster cafe-postgres cnpg.io/hibernation=off --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.metadata.annotations.cnpg\.io/hibernation}{"\n"}'
+kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=10m
+kubectl wait pod/cafe-kafka-cafe-kafka-pool-0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=10m
+kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
+```
+
+The annotation check must print `off`. Kafka's wait reads the broker pod rather than the `Kafka`
+resource, whose `Ready` condition can still be `True` from before the pause. `--replicas=1` matches
+the chart's `replicas` value, and the 22-minute timeout (as in `scripts/deploy.sh`) outlasts the
+DB-backed Deployments' 1200s `progressDeadlineSeconds`, which their slowest legitimate start is
+sized to fit; `kubectl wait` doesn't stop at that deadline, so a stalled service shows up as this
+wait timing out.
+
+`bash scripts/deploy.sh` (Step 8) brings the services back too, but it also deploys the checked-out
+commit, which may differ from what was running; use it to resume and deploy in one go. Until the
+services run, the CNPG `Cluster` may report missing role password Secrets — see "Troubleshooting
+deploys", item 6.
+
+### Troubleshooting resume
+
+1. **`kubectl get cluster cafe-postgres` shows
+   `Cluster cannot proceed to reconciliation due to an error while interacting with plugins`, and no
+   `cafe-postgres-1` pod appears** — first check that the hibernation annotation really reads `off`
+   (the check under Resuming): while Postgres is still hibernated, the status can keep showing an
+   older error, so this message on its own says little.
+2. **The operator wait stalls, and the CNPG operator logs
+   `name resolver error: produced zero addresses`** — a Spot `stateless-pool` node was reclaimed,
+   taking the CNPG operator, the Barman Cloud Plugin and cert-manager with it: `kubectl get nodes`
+   shows the node `NotReady`, its pods show `Completed`, and
+   `kubectl get endpointslices -n cnpg-system` lists no addresses. It heals by itself once
+   replacement pods are scheduled on a Ready node; rerun the wait. (`kubectl get endpoints` is
+   deprecated and can lag behind; read the EndpointSlices.)
+3. **A resize fails with `ZONE_RESOURCE_POOL_EXHAUSTED`** — the zone is temporarily out of
+   `e2-medium` capacity; wait and retry.
+4. **A pod's CSI volume fails to mount on a fresh node** — see "Troubleshooting deploys", item 1.
+
 ---
 
 ## Appendix: GKE system pods added automatically per node
@@ -998,11 +1113,13 @@ the Notes column for where the mapping breaks down.
 | Zone (`us-central1-a`) / region (`us-central1`) | Availability Zone / Region | A zone is one failure domain inside a region, like an AWS AZ. The names work differently, though: AWS maps physical AZs to names randomly per account, so `us-east-1a` can be a different physical AZ in another account (AZ IDs such as `use1-az1` are the stable identity); GCP documents no such per-project remapping of zone names. `--zone=` pins the cluster and node pools here; `--location=` sets the GCS bucket's region. |
 | Zonal cluster | — (EKS has no zonal/regional tier) | EKS's control plane is always multi-AZ within a region, and billed at ~$0.10/hr (~2,625₫/hr) for a standard-support Kubernetes version, with no free-tier waiver — unlike GKE, which waives this fee for one zonal cluster per billing account (a real cost-design factor, see "Architecture at a glance"). |
 | Node pool | Managed node group | A set of worker nodes sharing one config (machine/instance type, disk, taints). |
-| Node autoscaling (`--enable-autoscaling`, min 0) | Cluster Autoscaler / Karpenter | Adds or removes nodes based on pending pods. GKE's autoscaler is built in and configured per node pool; on EKS you typically install Cluster Autoscaler or Karpenter yourself. |
+| Node autoscaling (`--enable-autoscaling`, min 0) | Cluster Autoscaler / Karpenter | Adds or removes nodes based on pending pods. GKE's autoscaler is built in and configured per node pool; on EKS you typically install Cluster Autoscaler or Karpenter yourself. `--no-enable-autoscaling` turns it off per pool (needed before resizing that pool by hand). |
+| Node pool resize (`gcloud container clusters resize --node-pool --num-nodes`) | Managed node group desired size (`eksctl scale nodegroup` / `aws eks update-nodegroup-config --scaling-config`) | Sets a node pool's node count by hand, down to 0 to pause between sessions (see "Pausing and resuming the cluster between sessions"). GKE's guidance is not to mix it with the cluster autoscaler on the same pool, so autoscaling is turned off first. EKS managed node groups can also be scaled to 0; there too, a running Cluster Autoscaler would fight a manual size. |
 | Compute Engine (GKE nodes are Compute Engine VMs) | Amazon EC2 | GCP's VM service. Every GKE Standard node is a Compute Engine VM, so the node-level rows below (machine type, Spot VM, the default service account, the metadata server — covered in the `--workload-metadata` row — and access scopes) are Compute Engine concepts, as their EKS counterparts are EC2 ones. Its API (`compute.googleapis.com`) is enabled alongside GKE's (see Prerequisites). |
 | Compute Engine machine type (`e2-medium`) | AWS EC2 instance type (e.g. `t3.medium`) | Different per-cloud naming/sizing scheme; `t3.medium` matches `e2-medium`'s shape closely — both 2 vCPU/4GB, both burstable/cost-optimized. |
 | GKE node allocatable reservation (1060 mCPU on shared-core E2) | EKS `kube-reserved` (node bootstrap defaults) | Both carve a fixed slice off each node for system components. GKE publishes one tiered CPU formula for all machine types (6% of the first core, 1% of the next core, 0.5% of the next 2 cores, 0.25% of anything above 4 cores) and overrides it with a flat 1060 mCPU on shared-core E2 types; EKS's optimized AMI applies that same tiered CPU formula at node bootstrap, with no shared-core exception. Only CPU lines up — each side computes its memory reservation differently. See "GKE system pods added automatically per node". |
 | Spot VM | EC2 Spot Instance | Same mechanism: spare capacity at a discount, reclaimable with short notice. |
+| Zone resource stock-out (`ZONE_RESOURCE_POOL_EXHAUSTED`) | EC2 insufficient capacity (`InsufficientInstanceCapacity`) | The zone temporarily has no spare capacity for the requested machine type, so creating a VM — here, a node pool resize or an autoscaler scale-up — fails with `ZONE_RESOURCE_POOL_EXHAUSTED` (or `…_WITH_DETAILS`). It isn't a quota error (those read `QUOTA_EXCEEDED`), so waiting and retrying is the fix. EC2 returns `InsufficientInstanceCapacity` in the same situation. |
 | Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Network-attached block storage tiers; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` sits roughly between `gp3` and `io1`/`io2` (no exact match); `pd-extreme` (not used here) is the closest analogue of the provisioned-IOPS `io1`/`io2`. |
 | PD CSI driver (`pdcsi-node`) + default StorageClass (`standard-rwo`) | EBS CSI driver (EKS add-on) + default StorageClass (commonly `gp2`) | Provisions PersistentVolumes from block storage (the Persistent Disk row covers the disk tiers). GKE ships the driver preinstalled; on EKS it is an add-on that needs its own IAM setup. |
 | Workload Identity Federation | IAM Roles for Service Accounts (IRSA) / EKS Pod Identity | Both let a pod assume a cloud IAM identity with no static key. IRSA wires this through an OIDC provider registered against the cluster; EKS Pod Identity (newer) simplifies the same idea. The workload pool (`<project>.svc.id.goog`, used in `serviceAccount:<pool>[ns/ksa]` members) is the trust anchor, like the IAM OIDC provider in IRSA; Pod Identity has no counterpart. GCP creates the pool automatically, once per project. |
@@ -1046,8 +1163,10 @@ general GCP-vs-AWS difference.
 
 ## Not covered here (separate, future work)
 
-- CD/teardown automation (scaling `stateful-pool` up/down around a deploy, ordered graceful
-  shutdown of Postgres/Kafka).
+- Automating "Pausing and resuming the cluster between sessions" (a CD/teardown workflow or a
+  scheduled job).
+- Fitting the nightly backup schedule to pausing: no scheduled backup runs while the cluster is
+  paused, and the catch-up one on resume fails, since Postgres is still hibernated.
 - An Artifact Registry cleanup policy — content-hash tags never collide or get overwritten, so
   the registry only grows; nothing here deletes an old image once no deployed release still
   references it. With immutable tags on (Step 9), a cleanup policy can't delete tagged images
@@ -1072,10 +1191,10 @@ general GCP-vs-AWS difference.
 cluster, operator CNPG (Postgres) và Strimzi (Kafka), secret lấy từ Secret Manager qua Secrets
 Store CSI Driver, và các Helm chart triển khai 6 service Spring Boot.
 
-**Phạm vi**: từ hạ tầng cluster GKE tới khi deploy `charts/cafe` bằng `scripts/deploy.sh` thành
-công (Bước 1-8), cộng thêm CI pipeline build và push image container thật cho các pod đó (Bước
-9). Tự động hoá CD/teardown (bật/tắt `stateful-pool` quanh mỗi lần deploy) là việc riêng, chưa
-triển khai — xem mục "Chưa bao gồm trong tài liệu này" ở cuối.
+**Phạm vi**: từ hạ tầng cluster GKE tới khi deploy `charts/cafe` bằng `scripts/deploy.sh` thành công
+(Bước 1-8), cộng thêm CI pipeline build và push image container thật cho các pod đó (Bước 9). Tạm
+dừng và bật lại cluster giữa các buổi làm việc là 1 quy trình làm tay (có mục riêng, sau Bước 9); tự
+động hoá nó là việc riêng, chưa triển khai — xem mục "Chưa bao gồm trong tài liệu này" ở cuối.
 
 Link tới file trong repo trỏ thẳng tới `master` trên GitHub.
 
@@ -1202,7 +1321,8 @@ Tạo 2 node pool, rồi xoá node pool mặc định do `clusters create` tạo
 thừa như node pool thứ 3 không dùng tới:
 
 ```bash
-# Stateful: Postgres + Kafka. No autoscaling — fixed size, scaled to 0 manually between sessions.
+# Stateful: Postgres + Kafka. No autoscaling — fixed size; to pause it at 0 nodes, hibernate
+# Postgres first (see "Pausing and resuming the cluster between sessions").
 gcloud container node-pools create stateful-pool \
   --cluster=cafe-cluster --zone=us-central1-a \
   --machine-type=e2-medium --disk-type=pd-balanced --disk-size=100 \
@@ -1210,7 +1330,9 @@ gcloud container node-pools create stateful-pool \
   --node-taints=workload=stateful:NoSchedule \
   --workload-metadata=GKE_METADATA
 
-# Stateless: everything else. Spot + autoscaling min 0 is the real cost lever.
+# Stateless: everything else, on Spot. Autoscaling removes idle nodes but not the last 2-3
+# (system-pods appendix); pausing to 0 nodes is manual (see "Pausing and resuming the cluster
+# between sessions").
 gcloud container node-pools create stateless-pool \
   --cluster=cafe-cluster --zone=us-central1-a \
   --machine-type=e2-medium --spot --disk-type=pd-standard --disk-size=50 \
@@ -2006,6 +2128,114 @@ Từ đây trở đi, 1 lần push bình thường lên `master` có đụng t�
 service có nội dung thực sự thay đổi (hoặc cả 6, nếu `common-lib`/`pom.xml` cha thay đổi) — xem
 Bước 8 để deploy nó (`scripts/deploy.sh`).
 
+## Tạm dừng và bật lại cluster giữa các buổi làm việc
+
+Không có gì ở đây cần chạy suốt ngày đêm, nên giữa các buổi làm việc có thể đưa cả 2 node pool về 0
+node. Khi đó vẫn còn tính phí: persistent disk của các PVC Postgres và Kafka, bucket GCS chứa
+backup, dung lượng Artifact Registry và các version secret trên Secret Manager. Phí control plane
+của cluster zonal vẫn được bù bằng credit miễn phí (xem dòng Zonal cluster trong phụ lục đối chiếu
+GCP ↔ AWS).
+
+Autoscaler của `stateless-pool` không tự về 0 được: các pod hệ thống của GKE và các operator ở
+Bước 3 (cert-manager, operator CNPG cùng Barman Cloud Plugin, và Strimzi) luôn cần chỗ chạy, nên
+pool dừng lại ở 2-3 node (xem phụ lục "các pod hệ thống GKE tự động thêm vào mỗi node"). Vì vậy khi
+tạm dừng phải tắt autoscaling của pool này rồi resize bằng tay — chính GKE khuyến nghị không dùng
+cluster autoscaler cùng lúc với resize bằng tay trên cùng 1 node pool.
+
+### Tạm dừng
+
+Tắt các service trước, để không còn client nào của Postgres hay Kafka; sau đó cho Postgres
+hibernate, để CloudNativePG tắt nó an toàn mà vẫn giữ PVC; rồi mới bỏ các node — `stateful-pool`
+trước `stateless-pool`, vì operator CNPG, thứ thực hiện việc hibernate, chạy trên `stateless-pool`:
+
+```bash
+kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl annotate cluster cafe-postgres cnpg.io/hibernation=on --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=5m &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=0 --zone=us-central1-a --quiet &&
+  gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --no-enable-autoscaling &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=0 --zone=us-central1-a --quiet
+gcloud compute instances list --filter="name~^gke-cafe-cluster-"
+```
+
+Lệnh cuối không được liệt kê instance nào. Chuỗi `&&` dừng ở lệnh đầu tiên bị fail, nên nếu Postgres
+chưa hibernate xong trong 5 phút thì cả 2 pool vẫn chạy. Lệnh sau cho biết việc hibernate đã tới
+đâu:
+
+```bash
+kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.conditions[?(@.type=="cnpg.io/hibernation")].reason}{"\n"}'
+```
+
+- `Hibernated`: việc hibernate đã xong trong lúc đó.
+- `DeletingPods` hoặc `WaitingPodsDeletion`: Postgres vẫn đang tắt.
+- `WaitingForHealthy`: CNPG chưa bắt đầu hibernate cho tới khi Cluster healthy
+  (`kubectl get cluster cafe-postgres` cho thấy status của nó), rồi sẽ tự bắt đầu.
+- Dòng trống: operator CNPG chưa xử lý annotation — kiểm tra các pod trong `cnpg-system` (operator
+  và Barman Cloud Plugin) có đang chạy không.
+
+Sau đó chạy lại từ dòng `kubectl wait`.
+
+Đừng resize `stateful-pool` khi chưa hibernate: PodDisruptionBudget của instance Postgres chặn việc
+drain node tới 1 giờ, sau đó Postgres bị tắt đột ngột, không qua bước tắt an toàn. Kafka không cần
+xử lý gì riêng — pod broker duy nhất bị evict khi node của `stateful-pool` bị drain, Strimzi tạo lại
+nó ngay, và pod mới nằm ở `Pending` cho tới khi `stateful-pool` có node trở lại.
+
+Khi operator CNPG không chạy, `ScheduledBackup` hằng đêm (`cafe-postgres-daily-backup`) không tạo
+backup nào trong lúc cluster tạm dừng. Nếu giờ backup trôi qua trong lúc tạm dừng, operator tạo 1
+backup bù ngay khi chạy lại — trước khi Postgres được đánh thức — và backup đó fail, vì CNPG không
+backup được 1 cluster đang hibernate. Vì vậy backup theo lịch chỉ thành công vào đêm cluster đang
+chạy lúc 00:00 UTC.
+
+### Bật lại
+
+Làm theo thứ tự ngược lại: `stateless-pool` trước, để các operator và pod hệ thống của GKE có chỗ
+chạy — operator CNPG phải chạy thì mới đánh thức được Postgres — sau đó `stateful-pool`, rồi
+Postgres, rồi các service:
+
+```bash
+gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=1 --zone=us-central1-a --quiet
+gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --enable-autoscaling --min-nodes=0 --max-nodes=6
+gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=1 --zone=us-central1-a --quiet
+for ns in cert-manager cnpg-system strimzi-system; do
+  kubectl wait --for=condition=Available deployment --all -n "$ns" --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=300s
+done
+kubectl annotate cluster cafe-postgres cnpg.io/hibernation=off --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.metadata.annotations.cnpg\.io/hibernation}{"\n"}'
+kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=10m
+kubectl wait pod/cafe-kafka-cafe-kafka-pool-0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=10m
+kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
+```
+
+Lệnh kiểm tra annotation phải in ra `off`. Lệnh chờ Kafka đọc pod broker chứ không đọc resource
+`Kafka`, vì condition `Ready` của resource này có thể vẫn là `True` từ trước lúc tạm dừng.
+`--replicas=1` khớp với giá trị `replicas` của chart, và timeout 22 phút (giống `scripts/deploy.sh`)
+dài hơn `progressDeadlineSeconds` 1200s của các Deployment dùng DB, con số được tính để vừa với lần
+khởi động hợp lệ chậm nhất của chúng; `kubectl wait` không dừng ở deadline đó, nên 1 service bị kẹt
+sẽ hiện ra dưới dạng lệnh chờ này bị timeout.
+
+`bash scripts/deploy.sh` (Bước 8) cũng đưa được các service lên lại, nhưng đồng thời deploy luôn
+commit đang checkout, có thể khác với bản đã chạy trước đó; dùng nó khi muốn vừa bật lại vừa deploy.
+Cho tới khi các service chạy, `Cluster` CNPG có thể báo thiếu Secret mật khẩu của các role — xem
+mục 6 của "Xử lý sự cố khi deploy".
+
+### Xử lý sự cố khi bật lại
+
+1. **`kubectl get cluster cafe-postgres` báo
+   `Cluster cannot proceed to reconciliation due to an error while interacting with plugins`, và
+   không có pod `cafe-postgres-1` nào** — trước tiên kiểm tra annotation hibernation đã thật sự là
+   `off` chưa (lệnh kiểm tra ở phần Bật lại): khi Postgres còn đang hibernate, status có thể vẫn
+   hiện 1 lỗi cũ, nên riêng thông báo này nói được rất ít.
+2. **Bước chờ operator bị treo, và operator CNPG ghi log
+   `name resolver error: produced zero addresses`** — 1 node Spot của `stateless-pool` đã bị thu
+   hồi, kéo theo operator CNPG, Barman Cloud Plugin và cert-manager: `kubectl get nodes` hiện node
+   đó `NotReady`, các pod trên đó hiện `Completed`, và `kubectl get endpointslices -n cnpg-system`
+   không có địa chỉ nào. Nó tự hồi phục khi pod thay thế được xếp lên 1 node Ready; chạy lại lệnh
+   chờ. (`kubectl get endpoints` đã deprecated và có thể cập nhật chậm; hãy đọc EndpointSlice.)
+3. **1 lệnh resize fail với `ZONE_RESOURCE_POOL_EXHAUSTED`** — zone tạm hết máy `e2-medium`; đợi rồi
+   thử lại.
+4. **Volume CSI của 1 pod không mount được trên node mới** — xem mục 1 của "Xử lý sự cố khi deploy".
+
 ---
 
 ## Phụ lục: các pod hệ thống GKE tự động thêm vào mỗi node
@@ -2062,11 +2292,13 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | Zone (`us-central1-a`) / region (`us-central1`) | Availability Zone / Region | 1 zone là 1 vùng lỗi bên trong 1 region, tương tự AZ của AWS. Tuy nhiên cách đặt tên thì khác: AWS gán AZ vật lý vào tên 1 cách ngẫu nhiên theo từng account, nên `us-east-1a` có thể là AZ vật lý khác ở account khác (AZ ID như `use1-az1` mới là định danh ổn định); còn GCP không có tài liệu nào nói tên zone bị đổi ánh xạ theo từng project. `--zone=` ghim cluster và node pool ở đây; `--location=` chọn region cho GCS bucket. |
 | Zonal cluster | — (EKS has no zonal/regional tier) | Control plane của EKS luôn multi-AZ trong 1 region, và tính phí ~$0.10/giờ (~2.625₫/giờ) cho phiên bản Kubernetes trong thời gian hỗ trợ tiêu chuẩn, không có ưu đãi miễn phí nào — khác với GKE, vốn miễn phí phí này cho 1 cluster zonal mỗi billing account (1 yếu tố thật sự ảnh hưởng tới thiết kế chi phí, xem "Kiến trúc tổng quan"). |
 | Node pool | Managed node group | 1 tập hợp worker node dùng chung 1 cấu hình (loại máy, đĩa, taint). |
-| Node autoscaling (`--enable-autoscaling`, min 0) | Cluster Autoscaler / Karpenter | Thêm hoặc bớt node theo số pod đang chờ. Autoscaler của GKE có sẵn và cấu hình theo từng node pool; trên EKS bạn thường phải tự cài Cluster Autoscaler hoặc Karpenter. |
+| Node autoscaling (`--enable-autoscaling`, min 0) | Cluster Autoscaler / Karpenter | Thêm hoặc bớt node theo số pod đang chờ. Autoscaler của GKE có sẵn và cấu hình theo từng node pool; trên EKS bạn thường phải tự cài Cluster Autoscaler hoặc Karpenter. `--no-enable-autoscaling` tắt nó cho từng pool (cần làm trước khi resize pool đó bằng tay). |
+| Node pool resize (`gcloud container clusters resize --node-pool --num-nodes`) | Managed node group desired size (`eksctl scale nodegroup` / `aws eks update-nodegroup-config --scaling-config`) | Đặt số node của 1 node pool bằng tay, có thể về 0 để tạm dừng giữa các buổi làm việc (xem "Tạm dừng và bật lại cluster giữa các buổi làm việc"). GKE khuyến nghị không dùng nó cùng lúc với cluster autoscaler trên cùng 1 pool, nên phải tắt autoscaling trước. Managed node group của EKS cũng scale được về 0; ở đó Cluster Autoscaler đang chạy cũng sẽ giành lại số node đặt bằng tay. |
 | Compute Engine (GKE nodes are Compute Engine VMs) | Amazon EC2 | Dịch vụ VM của GCP. Mọi node GKE Standard đều là 1 VM Compute Engine, nên các dòng cấp node bên dưới (machine type, Spot VM, service account mặc định, metadata server — xem dòng `--workload-metadata` — và access scopes) là khái niệm của Compute Engine, cũng như các khái niệm tương ứng bên EKS thuộc về EC2. API của nó (`compute.googleapis.com`) được bật cùng với API của GKE (xem Yêu cầu môi trường). |
 | Compute Engine machine type (`e2-medium`) | AWS EC2 instance type (e.g. `t3.medium`) | Cách đặt tên/phân loại kích thước khác nhau giữa 2 cloud; `t3.medium` khớp khá sát hình dạng của `e2-medium` — cả 2 đều 2 vCPU/4GB, đều thuộc nhóm burstable/tối ưu chi phí. |
 | GKE node allocatable reservation (1060 mCPU on shared-core E2) | EKS `kube-reserved` (node bootstrap defaults) | Cả 2 đều cắt 1 phần cố định của mỗi node cho thành phần hệ thống. GKE công bố 1 công thức CPU theo bậc dùng chung cho mọi loại máy (6% core đầu tiên, 1% core kế tiếp, 0,5% cho 2 core kế, 0,25% cho phần vượt quá 4 core) và ghi đè bằng mức cố định 1060 mCPU trên các máy E2 shared-core; AMI tối ưu của EKS áp dụng đúng công thức CPU theo bậc đó lúc bootstrap node, không có ngoại lệ nào cho máy shared-core. Chỉ riêng CPU là khớp — phần memory thì mỗi bên tính theo cách khác nhau. Xem phụ lục "các pod hệ thống GKE tự động thêm vào mỗi node". |
 | Spot VM | EC2 Spot Instance | Cùng cơ chế: dùng capacity dư thừa với giá rẻ hơn, có thể bị thu hồi với báo trước ngắn. |
+| Zone resource stock-out (`ZONE_RESOURCE_POOL_EXHAUSTED`) | EC2 insufficient capacity (`InsufficientInstanceCapacity`) | Zone tạm thời không còn capacity dư cho machine type được yêu cầu, nên việc tạo VM — ở đây là 1 lệnh resize node pool hoặc 1 lần autoscaler thêm node — fail với `ZONE_RESOURCE_POOL_EXHAUSTED` (hoặc `…_WITH_DETAILS`). Đây không phải lỗi quota (lỗi quota là `QUOTA_EXCEEDED`), nên cách xử lý là đợi rồi thử lại. EC2 trả về `InsufficientInstanceCapacity` trong cùng tình huống. |
 | Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Các tier lưu trữ block gắn qua mạng; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` nằm khoảng giữa `gp3` và `io1`/`io2` (không có tương đương chính xác); `pd-extreme` (không dùng ở đây) là tương đương gần nhất của `io1`/`io2` provisioned-IOPS. |
 | PD CSI driver (`pdcsi-node`) + default StorageClass (`standard-rwo`) | EBS CSI driver (EKS add-on) + default StorageClass (commonly `gp2`) | Cấp PersistentVolume từ block storage (dòng Persistent Disk đã nói về các tier đĩa). GKE cài sẵn driver; trên EKS đây là add-on cần cấu hình IAM riêng. |
 | Workload Identity Federation | IAM Roles for Service Accounts (IRSA) / EKS Pod Identity | Cả 2 đều cho phép 1 pod nhận danh tính IAM của cloud mà không cần static key. IRSA nối qua 1 OIDC provider đăng ký với cluster; EKS Pod Identity (mới hơn) đơn giản hoá cùng ý tưởng đó. Workload pool (`<project>.svc.id.goog`, dùng trong member `serviceAccount:<pool>[ns/ksa]`) là điểm neo tin cậy, giống IAM OIDC provider của IRSA; Pod Identity không có khái niệm tương ứng. GCP tự tạo pool, 1 lần cho mỗi project. |
@@ -2109,8 +2341,10 @@ là đặc thù của giới hạn Free Trial đó, không phải khác biệt c
 
 ## Chưa bao gồm trong tài liệu này (việc riêng, làm sau)
 
-- Tự động hoá CD/teardown (bật/tắt `stateful-pool` quanh mỗi lần deploy, tắt Postgres/Kafka có
-  thứ tự, không đột ngột).
+- Tự động hoá quy trình "Tạm dừng và bật lại cluster giữa các buổi làm việc" (1 workflow CD/teardown
+  hoặc 1 job chạy theo lịch).
+- Điều chỉnh lịch backup hằng đêm cho hợp với việc tạm dừng: trong lúc cluster tạm dừng không có
+  backup theo lịch nào chạy, còn backup bù lúc bật lại thì fail, vì Postgres vẫn đang hibernate.
 - Chính sách dọn dẹp Artifact Registry — tag content-hash không bao giờ trùng hay bị ghi đè, nên
   registry chỉ có tăng lên; không có gì ở đây xoá 1 image cũ khi không còn release nào đang deploy
   tham chiếu tới nó nữa. Khi đã bật immutable tags (Bước 9), cleanup policy cũng không xóa được
