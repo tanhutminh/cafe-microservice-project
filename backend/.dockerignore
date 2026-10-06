@@ -1,0 +1,11 @@
+# Host-only files the image build never needs: build output, IDE metadata, gitignored local config.
+# List only gitignored paths: scripts/image-tag.sh doesn't hash this file, so excluding a tracked
+# file here would change the image without changing its tag.
+**/target
+**/.classpath
+**/.project
+**/.settings
+**/.factorypath
+**/.idea
+**/*.iml
+**/*-local.yml

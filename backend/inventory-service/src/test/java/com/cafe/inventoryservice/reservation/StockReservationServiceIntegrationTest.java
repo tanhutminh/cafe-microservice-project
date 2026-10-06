@@ -59,9 +59,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * each test creates are genuinely committed to the shared Postgres container, so every test deletes
  * them explicitly in a {@code finally} block.
  *
- * <p>Tagged {@code testcontainers} so environments without a reachable Docker daemon (e.g. this
- * service's own Docker image build stage - see its Dockerfile) can exclude just this class and
- * still run every other test.
+ * <p>Tagged {@code testcontainers} so a test run without a reachable Docker daemon can exclude this
+ * class ({@code -DexcludedGroups=testcontainers}) and still run every other test.
  */
 @Tag("testcontainers")
 @DataJpaTest

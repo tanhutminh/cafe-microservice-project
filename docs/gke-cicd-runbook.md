@@ -862,27 +862,27 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   CRDs-catalog one when the CNPG, Strimzi or barman-cloud version in `k8s/` changes, or the
   manifests are checked against old CRD schemas.
 - **`build-and-push`** — needs both `test` and `gitleaks` to succeed, and only runs on a push (or
-  manual `workflow_dispatch`) to `master`, never on a PR. For each of the 6 services: compute its
-  tag with `scripts/image-tag.sh <service>` (a content hash of that service's own directory,
-  `common-lib` and the parent pom — the exact inputs its `Dockerfile` copies; see the script's own
-  header comment for what that deliberately excludes and for the `salt` constant — bump it to
-  force every service's tag to change when nothing in those hashed inputs did, e.g. after a
-  base-image security update), check whether Artifact Registry already has an image at that tag
-  (`docker manifest inspect`), and only build+push if not. This makes the job idempotent: a
-  `workflow_dispatch` run on `master`, or any later push to `master` on which `test` runs, builds
-  whatever is missing once that run's own Maven checks pass, regardless of what did or didn't get
-  rebuilt on any prior run — including content left unbuilt because an earlier run's `test` job
-  failed, which a plain "did this commit touch this service" check would otherwise permanently
-  miss. A push on which `test` doesn't run (say, docs only) builds nothing, so after a failed
-  run, trigger `workflow_dispatch` on `master` if the images are needed before the next backend
-  change. The repository's immutable tags (GCP setup above) refuse any push that would move an
-  existing tag, so if `docker manifest inspect` fails transiently for an image that does exist,
-  the rebuilt image (with a different digest) is refused and the job fails — rerun the failed
-  job. Two runs of this job never work on the same service at once (a per-service
-  `concurrency` group), so two `master` runs close together don't both rebuild an unchanged
-  service and have the second push refused. With `queue: max`, runs of this job for one service
-  wait in the group rather than replacing each other, so whichever runs second checks only after
-  the first has finished, and skips the build if the first pushed the image.
+  manual `workflow_dispatch`) to `master`, never on a PR. Its image build only packages
+  (`-DskipTests`): the tests run once, in `test`. For each of the 6 services: compute its tag with
+  `scripts/image-tag.sh <service>` (a content hash of that service's own directory, `common-lib` and
+  the parent pom — the exact inputs its `Dockerfile` copies; see the script's own header comment for
+  what that deliberately excludes and for the `salt` constant — bump it to force every service's tag
+  to change when nothing in those hashed inputs did, e.g. after a base-image security update), check
+  whether Artifact Registry already has an image at that tag (`docker manifest inspect`), and only
+  build+push if not. This makes the job idempotent: a `workflow_dispatch` run on `master`, or any
+  later push to `master` on which `test` runs, builds whatever is missing once that run's own Maven
+  checks pass, regardless of what did or didn't get rebuilt on any prior run — including content
+  left unbuilt because an earlier run's `test` job failed, which a plain "did this commit touch this
+  service" check would otherwise permanently miss. A push on which `test` doesn't run (say, docs
+  only) builds nothing, so after a failed run, trigger `workflow_dispatch` on `master` if the images
+  are needed before the next backend change. The repository's immutable tags (GCP setup above)
+  refuse any push that would move an existing tag, so if `docker manifest inspect` fails transiently
+  for an image that does exist, the rebuilt image (with a different digest) is refused and the job
+  fails — rerun the failed job. Two runs of this job never work on the same service at once (a
+  per-service `concurrency` group), so two `master` runs close together don't both rebuild an
+  unchanged service and have the second push refused. With `queue: max`, runs of this job for one
+  service wait in the group rather than replacing each other, so whichever runs second checks only
+  after the first has finished, and skips the build if the first pushed the image.
 
 Every job sets `timeout-minutes` (5 to 20 minutes, against GitHub's 360-minute default), so a hung
 image pull or push fails the check instead of holding a required status pending for hours; the
@@ -2045,25 +2045,25 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   `git ls-remote <repo> HEAD`, và luôn làm mới pin của CRDs-catalog khi phiên bản CNPG, Strimzi hay
   barman-cloud trong `k8s/` thay đổi, nếu không manifest sẽ bị kiểm theo schema CRD cũ.
 - **`build-and-push`** — cần cả `test` lẫn `gitleaks` cùng thành công, và chỉ chạy khi push (hoặc
-  `workflow_dispatch` thủ công) lên `master`, không bao giờ chạy trên PR. Với mỗi trong 6 service:
-  tính tag bằng `scripts/image-tag.sh <service>` (hash nội dung của thư mục service đó,
-  `common-lib` và pom cha — đúng các input mà `Dockerfile` của nó copy vào; xem comment ở đầu file
-  script để biết những gì cố tình bị loại ra, và về hằng số `salt` — tăng giá trị này để buộc tag
-  của mọi service đổi ngay cả khi không input nào trong số đó thay đổi, ví dụ sau khi vá bảo mật
-  base image), kiểm tra xem Artifact Registry đã có image ở tag đó chưa
-  (`docker manifest inspect`), và chỉ build+push nếu chưa có. Điều này làm job trở nên idempotent:
-  1 lần chạy `workflow_dispatch` trên `master`, hoặc bất kỳ lần push nào sau đó lên `master` mà
-  `test` có chạy, sẽ build những gì còn thiếu sau khi các kiểm tra Maven của chính lần chạy đó
-  pass, bất kể lần chạy trước đã build hay chưa build gì — kể cả nội dung còn chưa được build vì
-  job `test` của 1 lần chạy trước thất bại, thứ mà 1 kiểm tra kiểu "commit này có đụng tới
-  service này không" đơn thuần sẽ bỏ sót vĩnh viễn. Push nào mà `test` không chạy (ví dụ chỉ sửa
-  docs) thì không build gì, nên sau 1 lần chạy thất bại, hãy kích hoạt `workflow_dispatch` trên
-  `master` nếu cần image trước lần đổi backend kế tiếp. Immutable tags của repository (phần thiết
-  lập GCP ở trên) từ chối mọi lần push làm 1 tag đã có trỏ sang image khác, nên nếu
-  `docker manifest inspect` lỗi tạm thời với 1 image thật ra đã có, image build lại (với digest
-  khác) bị từ chối và job fail — hãy chạy lại job bị fail. 2 lần chạy của job này không bao giờ
-  làm cùng 1 service cùng lúc (1 nhóm `concurrency` cho mỗi service), nên 2 lần chạy trên `master`
-  sát nhau không cùng build lại 1 service không đổi rồi bị từ chối lần push thứ 2. Với
+  `workflow_dispatch` thủ công) lên `master`, không bao giờ chạy trên PR. Bước build image của nó
+  chỉ đóng gói (`-DskipTests`): test chỉ chạy 1 lần, trong job `test`. Với mỗi trong 6 service: tính
+  tag bằng `scripts/image-tag.sh <service>` (hash nội dung của thư mục service đó, `common-lib` và
+  pom cha — đúng các input mà `Dockerfile` của nó copy vào; xem comment ở đầu file script để biết
+  những gì cố tình bị loại ra, và về hằng số `salt` — tăng giá trị này để buộc tag của mọi service
+  đổi ngay cả khi không input nào trong số đó thay đổi, ví dụ sau khi vá bảo mật base image), kiểm
+  tra xem Artifact Registry đã có image ở tag đó chưa (`docker manifest inspect`), và chỉ build+push
+  nếu chưa có. Điều này làm job trở nên idempotent: 1 lần chạy `workflow_dispatch` trên `master`,
+  hoặc bất kỳ lần push nào sau đó lên `master` mà `test` có chạy, sẽ build những gì còn thiếu sau
+  khi các kiểm tra Maven của chính lần chạy đó pass, bất kể lần chạy trước đã build hay chưa build
+  gì — kể cả nội dung còn chưa được build vì job `test` của 1 lần chạy trước thất bại, thứ mà 1 kiểm
+  tra kiểu "commit này có đụng tới service này không" đơn thuần sẽ bỏ sót vĩnh viễn. Push nào mà
+  `test` không chạy (ví dụ chỉ sửa docs) thì không build gì, nên sau 1 lần chạy thất bại, hãy kích
+  hoạt `workflow_dispatch` trên `master` nếu cần image trước lần đổi backend kế tiếp. Immutable tags
+  của repository (phần thiết lập GCP ở trên) từ chối mọi lần push làm 1 tag đã có trỏ sang image
+  khác, nên nếu `docker manifest inspect` lỗi tạm thời với 1 image thật ra đã có, image build lại
+  (với digest khác) bị từ chối và job fail — hãy chạy lại job bị fail. 2 lần chạy của job này không
+  bao giờ làm cùng 1 service cùng lúc (1 nhóm `concurrency` cho mỗi service), nên 2 lần chạy trên
+  `master` sát nhau không cùng build lại 1 service không đổi rồi bị từ chối lần push thứ 2. Với
   `queue: max`, các lần chạy job này cho cùng 1 service chờ trong nhóm thay vì thay thế nhau, nên
   lần nào chạy sau chỉ kiểm tra khi lần trước đã xong, và bỏ qua bước build nếu lần trước đã push
   image.

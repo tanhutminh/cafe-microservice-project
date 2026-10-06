@@ -11,7 +11,10 @@ COPY report-service/pom.xml report-service/pom.xml
 RUN mvn -q -N install
 COPY common-lib common-lib
 COPY menu-service menu-service
-RUN mvn -q -pl menu-service -am package
+# Packages only: -DskipTests compiles the tests but doesn't run them. They run once, in the
+# `test` job of .github/workflows/backend-ci.yml, which must pass before CI builds this image;
+# a local `docker compose build` runs none, so run `mvn test` in backend/ first.
+RUN mvn -q -pl menu-service -am -DskipTests package
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
