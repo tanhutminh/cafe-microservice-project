@@ -11,15 +11,10 @@ COPY report-service/pom.xml report-service/pom.xml
 RUN mvn -q -N install
 COPY common-lib common-lib
 COPY inventory-service inventory-service
-# -DexcludedGroups=testcontainers: tests tagged @Tag("testcontainers") need a real Docker daemon
-# (to start a Postgres container) that this build stage has no access to, so they can never pass
-# here regardless of whether the test itself is correct - they're tagged specifically so they can
-# be excluded here, leaving every other (Docker-independent) test still running as part of this
-# build. The real gate for those tagged tests is `mvn test` run directly on the host or in CI,
-# where Docker is reachable. Note this property is reactor-wide (the -am build also includes
-# common-lib), not scoped to inventory-service alone - harmless today since common-lib has no
-# testcontainers-tagged test, but worth remembering if one is ever added there.
-RUN mvn -q -pl inventory-service -am package -DexcludedGroups=testcontainers
+# Packages only: -DskipTests compiles the tests but doesn't run them. They run once, in the
+# `test` job of .github/workflows/backend-ci.yml, which must pass before CI builds this image;
+# a local `docker compose build` runs none, so run `mvn test` in backend/ first.
+RUN mvn -q -pl inventory-service -am -DskipTests package
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app

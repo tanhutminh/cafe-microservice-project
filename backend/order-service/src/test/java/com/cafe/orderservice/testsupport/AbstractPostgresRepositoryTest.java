@@ -18,9 +18,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * declaring test class's own {@code afterAll} lifecycle, which would leave the container dead for
  * the next subclass to reuse.
  *
- * <p>Tagged {@code testcontainers} so environments without a reachable Docker daemon (e.g. this
- * service's own Docker image build stage - see its Dockerfile) can exclude every subclass and still
- * run every other test.
+ * <p>Tagged {@code testcontainers} so a test run without a reachable Docker daemon can exclude
+ * every subclass ({@code -DexcludedGroups=testcontainers}) and still run every other test.
  */
 @Tag("testcontainers")
 @DataJpaTest

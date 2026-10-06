@@ -2,9 +2,13 @@
 # Prints the content-hash tag of a backend service's container image: 16 hex characters derived
 # from git's own hashes of the source inputs its Dockerfile copies - the service's directory,
 # backend/common-lib and the parent pom. Not covered: the other modules' poms (they can only
-# affect whether the build succeeds, not the jar), and the base images and Maven Central, which
-# git cannot see. The same source content always yields the same tag, so CI can skip building an
-# image that already exists, and a deploy can recompute the tag from any checkout.
+# affect whether the build succeeds, not the jar), backend/.dockerignore (it lists only gitignored
+# paths, so it never changes what a build from a clean checkout copies), and the base images and
+# Maven Central, which git cannot see. backend/<service> and backend/common-lib are each hashed as
+# one whole git tree, src/test included, since the Dockerfile copies them whole: a test-only change
+# gives a new tag and a rebuild although the application code is unchanged. The same source content
+# always yields the same tag, so CI can skip building an image that already exists, and a deploy
+# can recompute the tag from any checkout.
 #
 # Usage: bash scripts/image-tag.sh <service> [git-ref, default HEAD]
 set -euo pipefail

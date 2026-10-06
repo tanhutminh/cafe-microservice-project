@@ -43,9 +43,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * blocks a concurrent transaction, which is the entire "all-or-nothing under concurrency" property
  * this method exists to provide.
  *
- * <p>Tagged {@code testcontainers} so environments without a reachable Docker daemon (e.g. this
- * service's own Docker image build stage - see its Dockerfile) can exclude just this class and
- * still run every other test.
+ * <p>Tagged {@code testcontainers} so a test run without a reachable Docker daemon can exclude this
+ * class ({@code -DexcludedGroups=testcontainers}) and still run every other test.
  */
 @Tag("testcontainers")
 @DataJpaTest

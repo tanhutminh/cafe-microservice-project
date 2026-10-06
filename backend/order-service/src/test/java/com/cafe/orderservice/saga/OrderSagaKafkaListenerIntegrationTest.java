@@ -105,6 +105,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * deliberately routing a message through it here would risk a slow/flaky test for a path already
  * covered at the unit level by {@code OrderSagaTest}'s invalid-payload cases - the DLQ/backoff
  * behavior itself is a distinct concern this class deliberately leaves untested.
+ *
+ * <p>Tagged {@code testcontainers} so a test run without a reachable Docker daemon can exclude this
+ * class ({@code -DexcludedGroups=testcontainers}) and still run every other test.
  */
 @Tag("testcontainers")
 @SpringBootTest
