@@ -15,7 +15,6 @@
   },
   "home": {
     "welcome": "Xin chào, {{name}} ({{role}})",
-    "loadingUser": "Đang tải thông tin người dùng...",
     "comingSoon": "Báo cáo sẽ được bổ sung ở các milestone tiếp theo."
   },
   "role": {

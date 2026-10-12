@@ -15,7 +15,6 @@
   },
   "home": {
     "welcome": "Hello, {{name}} ({{role}})",
-    "loadingUser": "Loading user info...",
     "comingSoon": "Reports will be added in upcoming milestones."
   },
   "role": {

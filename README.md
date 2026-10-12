@@ -367,6 +367,12 @@ npm run test:coverage  # single run, with an HTML coverage report
 
 `test:coverage` writes a drill-down report to `frontend/coverage/frontend/index.html` — open it in a browser to see coverage per folder, then per file, then per line (folders/files are clickable, uncovered lines are highlighted red). Project convention: every new or modified component gets unit tests reaching at least 70% coverage before the work is considered done.
 
+`test:coverage` enforces that floor as a project-wide total: it fails unless statements, branches, functions and lines, each summed over every measured `.ts` file under `src/`, reach 70% (`coverageInclude`/`coverageThresholds` in `angular.json`). A file no spec loads still counts, as 0%, instead of dropping out of the report. No CI workflow runs the frontend tests, so this floor is checked only locally — by `test:coverage` run by hand or from a local `pre-push` git hook (`.git/hooks/pre-push`, not tracked by git, like the `pre-commit` hook under [Code formatting](#code-formatting)) — never on a pull request.
+
+Because the floor isn't per file, a weakly tested file can hide behind well-tested ones; check a changed component against the 70% convention by reading its own row in the HTML report. For a file with an Angular-decorated class (`@Component`, `@Injectable`), that row also counts code the Angular compiler generates for the class (its factory, dev-mode metadata, the code behind signal queries such as `viewChild()`), so its percentages can rise or fall without reflecting how well the class's own logic is tested. Judge it by the uncovered lines the report highlights instead, keeping in mind that a highlight on a `viewChild()` call marks that generated code, not untested logic.
+
+`coverageExclude` leaves out the specs themselves (`*.spec.ts`), the bootstrap and app-wide providers (`main.ts`, `app.config.ts`), `environments/`, the type-only `*.model.ts` files and the spec helpers under `shared/testing/`. Templates (`.html`) aren't measured: only a spec that renders its component exercises the template (e.g. through `fixture.detectChanges()`, `await fixture.whenStable()` or an Angular Material component harness), and the report can't show how much of it.
+
 Backend unit tests run per-module with Maven (JUnit 5 + Mockito):
 
 ```bash
@@ -374,7 +380,7 @@ cd backend
 mvn -pl inventory-service -am test
 ```
 
-Some modules are the exception: certain test classes run against a real Postgres and/or Kafka container via [Testcontainers](https://testcontainers.com/) rather than a mock, to actually exercise behavior that a mock can't verify — for the Postgres-backed ones, a real lock serializing concurrent transactions, real Hibernate persistence-context state, custom JPQL/SQL; for the Kafka-backed ones, real broker wiring (JSON deserialization, header extraction, topic dispatch). order-service and inventory-service currently have Postgres-backed tests of this kind, and order-service additionally has a Kafka-backed one, so `mvn -pl <module> -am test` for either module needs a reachable Docker daemon; each of those classes is tagged `@Tag("testcontainers")` so it can be excluded (`-DexcludedGroups=testcontainers`) on a machine without one. Docker image builds only package (`mvn package -DskipTests`): the full suite, Testcontainers classes included, runs once in CI's `test` job (below), so run `mvn test` yourself before relying on a locally built image.
+Some modules are the exception: certain test classes run against a real Postgres and/or Kafka container via [Testcontainers](https://testcontainers.com/) rather than a mock, to actually exercise behavior that a mock can't verify — for the Postgres-backed ones, a real lock serializing concurrent transactions, real Hibernate persistence-context state, custom JPQL/SQL; for the Kafka-backed ones, real broker wiring (JSON deserialization, header extraction, topic dispatch). order-service and inventory-service currently have Postgres-backed tests of this kind, and order-service additionally has a Kafka-backed one, so `mvn -pl <module> -am test` for either module needs a reachable Docker daemon; each of those classes is tagged `@Tag("testcontainers")` so it can be excluded (`-DexcludedGroups=testcontainers`) on a machine without one. Docker image builds only package (`mvn package -DskipTests`): the full suite, Testcontainers classes included, runs once in CI's `test` job (below), so run `mvn test` yourself before relying on a locally built image. The local `pre-push` hook mentioned above also runs this full reactor (`mvn test`, Testcontainers classes included), so a push from a machine that has the hook installed needs a running Docker daemon as well.
 
 Modules that opt into the `jacoco-maven-plugin` (declared once in the parent `pom.xml`'s `pluginManagement`; `common-lib`, `auth-service`, `menu-service`, `order-service`, and `inventory-service` activate it so far) write a drill-down HTML coverage report on every `mvn test` run, at `<module>/target/site/jacoco/index.html` — e.g. `backend/inventory-service/target/site/jacoco/index.html`. It's a plain static file, not served by anything: open it as a `file://` URL, e.g. `file:///<path-to-repo>/backend/inventory-service/target/site/jacoco/index.html` (substitute your own absolute repo path), or just double-click the file. You'll see coverage per package, then per class, then per line (same drill-down shape as the frontend's report; uncovered lines are highlighted red). To check a different module once it opts in, swap the `-pl` module name and the path accordingly. Each opted-in module sets its own `jacoco.line.coverage.minimum` property — a no-regression ratchet at that module's current coverage, or the parent's 70% default for a module already at or above it — enforced by `mvn jacoco:check`; backend test coverage is being raised module by module rather than all at once, so check the codebase for the current per-module floor instead of treating this README as the tracker.
 
@@ -399,15 +405,22 @@ mvn spotless:check   # fails if a changed file isn't formatted correctly
 mvn spotless:apply   # rewrites files in place to fix it
 ```
 
-Frontend uses [Prettier](https://prettier.io/), configured via `frontend/.prettierrc`:
+Spotless's `ratchetFrom` setting (`origin/master`) limits both goals to files changed since the current branch forked from `origin/master` — committed, staged or unstaged — plus new untracked files.
+
+Frontend uses [Prettier](https://prettier.io/), configured via `frontend/.prettierrc`. Prettier has no equivalent of Spotless's `ratchetFrom`, so the commands below apply the same rule themselves, passing Prettier only the files changed since the current branch forked from `origin/master`, plus new untracked ones:
 
 ```bash
 cd frontend
-npm run format:check
-npm run format
+changed_files() { { git diff --name-only --diff-filter=d --relative --merge-base origin/master; git ls-files --others --exclude-standard; } | sort -u; }
+changed_files | xargs -r npx prettier --check --ignore-unknown   # fails if a changed file isn't formatted correctly
+changed_files | xargs -r npx prettier --write --ignore-unknown   # rewrites those files in place to fix it
 ```
 
-Both checks run automatically in a `pre-commit` git hook (`.git/hooks/pre-commit` — not tracked by git, since hooks live outside version control; copy it manually into a fresh clone) that blocks a commit if staged code fails formatting. Spotless's `ratchetFrom` setting means only files that differ from `origin/master` are checked, so the pre-existing codebase keeps whatever formatting it already had until a file is touched again — there's no one-time "reformat everything" commit to wade through.
+`npm run format:check` and `npm run format` run Prettier over the whole tree instead, so they also flag (or, for `format`, rewrite) files nobody has touched; prefer the `changed_files` commands above.
+
+The Spotless and Prettier checks also run automatically in a `pre-commit` git hook (`.git/hooks/pre-commit` — not tracked by git, since hooks live outside version control; copy it manually into a fresh clone) that blocks a commit if a changed file fails formatting. Its backend half runs `mvn spotless:check`, so it checks the same files as above, staged or not; its frontend half checks only the staged `.ts`, `.html` and `.scss` files under `frontend/src/`, as they are in the working tree. Through the Spotless goals, the `changed_files` commands or the hook, only changed files are checked, each one whole, so the pre-existing codebase keeps whatever formatting it already had until a file is touched again — there's no one-time "reformat everything" commit to wade through.
+
+On a Windows checkout with `core.autocrlf=true`, Git writes working copies with CRLF line endings, which every Prettier check above reports as unformatted even though Git commits the file with LF. To check content only, add `--end-of-line auto` to the `changed_files` commands. To get past the hook, run the fix it prints (`cd frontend && npx prettier --write <file>`), then `git add` the file again: the hook checks the working tree, but the commit takes the staged copy.
 
 ## Troubleshooting
 
@@ -793,6 +806,12 @@ npm run test:coverage  # chạy 1 lần, kèm báo cáo coverage dạng HTML
 
 `test:coverage` ghi ra báo cáo drill-down tại `frontend/coverage/frontend/index.html` — mở bằng trình duyệt để xem coverage theo từng thư mục, rồi từng file, rồi từng dòng code (thư mục/file có thể bấm vào, dòng chưa được test sẽ tô đỏ). Quy ước của dự án: mọi component có code mới hoặc sửa đổi đều cần unit test đạt tối thiểu 70% coverage trước khi coi là hoàn thành.
 
+Chính `test:coverage` áp mức sàn này dưới dạng tổng toàn project: lệnh sẽ fail nếu statements, branches, functions và lines, mỗi chỉ số tính gộp trên mọi file `.ts` được đo trong `src/`, không đạt 70% (`coverageInclude`/`coverageThresholds` trong `angular.json`). File chưa spec nào load tới vẫn được tính, ở mức 0%, chứ không bị bỏ ra khỏi báo cáo. Không có workflow CI nào chạy test frontend, nên mức sàn này chỉ được kiểm tra ở máy local — khi tự chạy `test:coverage` hoặc qua 1 git hook `pre-push` ở máy local (`.git/hooks/pre-push`, không được git track, giống hook `pre-commit` ở mục [Định dạng code](#định-dạng-code-code-formatting)) — không bao giờ trên pull request.
+
+Vì mức sàn không áp theo từng file, 1 file được test sơ sài có thể bị các file được test kỹ che đi; để kiểm tra 1 component đã thay đổi có đạt quy ước 70% hay không, hãy đọc hàng của chính nó trong báo cáo HTML. Với file chứa class có decorator của Angular (`@Component`, `@Injectable`), hàng đó còn tính cả code mà Angular compiler sinh ra cho class (factory, metadata chỉ dùng ở dev mode, code phía sau các signal query như `viewChild()`), nên các con số phần trăm của nó có thể tăng hoặc giảm mà không phản ánh logic của chính class được test tốt tới đâu. Thay vì dựa vào phần trăm, hãy đánh giá file qua những dòng chưa được test mà báo cáo tô đỏ, và lưu ý rằng 1 lời gọi `viewChild()` bị tô đỏ là do phần code được sinh ra đó, chứ không phải logic chưa được test.
+
+`coverageExclude` loại ra: chính các spec (`*.spec.ts`), phần khởi động và provider dùng chung của app (`main.ts`, `app.config.ts`), `environments/`, các file `*.model.ts` chỉ chứa kiểu dữ liệu, và các helper cho spec trong `shared/testing/`. Template (`.html`) không được đo: chỉ spec nào render component (ví dụ qua `fixture.detectChanges()`, `await fixture.whenStable()` hoặc 1 component harness của Angular Material) mới chạy tới template, và báo cáo không cho biết template được test bao nhiêu.
+
 Unit test backend chạy theo từng module bằng Maven (JUnit 5 + Mockito):
 
 ```bash
@@ -800,7 +819,7 @@ cd backend
 mvn -pl inventory-service -am test
 ```
 
-Một số module là ngoại lệ: 1 số class test chạy trên Postgres và/hoặc Kafka thật qua [Testcontainers](https://testcontainers.com/) thay vì mock, để thực sự kiểm chứng các hành vi mà mock không thể kiểm tra được — với nhóm dùng Postgres, đó là 1 khoá thật giúp serialize các transaction chạy đồng thời, trạng thái persistence-context thật của Hibernate, hay JPQL/SQL tự viết; với nhóm dùng Kafka, đó là việc kết nối tới broker thật (deserialize JSON, đọc header, dispatch theo topic). order-service và inventory-service hiện đều có loại test dùng Postgres thật, và riêng order-service có thêm loại dùng Kafka thật, nên `mvn -pl <module> -am test` với module nào trong 2 module đó cũng cần Docker daemon đang chạy; mỗi class như vậy được gắn `@Tag("testcontainers")` để có thể loại trừ (`-DexcludedGroups=testcontainers`) trên máy không có Docker. Bước build Docker image chỉ đóng gói (`mvn package -DskipTests`): toàn bộ bộ test, kể cả các class Testcontainers, chỉ chạy 1 lần trong job `test` của CI (bên dưới), nên hãy tự chạy `mvn test` trước khi tin vào 1 image build ở máy local.
+Một số module là ngoại lệ: 1 số class test chạy trên Postgres và/hoặc Kafka thật qua [Testcontainers](https://testcontainers.com/) thay vì mock, để thực sự kiểm chứng các hành vi mà mock không thể kiểm tra được — với nhóm dùng Postgres, đó là 1 khoá thật giúp serialize các transaction chạy đồng thời, trạng thái persistence-context thật của Hibernate, hay JPQL/SQL tự viết; với nhóm dùng Kafka, đó là việc kết nối tới broker thật (deserialize JSON, đọc header, dispatch theo topic). order-service và inventory-service hiện đều có loại test dùng Postgres thật, và riêng order-service có thêm loại dùng Kafka thật, nên `mvn -pl <module> -am test` với module nào trong 2 module đó cũng cần Docker daemon đang chạy; mỗi class như vậy được gắn `@Tag("testcontainers")` để có thể loại trừ (`-DexcludedGroups=testcontainers`) trên máy không có Docker. Bước build Docker image chỉ đóng gói (`mvn package -DskipTests`): toàn bộ bộ test, kể cả các class Testcontainers, chỉ chạy 1 lần trong job `test` của CI (bên dưới), nên hãy tự chạy `mvn test` trước khi tin vào 1 image build ở máy local. Hook `pre-push` ở máy local nhắc tới ở trên cũng chạy toàn bộ reactor này (`mvn test`, gồm cả các class Testcontainers), nên push từ máy có cài hook đó cũng cần Docker daemon đang chạy.
 
 Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement` của `pom.xml` gốc; hiện `common-lib`, `auth-service`, `menu-service`, `order-service`, và `inventory-service` đã kích hoạt) sẽ ghi ra báo cáo coverage dạng HTML drill-down sau mỗi lần `mvn test`, tại `<module>/target/site/jacoco/index.html` — ví dụ `backend/inventory-service/target/site/jacoco/index.html`. Đây chỉ là file tĩnh, không có server nào phục vụ cả: mở dạng URL `file://`, ví dụ `file:///<đường-dẫn-repo>/backend/inventory-service/target/site/jacoco/index.html` (thay bằng đường dẫn tuyệt đối repo của bạn), hoặc double-click file đó cũng được. Bạn sẽ thấy coverage theo từng package, rồi từng class, rồi từng dòng code (cùng kiểu drill-down như báo cáo bên frontend; dòng chưa được test sẽ tô đỏ). Muốn xem module khác khi module đó bật jacoco, chỉ cần đổi tên module ở `-pl` và đường dẫn tương ứng. Mỗi module đã opt-in tự đặt property `jacoco.line.coverage.minimum` riêng — 1 ratchet không cho phép thụt lùi, khớp đúng coverage hiện tại của module đó, hoặc mặc định 70% của pom cha cho module đã đạt hoặc vượt mức đó — được `mvn jacoco:check` enforce; coverage backend đang được nâng dần từng module một chứ chưa phủ hết cùng lúc, nên xem trực tiếp codebase để biết sàn coverage hiện tại của từng module thay vì coi README này là nơi theo dõi.
 
@@ -825,15 +844,22 @@ mvn spotless:check   # báo lỗi nếu file đã sửa chưa đúng định d�
 mvn spotless:apply   # tự viết lại file cho đúng định dạng
 ```
 
-Frontend dùng [Prettier](https://prettier.io/), cấu hình tại `frontend/.prettierrc`:
+Cấu hình `ratchetFrom` của Spotless (`origin/master`) giới hạn cả 2 goal vào các file đã thay đổi kể từ khi nhánh hiện tại tách ra từ `origin/master` — dù đã commit, đã stage hay chưa stage — cộng các file mới chưa được track.
+
+Frontend dùng [Prettier](https://prettier.io/), cấu hình tại `frontend/.prettierrc`. Prettier không có tính năng tương đương `ratchetFrom` của Spotless, nên các lệnh dưới đây tự áp dụng cùng quy tắc đó, chỉ đưa cho Prettier các file đã thay đổi kể từ khi nhánh hiện tại tách ra từ `origin/master`, cộng các file mới chưa được track:
 
 ```bash
 cd frontend
-npm run format:check
-npm run format
+changed_files() { { git diff --name-only --diff-filter=d --relative --merge-base origin/master; git ls-files --others --exclude-standard; } | sort -u; }
+changed_files | xargs -r npx prettier --check --ignore-unknown   # báo lỗi nếu file đã sửa chưa đúng định dạng
+changed_files | xargs -r npx prettier --write --ignore-unknown   # tự viết lại các file đó cho đúng định dạng
 ```
 
-Cả 2 được tự động enforce qua git hook `pre-commit` (`.git/hooks/pre-commit` — không được git track vì hook nằm ngoài version control; cần copy thủ công khi clone máy mới) — chặn commit nếu code đã stage chưa đúng định dạng. Cấu hình `ratchetFrom` của Spotless nghĩa là chỉ những file khác biệt so với `origin/master` mới bị kiểm tra — code cũ giữ nguyên định dạng ban đầu cho tới khi có ai đó động vào lại, không có 1 commit "format lại toàn bộ" nào phải lướt qua.
+`npm run format:check` và `npm run format` thì chạy Prettier trên toàn bộ cây thư mục, nên chúng còn báo lỗi (hoặc, với `format`, viết lại) cả những file chưa ai động vào; hãy ưu tiên dùng các lệnh `changed_files` ở trên.
+
+Các bước kiểm tra Spotless và Prettier cũng được tự động chạy qua git hook `pre-commit` (`.git/hooks/pre-commit` — không được git track vì hook nằm ngoài version control; cần copy thủ công khi clone máy mới) — chặn commit nếu có file đã thay đổi chưa đúng định dạng. Phần backend của hook chạy `mvn spotless:check`, nên kiểm tra đúng tập file như trên, dù đã stage hay chưa; phần frontend chỉ kiểm tra các file `.ts`, `.html` và `.scss` đã stage trong `frontend/src/`, theo nội dung hiện có trong working tree. Dù qua các goal của Spotless, các lệnh `changed_files` hay qua hook, cũng chỉ những file đã thay đổi mới bị kiểm tra, mỗi file được kiểm tra toàn bộ, nên code cũ giữ nguyên định dạng ban đầu cho tới khi có ai đó động vào lại — không có 1 commit "format lại toàn bộ" nào phải lướt qua.
+
+Trên bản checkout Windows có `core.autocrlf=true`, Git ghi working copy với ký tự xuống dòng CRLF, nên mọi bước kiểm tra Prettier ở trên đều báo file chưa đúng định dạng, dù Git vẫn commit file đó với LF. Để chỉ xét nội dung, thêm `--end-of-line auto` vào các lệnh `changed_files`. Để qua được hook, chạy lệnh sửa mà hook in ra (`cd frontend && npx prettier --write <file>`), rồi `git add` lại file đó: hook kiểm tra working tree, còn commit lấy bản đã stage.
 
 ## Xử lý sự cố thường gặp
 

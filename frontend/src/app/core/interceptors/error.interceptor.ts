@@ -3,12 +3,11 @@ import { inject } from '@angular/core';
 import { Router } from '@angular/router';
 import { catchError, throwError } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
+import { HANDLES_UNAUTHORIZED } from './handles-unauthorized';
 
 /**
- * MVP-level 401 handling: clear the session and bounce to /login. A silent
- * refresh-and-retry flow (queuing concurrent requests while a single refresh
- * call is in flight) would be the natural next step, deliberately deferred —
- * flagged here rather than added speculatively.
+ * Treats a 401 as the end of the session: clears it and redirects to /login, unless the request
+ * sets HANDLES_UNAUTHORIZED. Every error, a 401 included, is passed on to the caller.
  */
 export const errorInterceptor: HttpInterceptorFn = (req, next) => {
   const authService = inject(AuthService);
@@ -16,12 +15,13 @@ export const errorInterceptor: HttpInterceptorFn = (req, next) => {
 
   return next(req).pipe(
     catchError((error: HttpErrorResponse) => {
-      const isAuthEndpoint = req.url.includes('/auth/login') || req.url.includes('/auth/refresh');
-      if (error.status === 401 && !isAuthEndpoint) {
+      if (error.status === 401 && !req.context.get(HANDLES_UNAUTHORIZED)) {
+        // Clear right away rather than once /login is shown: the server has rejected this
+        // session, so no guard or request may go on using it meanwhile.
         authService.clearSession();
         router.navigate(['/login']);
       }
       return throwError(() => error);
-    })
+    }),
   );
 };
