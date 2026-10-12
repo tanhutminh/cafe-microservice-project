@@ -19,7 +19,7 @@ describe('MenuItemDialog', () => {
     price: 45000,
     imageUrl: null,
     available: true,
-    active: true
+    active: true,
   };
 
   let dialogRef: { close: ReturnType<typeof vi.fn> };
@@ -36,10 +36,10 @@ describe('MenuItemDialog', () => {
           useValue: {
             listIngredients: vi.fn().mockReturnValue(of([])),
             getRecipe: vi.fn().mockReturnValue(of([])),
-            replaceRecipe: vi.fn().mockReturnValue(of([]))
-          }
-        }
-      ]
+            replaceRecipe: vi.fn().mockReturnValue(of([])),
+          },
+        },
+      ],
     });
     return TestBed.createComponent(MenuItemDialog);
   }
@@ -55,7 +55,7 @@ describe('MenuItemDialog', () => {
       price: 45000,
       imageUrl: '',
       available: true,
-      active: true
+      active: true,
     });
   });
 
@@ -70,8 +70,15 @@ describe('MenuItemDialog', () => {
       price: 0,
       imageUrl: '',
       available: true,
-      active: true
+      active: true,
     });
+  });
+
+  it('leaves the category empty and flags it as required when there are no categories to pick from', () => {
+    const component = createComponent({ item: null, categories: [] }).componentInstance;
+
+    expect(component.form.controls.categoryId.value).toBeNull();
+    expect(component.form.controls.categoryId.hasError('required')).toBe(true);
   });
 
   it('save() does nothing while the form is invalid', () => {
@@ -91,7 +98,7 @@ describe('MenuItemDialog', () => {
     expect(dialogRef.close).toHaveBeenCalledWith(undefined);
   });
 
-  it('save() treats null description/imageUrl as equal to the form\'s empty-string baseline', () => {
+  it("save() treats null description/imageUrl as equal to the form's empty-string baseline", () => {
     const itemWithNulls: MenuItem = { ...existingItem, description: null, imageUrl: null };
     const component = createComponent({ item: itemWithNulls, categories }).componentInstance;
 
@@ -122,7 +129,7 @@ describe('MenuItemDialog', () => {
       price: 45000,
       imageUrl: '',
       available: true,
-      active: true
+      active: true,
     });
   });
 
@@ -139,7 +146,7 @@ describe('MenuItemDialog', () => {
       price: 50000,
       imageUrl: '',
       available: true,
-      active: true
+      active: true,
     });
   });
 
@@ -152,7 +159,9 @@ describe('MenuItemDialog', () => {
   });
 
   it('save() also triggers the embedded recipe editor to save when editing an existing item', () => {
-    const saveRecipeSpy = vi.spyOn(RecipeEditor.prototype, 'saveRecipe').mockImplementation(() => {});
+    const saveRecipeSpy = vi
+      .spyOn(RecipeEditor.prototype, 'saveRecipe')
+      .mockImplementation(() => {});
     const fixture = createComponent({ item: existingItem, categories });
     fixture.detectChanges();
 

@@ -10,18 +10,25 @@
     <mat-card-content>
       @if (authService.currentUser(); as user) {
         <p>
-          {{ 'home.welcome' | transloco: { name: user.fullName, role: ('role.' + user.role | transloco) } }}
+          {{
+            'home.welcome'
+              | transloco: { name: user.fullName, role: ('role.' + user.role | transloco) }
+          }}
         </p>
-      } @else {
-        <p>{{ 'home.loadingUser' | transloco }}</p>
       }
       <p class="note">{{ 'home.comingSoon' | transloco }}</p>
     </mat-card-content>
     <mat-card-actions>
-      <button mat-flat-button color="primary" routerLink="/pos">{{ 'pos.title' | transloco }}</button>
+      <button mat-flat-button color="primary" routerLink="/pos">
+        {{ 'pos.title' | transloco }}
+      </button>
       @if (authService.currentUser()?.role === 'ADMIN') {
-        <button mat-flat-button color="primary" routerLink="/menu">{{ 'menu.title' | transloco }}</button>
-        <button mat-flat-button color="primary" routerLink="/inventory">{{ 'inventoryAdmin.title' | transloco }}</button>
+        <button mat-flat-button color="primary" routerLink="/menu">
+          {{ 'menu.title' | transloco }}
+        </button>
+        <button mat-flat-button color="primary" routerLink="/inventory">
+          {{ 'inventoryAdmin.title' | transloco }}
+        </button>
       }
       <button mat-stroked-button (click)="logout()">{{ 'auth.logout' | transloco }}</button>
     </mat-card-actions>
