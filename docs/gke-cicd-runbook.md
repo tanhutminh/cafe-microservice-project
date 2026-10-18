@@ -15,7 +15,8 @@ that deploy the 6 Spring Boot services.
 `scripts/deploy.sh` (Steps 1-8), plus the CI pipeline that builds and pushes the real container
 images those pods run (Step 9). Pausing and resuming the cluster between sessions is a manual
 procedure (its own section, after Step 9); automating it is separate, not-yet-implemented work — see
-"Not covered here" at the end.
+"Not covered here" at the end. Restoring Postgres from its backups, including a rehearsal, has its
+own section right after the pausing and resuming one.
 
 Links to repo files point at `master` on GitHub.
 
@@ -86,7 +87,27 @@ are written as plain bash. On Git Bash for Windows, `gcloud` needs `CLOUDSDK_PYT
 - `git` and `sha256sum` on your `PATH` — `scripts/deploy.sh` checks the repo state with git, and
   `scripts/image-tag.sh` hashes with `sha256sum` (Git Bash ships both; macOS before 15 (Sequoia)
   lacks `sha256sum`).
-- A GCP project with billing enabled.
+- A GCP project with billing enabled. This guide's project runs on a **Free Trial** billing
+  account, which ends on **2026-12-08** or once its $300 (~7,875,000₫) credit is spent, whichever
+  comes first (Console → Billing → Overview, "Free credit", shows the days and credit left). When
+  it ends, every resource is stopped; unless the billing account is upgraded within the following
+  30-day grace period, everything in the project is permanently deleted: the cluster with its
+  persistent disks (Postgres's and Kafka's data), the GCS backup bucket, Secret Manager, Artifact
+  Registry and the IAM and Workload Identity setup. Upgrading during the grace period means you
+  *might* be able to recover them; Google doesn't promise it. Before the end date, either upgrade
+  the billing account to a paid one (unused credit is kept until its own expiry) or copy the whole
+  backup bucket out of the project — to a bucket in a project on a different, paid billing account,
+  or with `gcloud storage rsync -r gs://cafe-microservices-cafe-pg-backups <dir>`. Copy every
+  prefix, since a recovery moves the backups under a new one, and base backups and WAL together,
+  since one is useless without the other; restoring from either copy is covered at the end of
+  "Recovering after losing the Postgres cluster". The bucket holds only Postgres's data; see the
+  next bullet for Kafka's.
+- Kafka's data has no backup: it only carries saga messages in transit, and losing it loses those
+  not yet consumed. order-service's saga reconciliation re-sends the command of an order left
+  waiting on a reserve or commit reply, but only 3 times, a minute or so apart, and re-sends made
+  while Kafka is down count too. After that it puts the order back to OPEN or CONFIRMED; stock
+  inventory-service had already reserved or deducted for it stays so, as does stock a lost
+  release-stock command should have freed, until corrected by hand.
 - Run every command from the repo root — paths like `k8s/data-layer/` and `charts/cafe` are
   relative to it.
 - Decide your project ID, cluster name/zone, and Postgres backup bucket name up front. They are also
@@ -115,6 +136,70 @@ gcloud services enable compute.googleapis.com container.googleapis.com secretman
 Step 9 also needs a GitHub repository with Actions enabled and admin access to it (to configure
 branch protection) — no extra CLI tooling beyond `gcloud` (and `docker`, only for the optional
 local lint), though the GitHub CLI (`gh`) is a convenient way to trigger the first manual run.
+
+### Budget alert
+
+A Cloud Billing budget emails the billing account's administrators and users when spend crosses
+a threshold. It only alerts — it never caps or stops spending — but its low thresholds are the
+cheap guard against a cluster left running between sessions. Creating one needs the Billing Account
+Administrator or Billing Account Costs Manager role. Its APIs are called through the project
+`gcloud config` points at, so they are enabled there. Run both blocks in the same shell:
+
+```bash
+gcloud services enable cloudbilling.googleapis.com billingbudgets.googleapis.com
+billing_account="$(gcloud billing projects describe cafe-microservices --format='value(billingAccountName)')"
+billing_account="${billing_account#billingAccounts/}"
+gcloud billing accounts describe "$billing_account" --format='value(currencyCode)'
+```
+
+The last command prints the account's currency; `--budget-amount` must use it. With the default
+credit treatment a budget counts spend *after* credits, which on a Free Trial stays near 0 until
+the credit runs out, so the budget would never fire. Instead the budget subtracts only the credit
+types listed in `--filter-credit-types`: free-tier credits, which should include GKE's
+control-plane credit (checked once at the end of this section), and sustained use discounts (E2 and
+Spot nodes get none, so this changes nothing here; it is listed so the budget still measures only
+the trial credit if another machine type is used). `PROMOTION` credits, the Free Trial's $300
+(~7,875,000₫), stay counted as spend, so the budget measures how fast the trial credit is used.
+
+Spend is counted from the 1st of each month (Pacific Time) and shows up in billing hours to about a
+day after the usage, so each alert means "this month's spend so far has crossed this amount". The
+thresholds are fractions of the $100 (~2,625,000₫) budget and give two signals:
+
+- $10, $20 and $40 (~262,500₫, ~525,000₫ and ~1,050,000₫): a cluster left running. With both pools
+  up, the cluster costs roughly $2.2–2.8 (~58,000–74,000₫) a day, so round-the-clock running alone
+  reaches them after about 4, 7–9 and 14–18 days (estimated from node and disk list prices, not
+  from the bill). A paused cluster's disks, bucket, registry and secrets cost about $1 (~26,000₫) a
+  month, so pausing alone never crosses them, but a month's sessions do: if an alert arrives
+  sooner than the hours you've run the cluster would explain, check that both pools are at 0 nodes
+  (the last command under "Pausing").
+- $50, $90 and $100 (~1,312,500₫, ~2,362,500₫ and ~2,625,000₫), and the forecasted $100: the
+  trial's pace. $100 a month is about the pace that uses up $300 (~7,875,000₫) in the trial's 90
+  days, so the forecasted alert means "on pace to run out early":
+
+```bash
+budgets="$(gcloud billing budgets list --billing-account="${billing_account:?run the block above in this shell first}" --filter='displayName="cafe-microservices monthly"' --format='value(name)')" &&
+  { [[ -z $budgets ]] || { echo "a budget named cafe-microservices monthly already exists: $budgets (see the notes after this block)" >&2; false; }; } &&
+  gcloud billing budgets create --billing-account="$billing_account" \
+    --display-name="cafe-microservices monthly" \
+    --budget-amount=100USD --calendar-period=month \
+    --filter-projects=projects/cafe-microservices \
+    --credit-types-treatment=include-specified-credits \
+    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT \
+    --threshold-rule=percent=0.1 --threshold-rule=percent=0.2 --threshold-rule=percent=0.4 \
+    --threshold-rule=percent=0.5 --threshold-rule=percent=0.9 --threshold-rule=percent=1.0 \
+    --threshold-rule=percent=1.0,basis=forecasted-spend
+```
+
+If the account's currency isn't USD, replace `100USD` with the equivalent amount in that currency.
+If the block stops because a budget with this name already exists, keep that one — a second would
+send every alert twice — and change it with `gcloud billing budgets update` instead. Check once, in
+Console → Billing → Reports (filtered to this project, credits shown), that the Kubernetes Engine
+credit is listed as a free-tier credit. If it shows under another credit type, add that type to the
+budget; otherwise the budget counts the cluster's ~$73 (~1,900,000₫) monthly control-plane fee as
+spend. The new list replaces the budget's whole list, so it repeats the two types above, and
+`<name>` is the `billingAccounts/…/budgets/…` name that
+`gcloud billing budgets list --billing-account="$billing_account" --format='value(name)'` prints:
+`gcloud billing budgets update <name> --credit-types-treatment=include-specified-credits --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,<type>`.
 
 ---
 
@@ -188,6 +273,15 @@ gcloud storage buckets add-iam-policy-binding gs://cafe-microservices-cafe-pg-ba
   --member="serviceAccount:cafe-postgres-backup@cafe-microservices.iam.gserviceaccount.com" \
   --role=roles/storage.legacyBucketReader
 
+# Read-only GSA for restoring from those backups (see "Restoring Postgres from a backup"): a
+# restore only reads the bucket, so the cluster doing it can't overwrite or delete the backups
+gcloud iam service-accounts create cafe-postgres-restore
+for role in roles/storage.objectViewer roles/storage.legacyBucketReader; do
+  gcloud storage buckets add-iam-policy-binding gs://cafe-microservices-cafe-pg-backups \
+    --member="serviceAccount:cafe-postgres-restore@cafe-microservices.iam.gserviceaccount.com" \
+    --role="$role"
+done
+
 # One GSM-reader GSA per service (5 app services + gateway):
 for svc in auth-service menu-service order-service inventory-service report-service gateway; do
   gcloud iam service-accounts create "${svc}-gsm-reader"
@@ -211,13 +305,20 @@ gcloud iam service-accounts add-iam-policy-binding \
   "cafe-postgres-backup@cafe-microservices.iam.gserviceaccount.com" \
   --role=roles/iam.workloadIdentityUser \
   --member="serviceAccount:cafe-microservices.svc.id.goog[cafe/cafe-postgres]"
+
+# The restore GSA binds to `cafe-postgres-restore`, the KSA of the scratch Cluster a rehearsal
+# restores into; the binding stays, so a rehearsal never waits on IAM propagation
+gcloud iam service-accounts add-iam-policy-binding \
+  "cafe-postgres-restore@cafe-microservices.iam.gserviceaccount.com" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="serviceAccount:cafe-microservices.svc.id.goog[cafe/cafe-postgres-restore]"
 ```
 
 The Postgres pod's own backup GSA is annotated differently — via the CNPG `Cluster`'s
 `serviceAccountTemplate` (see [k8s/data-layer/postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml)),
 not a Helm-managed ServiceAccount, since it's the data layer, not an app service. That template
-only sets the annotation, so the binding above is still required — without it the pod cannot
-authenticate to the backup bucket.
+only sets the annotation, so the binding above for `cafe-postgres-backup` → `cafe/cafe-postgres`
+is still required — without it the pod cannot authenticate to the backup bucket.
 
 IAM changes can take several minutes to propagate — a pod's CSI mount failing with
 `PermissionDenied: iam.serviceAccounts.getAccessToken denied` shortly after a fresh binding is
@@ -377,7 +478,8 @@ Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
 - [postgres-storageclass.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-storageclass.yaml) — a dedicated
   `Retain`-policy StorageClass for Postgres's PVC (GKE's built-in classes are all `Delete`;
   Postgres is this app's source of truth, so its disk must survive even a mistaken PVC/Cluster
-  deletion).
+  deletion). Getting data back from such a kept disk is a manual last resort; the supported way
+  back is the object-store backups (see "Restoring Postgres from a backup").
 - [postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml) — the CNPG `Cluster` and its databases and roles:
   - the `Cluster` bootstraps `auth_db` at creation (a `Cluster` can only bootstrap one database);
   - 4 `Database` CRs create the other services' databases;
@@ -394,11 +496,12 @@ Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
     `kubectl explain cluster.spec.storage`.
 - [postgres-backup.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-backup.yaml) — the Barman Cloud Plugin's
   `ObjectStore` (points at the GCS bucket, auths via the Cluster's own Workload Identity, no
-  separate credentials Secret) and a daily `ScheduledBackup`.
+  separate credentials Secret; its 10-day `retentionPolicy` — "Pausing" says when it runs) and a
+  nightly (00:00 UTC) `ScheduledBackup`.
 - [kafka-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/kafka-cluster.yaml) — a single-broker KRaft
   `KafkaNodePool` + `Kafka`, pinned to `stateful-pool` via node affinity/toleration. Uses GKE's
   built-in `standard` StorageClass (`Delete` reclaim) deliberately, unlike Postgres — Kafka here
-  only carries replayable saga messages, not source-of-truth data. Like Postgres, the Kafka
+  only carries saga messages in transit, not source-of-truth data. Like Postgres, the Kafka
   version (4.3.1) is pinned, so upgrading the Strimzi operator cannot silently change it.
 
 ```bash
@@ -961,24 +1064,80 @@ cluster autoscaler and manual resizes on one node pool.
 
 ### Pausing
 
-Stop the services first, so no Postgres or Kafka client is left; then hibernate Postgres, so
-CloudNativePG shuts it down cleanly and keeps its PVC; then remove the nodes — `stateful-pool`
-before `stateless-pool`, because the CNPG operator that carries out the hibernation runs on
-`stateless-pool`:
+Stop the services first, so no Postgres or Kafka client is left; then suspend the nightly backup
+schedule and back Postgres up, so the bucket holds everything written before the pause and no
+scheduled backup is left running when Postgres shuts down; then hibernate Postgres, so
+CloudNativePG shuts it down cleanly and keeps its PVC; then remove the nodes, `stateful-pool`
+before `stateless-pool` — the reverse of Resuming's order. Run these blocks, and a rehearsal's, in
+one shell: later blocks read variables (`$backup`, `$counts_dir`, `$counts_query`) that earlier
+ones set.
+
+Stop the services and wait until their pods are gone (`kubectl scale` returns before they have
+shut down):
 
 ```bash
 kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl annotate cluster cafe-postgres cnpg.io/hibernation=on --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=5m &&
-  gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=0 --zone=us-central1-a --quiet &&
-  gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --no-enable-autoscaling &&
-  gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=0 --zone=us-central1-a --quiet
-gcloud compute instances list --filter="name~^gke-cafe-cluster-"
+kubectl wait --for=delete pod -l 'app in (gateway,auth-service,menu-service,order-service,inventory-service,report-service)' -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=120s
 ```
 
-The last command should list no instances. The `&&` chain stops at the first command that fails, so
-if Postgres hasn't finished hibernating within 5 minutes, both pools keep running. This shows how
-far the hibernation got:
+To rehearse a restore during this pause, record the row counts now (step 1 of "Rehearsing a
+restore"), before the backup.
+
+Suspend the nightly schedule, then back Postgres up with an on-demand `Backup` and wait for it to
+finish:
+
+```bash
+backup="cafe-postgres-on-demand-$(date -u +%Y%m%d-%H%M%S)"
+kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":true}}' &&
+  kubectl create -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -f - <<EOF
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: ${backup}
+  labels: {app.kubernetes.io/managed-by: kubectl}
+spec:
+  cluster: {name: cafe-postgres}
+  method: plugin
+  pluginConfiguration: {name: barman-cloud.cloudnative-pg.io}
+EOF
+phase=""
+for _ in $(seq 90); do
+  phase=$(kubectl get backup.postgresql.cnpg.io "$backup" -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.phase}') || { phase="kubectl error"; break; }
+  case "$phase" in ""|pending|started) sleep 10 ;; *) break ;; esac
+done
+echo "$backup: ${phase:-no phase yet}"
+```
+
+The loop waits up to 15 minutes and prints the final phase. A backup like this one goes from
+`pending` to `started` to `completed` or `failed`; it stays `pending` while another backup of the
+cluster is still running (such as a nightly one that started before the suspension, or the
+catch-up one a resume can start), and those 15 minutes include that wait. CNPG runs a cluster's
+backups one at a time, oldest first, and the suspension stops new ones from being created, so once
+this backup completes, none is left running for the hibernation to cut off. Only `completed` lets
+the next block run; on anything else the loop prints:
+
+- `pending` or `started`: the backup is still going. Rerun the loop from its `phase=""` line,
+  which keeps the same `$backup`.
+- `no phase yet`: the CNPG operator hasn't picked the backup up. Check that the pods in
+  `cnpg-system` are running, then rerun the loop the same way.
+- `kubectl error`: kubectl printed why above. If the `Backup` doesn't exist (the schedule patch or
+  `kubectl create` failed), start again from the backup block; otherwise rerun the loop from its
+  `phase=""` line.
+- `failed` or anything else: the reason is in
+  `kubectl get backup.postgresql.cnpg.io "$backup" -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.error}'`.
+  The cluster keeps running, with the nightly schedule suspended, so fix the cause and start again
+  from the backup block — or, to give the pause up, see "Troubleshooting resume", item 5.
+
+Then hibernate Postgres:
+
+```bash
+[[ $(kubectl get backup.postgresql.cnpg.io "${backup:?run the backup block in this shell first}" -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.phase}') == completed ]] || { echo "the backup is not completed (see the backup block's phases)" >&2; false; } &&
+  kubectl annotate cluster cafe-postgres cnpg.io/hibernation=on --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster &&
+  kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=5m
+```
+
+If this block stops at its backup check, go back to the backup block (see what its final phase
+means above). If Postgres didn't finish hibernating within 5 minutes, this shows how far it got:
 
 ```bash
 kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.conditions[?(@.type=="cnpg.io/hibernation")].reason}{"\n"}'
@@ -991,7 +1150,33 @@ kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-ce
 - An empty line: the CNPG operator hasn't acted on the annotation yet — check that the pods in
   `cnpg-system` (the operator and the Barman Cloud Plugin) are running.
 
-Then rerun from the `kubectl wait` line.
+Then rerun the hibernation block from its `kubectl wait` line.
+
+To rehearse a restore, do it now — Postgres is down, which frees the room the scratch Cluster
+needs on `stateful-pool` — and come back for the last block (see "Rehearsing a restore").
+
+Finally remove the nodes. The lines before the resizes check again that the nightly schedule is
+suspended, Postgres hibernated and no scratch Cluster is left:
+
+```bash
+[[ $(kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}') == true ]] || { echo "the nightly schedule is not suspended (see the notes after this block)" >&2; false; } &&
+  kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=10s &&
+  kubectl wait --for=delete cluster.postgresql.cnpg.io/cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=10s &&
+  kubectl wait --for=delete pod -l cnpg.io/cluster=cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=2m &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=0 --zone=us-central1-a --quiet &&
+  gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --no-enable-autoscaling &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=0 --zone=us-central1-a --quiet
+gcloud compute instances list --filter="name~^gke-cafe-cluster-"
+```
+
+The last command should list no instances. If one of the checks fails, nothing has been resized and
+both pools keep running. If a later command fails, fix the cause and rerun the whole block: the
+checks still pass, and resizing a pool that is already at 0 nodes changes nothing. If the nightly
+schedule isn't suspended, suspend it with
+`kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":true}}'`.
+If Postgres isn't hibernated, finish the hibernation block first (see the notes after it). If a
+scratch `cafe-postgres-restore` is still there, run step 4 of "Rehearsing a restore", then rerun
+this block.
 
 Don't resize `stateful-pool` without hibernating first: the Postgres instance's PodDisruptionBudget
 blocks the node drain for up to an hour, after which Postgres is killed without a clean shutdown.
@@ -999,17 +1184,27 @@ Kafka needs nothing special — its single broker pod is evicted when `stateful-
 drained, Strimzi recreates it at once, and the new pod stays `Pending` until `stateful-pool` has a
 node again.
 
-With the CNPG operator down, the nightly `ScheduledBackup` (`cafe-postgres-daily-backup`) takes no
-backup while the cluster is paused. If its time passed during the pause, the operator creates one
-catch-up backup as soon as it is back — before Postgres wakes — and that backup fails, since CNPG
-can't back up a hibernated cluster. So a scheduled backup succeeds only on a night the cluster is
-running at 00:00 UTC.
+The nightly `ScheduledBackup` (`cafe-postgres-daily-backup`, 00:00 UTC) stays suspended from the
+backup block until Resuming lifts it once Postgres is ready: hibernating would cut off a nightly
+backup still running and mark it failed, and CNPG can't back up a hibernated cluster anyway. The
+backup taken before hibernating covers the pause. If a 00:00 UTC slot passed during the pause,
+CNPG creates at most one catch-up backup as soon as the schedule is back, named after the first
+00:00 UTC slot it missed, and it succeeds because Postgres is up — so each session normally starts
+with a second base backup, which costs little. Retention (`retentionPolicy: 10d` in
+`postgres-backup.yaml`) runs every 30 minutes while Postgres runs and never deletes the newest
+completed backup, however long a pause lasts. The `Backup` objects of this cluster's completed
+backups are deleted together with their data once retention removes it; failed ones stay until
+you delete them
+(`kubectl get backup.postgresql.cnpg.io -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster`
+lists them).
 
 ### Resuming
 
 In reverse: `stateless-pool` first, so the operators and GKE's system pods have somewhere to run —
 the CNPG operator must be up to wake Postgres — then `stateful-pool`, then Postgres, then the
-services:
+services, inventory-service first: order-service's saga reconciliation re-sends at once the
+commands of orders left mid-saga by the pause and gives up after a few minutes (see
+Prerequisites), so inventory-service should already be consuming them:
 
 ```bash
 gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=1 --zone=us-central1-a --quiet
@@ -1020,23 +1215,34 @@ for ns in cert-manager cnpg-system strimzi-system; do
 done
 kubectl annotate cluster cafe-postgres cnpg.io/hibernation=off --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
 kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.metadata.annotations.cnpg\.io/hibernation}{"\n"}'
-kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=10m
+kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=10m &&
+  kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":false}}'
+kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}{"\n"}'
 kubectl wait pod/cafe-kafka-cafe-kafka-pool-0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=10m
-kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
+kubectl scale deployment inventory-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl wait --for=condition=Available deployment/inventory-service -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m &&
+  kubectl scale deployment gateway auth-service menu-service order-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster &&
+  kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
 ```
 
-The annotation check must print `off`. Kafka's wait reads the broker pod rather than the `Kafka`
-resource, whose `Ready` condition can still be `True` from before the pause. `--replicas=1` matches
-the chart's `replicas` value, and the 22-minute timeout (as in `scripts/deploy.sh`) outlasts the
-DB-backed Deployments' 1200s `progressDeadlineSeconds`, which their slowest legitimate start is
-sized to fit; `kubectl wait` doesn't stop at that deadline, so a stalled service shows up as this
-wait timing out.
+The annotation check must print `off`, and the schedule check `false`; the schedule is lifted only
+once Postgres is ready, so the catch-up backup it may start finds Postgres up. A failed resize or
+a timed-out wait doesn't stop the lines after it — except that the other services are scaled up
+and waited for only once inventory-service is available. If a wait times out, fix the cause (see
+"Troubleshooting resume"), then rerun the block from that wait; every line from the first wait on
+is safe to repeat. For a failed resize, see item 3 there. Kafka's wait reads the broker pod rather
+than the `Kafka` resource, whose `Ready` condition can still be `True` from before the pause.
+`--replicas=1` matches the chart's `replicas` value, and the 22-minute timeout (as in
+`scripts/deploy.sh`) outlasts the DB-backed Deployments' 1200s `progressDeadlineSeconds`, which
+their slowest legitimate start is sized to fit; `kubectl wait` doesn't stop at that deadline, so a
+stalled service shows up as one of these waits timing out.
 
 `bash scripts/deploy.sh` (Step 8) brings the services back too, but it also deploys the checked-out
-commit, which may differ from what was running; use it to resume and deploy in one go. Until the
-services run, the CNPG `Cluster` may report missing role password Secrets — see "Troubleshooting
-deploys", item 6.
+commit, which may differ from what was running, and it doesn't wake Postgres or lift the
+schedule's suspension itself. It starts all six services at once, so to keep inventory-service
+ahead of order-service, resume with the whole block above first and run the script afterwards.
+Until the services run, the CNPG `Cluster` may report missing role password Secrets — see
+"Troubleshooting deploys", item 6.
 
 ### Troubleshooting resume
 
@@ -1053,8 +1259,280 @@ deploys", item 6.
    replacement pods are scheduled on a Ready node; rerun the wait. (`kubectl get endpoints` is
    deprecated and can lag behind; read the EndpointSlices.)
 3. **A resize fails with `ZONE_RESOURCE_POOL_EXHAUSTED`** — the zone is temporarily out of
-   `e2-medium` capacity; wait and retry.
+   `e2-medium` capacity. The lines after it still run, and the waits time out (Ctrl+C stops them).
+   Wait a while, then rerun the Resuming block from the `stateful-pool` resize. If the
+   `stateless-pool` resize was the one that failed, don't repeat it: the autoscaling enabled by the
+   next line adds a node for the `Pending` pods once capacity returns, and a manual resize would
+   remove any node it has added beyond the first.
 4. **A pod's CSI volume fails to mount on a fresh node** — see "Troubleshooting deploys", item 1.
+5. **A pause was given up partway** (services stopped; the schedule perhaps suspended and Postgres
+   hibernated; nodes still up) — bring everything back with the Resuming lines from the hibernation
+   annotation on, including the schedule patch; nothing else lifts the schedule's suspension. If
+   Postgres never hibernated, those lines change nothing but the schedule and the services. If a
+   restore rehearsal was left behind too
+   (`kubectl get cluster.postgresql.cnpg.io cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster`
+   finds it), first delete it with step 4 of "Rehearsing a restore": its 250m CPU request leaves
+   `stateful-pool` no room for `cafe-postgres-1`, which then stays `Pending`.
+
+---
+
+## Restoring Postgres from a backup
+
+The backups in `gs://cafe-microservices-cafe-pg-backups` (base backups plus continuous WAL, see
+Step 6 and "Pausing") are the supported way to get Postgres back. A restore always builds a *new*
+CNPG `Cluster` from the bucket — `bootstrap.recovery` instead of `initdb` — and never touches the
+backups it reads. How much data can be lost — what a *recovery point objective* (RPO) sets a limit
+for: while Postgres runs, at most the WAL not yet archived, which CNPG closes and archives at least
+every 5 minutes (`archive_timeout`); across a pause, nothing, since the pause starts with a
+completed backup. How long a restore takes — what a *recovery time objective* (RTO) sets a limit
+for — is what the rehearsal below measures.
+
+### Rehearsing a restore
+
+An occasional manual check that the backups really restore, done during a pause: once Postgres is
+hibernated, `stateful-pool` has room for the scratch Cluster, which needs the same 250m CPU request
+as the real one. Repeat it after changing the Postgres major version, the Barman Cloud Plugin, the
+bucket or its IAM. It restores into a separate `cafe-postgres-restore` Cluster that reads the
+bucket as the read-only `cafe-postgres-restore` GSA (Step 2) and archives nothing, then deletes it.
+
+1. During "Pausing", after the service pods are gone and before the backup, record every table's
+   exact row count:
+
+   ```bash
+   counts_dir="$(mktemp -d)"
+   counts_query="select table_schema||'.'||table_name, (xpath('/row/c/text()', query_to_xml(format('select count(*) c from %I.%I', table_schema, table_name), false, true, '')))[1]::text from information_schema.tables where table_type = 'BASE TABLE' and table_schema not in ('pg_catalog', 'information_schema') order by 1"
+   for db in auth_db menu_db order_db inventory_db report_db; do
+     echo "== $db"
+     kubectl exec cafe-postgres-1 -c postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -- psql -d "$db" -Atc "$counts_query"
+   done > "$counts_dir/before.txt"
+   ```
+
+2. Continue "Pausing" through the hibernation block, then create the scratch Cluster. It takes its
+   image, resources and disk size from the live `cafe-postgres` and mirrors its placement, but uses
+   GKE's `standard` StorageClass (`Delete` reclaim, so deleting it leaves no disk behind), has no
+   `plugins` block (so it neither archives WAL nor applies retention to the bucket), and restores
+   `auth_db` owned by `auth_service` as the bootstrap database (otherwise CNPG creates an extra
+   `app` database and role). `serverName` names the backups to read — without it, the plugin looks
+   under the new cluster's own name; the block reads it from the live `cafe-postgres` plugin entry
+   (the Cluster name when unset, the plugin's default):
+
+   ```bash
+   restore_start=$(date +%s)
+   server_name=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.plugins[?(@.name=="barman-cloud.cloudnative-pg.io")].parameters.serverName}') &&
+     image=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.imageName}') &&
+     resources=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.resources}') &&
+     storage_size=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.storage.size}') &&
+     kubectl apply -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -f - <<EOF &&
+   apiVersion: postgresql.cnpg.io/v1
+   kind: Cluster
+   metadata:
+     name: cafe-postgres-restore
+     labels: {app.kubernetes.io/managed-by: kubectl}
+   spec:
+     instances: 1
+     imageName: ${image:?cafe-postgres has no spec.imageName}
+     resources: ${resources:?cafe-postgres has no spec.resources}
+     enableSuperuserAccess: false
+     storage: {size: ${storage_size:?cafe-postgres has no spec.storage.size}, storageClass: standard}
+     affinity:
+       tolerations: [{key: "workload", operator: "Equal", value: "stateful", effect: "NoSchedule"}]
+       nodeSelector: {cloud.google.com/gke-nodepool: stateful-pool}
+     serviceAccountTemplate:
+       metadata:
+         annotations: {iam.gke.io/gcp-service-account: "cafe-postgres-restore@cafe-microservices.iam.gserviceaccount.com"}
+     bootstrap:
+       recovery: {source: origin, database: auth_db, owner: auth_service}
+     externalClusters:
+       - name: origin
+         plugin:
+           name: barman-cloud.cloudnative-pg.io
+           parameters: {barmanObjectName: cafe-postgres-backup-store, serverName: ${server_name:-cafe-postgres}}
+   EOF
+     kubectl wait cluster.postgresql.cnpg.io/cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=15m &&
+     echo "restore took $(( $(date +%s) - restore_start ))s"
+   ```
+
+   CNPG first runs a `cafe-postgres-restore-1-full-recovery` Job, then starts the instance, which
+   restarts once by itself (the plugin's sidecar is only needed during recovery); the wait covers
+   that restart. The time it prints is the measured restore time. If step 3 still can't reach the
+   pod, rerun just the `kubectl wait` line, without its trailing `&&`, then step 3 — not its
+   `echo`, which would add the time since. If the wait times out instead, rerun the block's last
+   two lines together, right away: the time they print still counts from the block's start, so a
+   delay before the rerun adds to it.
+
+3. Count the restored tables the same way and compare:
+
+   ```bash
+   [[ -f ${counts_dir:?run step 1 in this shell first}/before.txt && -n ${counts_query:?run step 1 in this shell first} ]] &&
+     for db in auth_db menu_db order_db inventory_db report_db; do
+       echo "== $db"
+       kubectl exec cafe-postgres-restore-1 -c postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -- psql -d "$db" -Atc "$counts_query"
+     done > "$counts_dir/restored.txt" &&
+     diff "$counts_dir/before.txt" "$counts_dir/restored.txt" && echo "restore matches"
+   ```
+
+4. Whatever the outcome of steps 2–3, delete the scratch Cluster and wait until it and its pod are
+   gone — its PodDisruptionBudget would otherwise block the `stateful-pool` drain — then finish
+   "Pausing" with its last block:
+
+   ```bash
+   kubectl delete cluster.postgresql.cnpg.io cafe-postgres-restore --ignore-not-found -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl wait --for=delete pod -l cnpg.io/cluster=cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=5m
+   ```
+
+### Recovering after losing the Postgres cluster
+
+When the `cafe-postgres` Cluster and its data are gone, recreate it under the same name, so its
+`-rw` Service, its KSA's Workload Identity binding, the `Database` CRs and the `ScheduledBackup`
+keep working. Do this only in a real recovery.
+
+First stop the services with Pausing's first block, so none of them writes to the new Cluster
+before step 3 has backed it up; if they are already stopped, it changes nothing. If the cluster is
+paused, then run Resuming's lines through the operator waits (the `for ns …` loop) — not the
+hibernation lines, since the new Cluster isn't hibernated — and delete any leftover
+`cafe-postgres-restore` (see "Troubleshooting resume", item 5). After step 4, finish with
+Resuming's last five lines (the Kafka wait, inventory-service's scale and wait, then the other
+services' scale and wait).
+
+1. Check that nothing of the old cluster is left:
+
+   ```bash
+   kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl get pvc -l cnpg.io/cluster=cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   ```
+
+   The first must fail with `NotFound`. If it finds the Cluster, its disk may still hold the data:
+   an instance that crash-loops or a full disk is a problem to fix, not a loss, so stop. Only once
+   you've decided the data is lost (its PVC is gone, or the disk can't be read) delete the
+   Cluster — its PVC goes with it, since the Cluster owns it, while the PV's `Retain` policy keeps
+   the disk (see step 5) — then rerun the checks above:
+
+   ```bash
+   kubectl delete cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl wait --for=delete pvc -l cnpg.io/cluster=cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=5m
+   ```
+
+   The second check must print `No resources found in cafe namespace.` A leftover PVC means the old
+   disk still exists and may hold newer data than the bucket; rebuilding from it isn't covered
+   here. The new Cluster would adopt such a PVC and start on that old disk instead of restoring, so
+   to restore from the bucket, delete it first (the `Retain` policy keeps the disk, see step 5):
+   `kubectl delete pvc <name> -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster`.
+
+2. In `k8s/data-layer/postgres-cluster.yaml`, replace `initdb: {database: auth_db, owner:
+   auth_service}` with `recovery: {source: origin, database: auth_db, owner: auth_service}` and add
+   the same `externalClusters` entry as the rehearsal above, whose `serverName` is the plugin
+   `serverName` the file had so far (`cafe-postgres` if it had none). Then set the plugin's
+   `serverName` in `parameters` to a new name with no prefix in the bucket yet — the first
+   `cafe-postgres-rN` (`cafe-postgres-r1`, `-r2`, …) that
+   `gcloud storage ls gs://cafe-microservices-cafe-pg-backups/` doesn't list. WAL archiving fails
+   if the prefix already holds WAL (which any prefix with backups does). Apply it, then wait for
+   its instance and for its first WAL archive:
+
+   ```bash
+   kubectl apply -f k8s/data-layer/postgres-cluster.yaml --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl wait cluster.postgresql.cnpg.io/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=15m &&
+     kubectl wait cluster.postgresql.cnpg.io/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=ContinuousArchiving --timeout=10m
+   ```
+
+   Unlike the rehearsal's, this instance doesn't restart once recovered: the archiving plugin keeps
+   its sidecar. If the archiving wait times out, the archive error is in
+   `kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.conditions[?(@.type=="ContinuousArchiving")].message}{"\n"}'`.
+3. Take a first base backup under the new name right away, rather than waiting for the nightly
+   schedule: run the backup block from "Pausing" (what its final phase means is explained there),
+   and continue only on `completed`. A nightly backup created while the Cluster was gone may run
+   first; the loop waits for it like for a catch-up one. Then lift the schedule's suspension, which
+   the backup block sets and applying `k8s/data-layer/` never resets, so always run it:
+
+   ```bash
+   kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":false}}'
+   kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}{"\n"}'
+   ```
+
+   The check must print `false`.
+4. In `postgres-cluster.yaml`, put `initdb: {database: auth_db, owner: auth_service}` back and
+   remove the `externalClusters` entry; keep the new `serverName` in the plugin's `parameters`.
+   `bootstrap` is only read when a Cluster is created, so applying this changes nothing for the
+   running cluster, and the file stays a recipe for a fresh environment. Apply it, then commit the
+   change on a branch and merge it through a PR, so the next `kubectl apply -f k8s/data-layer/`
+   from `master` doesn't reset the archive name to the old one:
+
+   ```bash
+   kubectl apply -f k8s/data-layer/postgres-cluster.yaml --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   ```
+
+5. From then on the backups live under the new name: a rehearsal reads it by itself, and a later
+   recovery reads it in `externalClusters` and archives under the next unused name. Nothing prunes
+   the old prefix in the bucket. Once you trust the recovered cluster and 10 days (the retention
+   window) have passed since the recovery, delete it with
+   `gcloud storage rm --recursive gs://cafe-microservices-cafe-pg-backups/<old-serverName>/`
+   (`<old-serverName>` is the `serverName` step 2 put in `externalClusters`), together with the
+   old cluster's `Backup` objects — retention only manages the current Cluster's, so those keep
+   showing `completed` after their data is gone. Deleting a `Backup` object never touches the
+   bucket. List them (completed backups taken by any other Cluster UID), review the list, then
+   delete them:
+
+   ```bash
+   cluster_uid=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.metadata.uid}') &&
+     old_backups=$(kubectl get backup.postgresql.cnpg.io -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{range .items[?(@.spec.cluster.name=="cafe-postgres")]}{.metadata.name}{" "}{.status.pluginMetadata.clusterUID}{"\n"}{end}' | awk -v uid="$cluster_uid" '$2 != "" && $2 != uid {print $1}') &&
+     printf '%s\n' "$old_backups"
+   ```
+
+   ```bash
+   [[ -n ${old_backups?run the block above in this shell first} ]] &&
+     kubectl delete backup.postgresql.cnpg.io $old_backups -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   ```
+
+   The old PersistentVolume (reclaim policy `Retain`) stays `Released` and its disk keeps billing
+   until you delete both. This lists the PVs with their claim, StorageClass and disk; the old one
+   is `Released`, with class `cafe-postgres-retain`:
+
+   ```bash
+   kubectl get pv --context gke_cafe-microservices_us-central1-a_cafe-cluster -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,CLAIM:.spec.claimRef.name,CLASS:.spec.storageClassName,DISK:.spec.csi.volumeHandle
+   ```
+
+   Delete that PV with
+   `kubectl delete pv <name> --context gke_cafe-microservices_us-central1-a_cafe-cluster`, then its
+   disk, named by the last segment of its `DISK` path, with
+   `gcloud compute disks delete <disk> --zone=us-central1-a` (it asks you to confirm).
+
+The managed roles and `Database` CRs reconcile against the restored roles and databases as usual;
+the service password Secrets come back from Secret Manager once the services run.
+
+Kafka isn't restored with Postgres: all five databases go back to the same point, but Kafka keeps
+the messages and the consumers' committed offsets from after it:
+
+- Outbox rows still unsent at that point are sent, some a second time, and no duplicate is applied
+  twice (inventory-service's inbox checks the correlation ID, order-service's saga its current
+  step and correlation ID).
+- A message consumed after that point isn't delivered again, though its effect was lost. That
+  includes what services still running while Postgres was gone took from Kafka: each message was
+  retried for a few minutes at most, then moved to `<topic>.dlq`, which nothing replays (see
+  "Troubleshooting deploys", item 9). Nothing new reached Kafka meanwhile, since every saga
+  message is sent from a database, so noticing the loss late doesn't add to it.
+- An order left waiting on a reserve or commit reply has its command re-sent by order-service's
+  saga reconciliation job, up to 3 times a minute or so apart, starting as soon as order-service
+  runs; inventory-service answers a command it already applied with the reply it stored.
+  Resuming's last five lines start inventory-service first so these re-sends are answered; if all
+  3 go unanswered, the order goes back to OPEN or CONFIRMED.
+- Stock left to correct by hand: what inventory-service reserves or deducts for such an order when
+  it does consume its commands, and stock reserved for no order — through a lost release-stock
+  command, or a command for a lost order that inventory-service hadn't consumed yet.
+
+To recover into a new environment from a copy of the bucket (see Prerequisites), set it up with
+this guide, putting the bucket that holds the backups into `postgres-backup.yaml`'s
+`destinationPath` (see Prerequisites' list of names baked into repo files). A copy in another
+paid project's bucket can be used as it is, skipping Step 2's `buckets create`; a local copy goes
+into the new bucket with `gcloud storage rsync -r <dir> gs://<new-bucket>`, after which
+`gcloud storage ls gs://<new-bucket>/` must list the `<serverName>/` prefixes at the bucket's root.
+Before Step 6's `kubectl apply -f k8s/data-layer/`, make step 2's edit to `postgres-cluster.yaml`,
+so the new Cluster restores from the bucket instead of running `initdb`. After that apply, run step
+2's waits, step 3 and step 4, then carry on from Step 7; this section's intro doesn't apply, since
+no service runs yet and Step 8 starts them. Kafka there starts empty, so every message sent but not
+yet consumed at the point Postgres goes back to is lost, whether or not the old Kafka delivered it
+later; otherwise the bullets above apply. Step 8's `deploy.sh` starts all six services at once, so
+if inventory-service comes up a few minutes after order-service, order-service's saga
+reconciliation can give up on orders restored mid-saga before inventory-service answers; then check
+for stock to correct by hand, as the last bullet above describes.
 
 ---
 
@@ -1120,8 +1598,8 @@ the Notes column for where the mapping breaks down.
 | GKE node allocatable reservation (1060 mCPU on shared-core E2) | EKS `kube-reserved` (node bootstrap defaults) | Both carve a fixed slice off each node for system components. GKE publishes one tiered CPU formula for all machine types (6% of the first core, 1% of the next core, 0.5% of the next 2 cores, 0.25% of anything above 4 cores) and overrides it with a flat 1060 mCPU on shared-core E2 types; EKS's optimized AMI applies that same tiered CPU formula at node bootstrap, with no shared-core exception. Only CPU lines up — each side computes its memory reservation differently. See "GKE system pods added automatically per node". |
 | Spot VM | EC2 Spot Instance | Same mechanism: spare capacity at a discount, reclaimable with short notice. |
 | Zone resource stock-out (`ZONE_RESOURCE_POOL_EXHAUSTED`) | EC2 insufficient capacity (`InsufficientInstanceCapacity`) | The zone temporarily has no spare capacity for the requested machine type, so creating a VM — here, a node pool resize or an autoscaler scale-up — fails with `ZONE_RESOURCE_POOL_EXHAUSTED` (or `…_WITH_DETAILS`). It isn't a quota error (those read `QUOTA_EXCEEDED`), so waiting and retrying is the fix. EC2 returns `InsufficientInstanceCapacity` in the same situation. |
-| Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Network-attached block storage tiers; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` sits roughly between `gp3` and `io1`/`io2` (no exact match); `pd-extreme` (not used here) is the closest analogue of the provisioned-IOPS `io1`/`io2`. |
-| PD CSI driver (`pdcsi-node`) + default StorageClass (`standard-rwo`) | EBS CSI driver (EKS add-on) + default StorageClass (commonly `gp2`) | Provisions PersistentVolumes from block storage (the Persistent Disk row covers the disk tiers). GKE ships the driver preinstalled; on EKS it is an add-on that needs its own IAM setup. |
+| Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Network-attached block storage tiers; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` sits roughly between `gp3` and `io1`/`io2` (no exact match); `pd-extreme` (not used here) is the closest analogue of the provisioned-IOPS `io1`/`io2`. A `Retain`-policy PV's disk outlives the PV and is deleted by hand with `gcloud compute disks delete`, like an EBS volume with `aws ec2 delete-volume`. |
+| PD CSI driver (`pdcsi-node`) + built-in StorageClasses (`standard-rwo` default, `standard`) | EBS CSI driver (EKS add-on) + StorageClasses (legacy in-tree `gp2`, not default on new clusters since EKS 1.30; a `gp3` class — the EBS CSI add-on's optional default, or one you create) | Provisions PersistentVolumes from block storage (the Persistent Disk row covers the disk tiers). `standard-rwo` (`pd-balanced`) is CSI-native and binds `WaitForFirstConsumer`; `standard` (`pd-standard`) is the counterpart of EKS's legacy `gp2` class by provisioner, not disk type: both keep an in-tree provisioner name (`kubernetes.io/gce-pd`, `kubernetes.io/aws-ebs`) that CSI migration routes to the CSI driver. Unlike `gp2`, which binds `WaitForFirstConsumer`, `standard` binds `Immediate`. Kafka's volumes and the restore rehearsal use `standard`; all built-in classes reclaim `Delete`. GKE ships the driver preinstalled; on EKS it is an add-on that needs its own IAM setup. |
 | Workload Identity Federation | IAM Roles for Service Accounts (IRSA) / EKS Pod Identity | Both let a pod assume a cloud IAM identity with no static key. IRSA wires this through an OIDC provider registered against the cluster; EKS Pod Identity (newer) simplifies the same idea. The workload pool (`<project>.svc.id.goog`, used in `serviceAccount:<pool>[ns/ksa]` members) is the trust anchor, like the IAM OIDC provider in IRSA; Pod Identity has no counterpart. GCP creates the pool automatically, once per project. |
 | Workload Identity Federation **for external identities** (GitHub Actions OIDC, Step 9) | IAM OIDC identity provider + `AssumeRoleWithWebIdentity` | Same underlying mechanism as the row above, but the caller is a GitHub Actions run authenticated via its own OIDC token, not a Kubernetes pod — no per-pod/per-node component involved, just a workload identity pool + provider + one IAM binding. AWS's IAM OIDC identity provider plays the same trust-anchor role as the pool. |
 | Security Token Service (`sts.googleapis.com`) + IAM Service Account Credentials API (`iamcredentials.googleapis.com`) | AWS STS (`sts:AssumeRoleWithWebIdentity`) | The APIs that actually perform the OIDC-token-for-access-token exchange behind both Workload Identity Federation rows above — a one-time per-project enablement (see Prerequisites). |
@@ -1134,7 +1612,7 @@ the Notes column for where the mapping breaks down.
 | KSA annotation `iam.gke.io/gcp-service-account` | KSA annotation `eks.amazonaws.com/role-arn` | Same binding mechanism, different annotation key. |
 | Google Secret Manager | AWS Secrets Manager | Managed secret storage with IAM-scoped access and versioning. |
 | Secrets Store CSI Driver + **GCP provider** | Secrets Store CSI Driver + **AWS provider** | Same upstream Kubernetes SIGs driver (`secrets-store-csi-driver`); only the cloud-provider plugin differs. |
-| Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — here, where CNPG's Barman Cloud Plugin archives Postgres WAL/backups (the plugin supports S3 natively too). |
+| Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — here, where CNPG's Barman Cloud Plugin archives Postgres WAL/backups (the plugin supports S3 natively too). Restoring from it (CNPG `bootstrap.recovery`, see "Restoring Postgres from a backup") works like an RDS point-in-time restore: both always build a new instance from the backups instead of overwriting the existing one. Copying a bucket to another bucket or a local directory, or back (`gcloud storage rsync -r`), corresponds to `aws s3 sync`, which recurses by default; `gcloud storage ls` and `gcloud storage rm --recursive` correspond to `aws s3 ls` and `aws s3 rm --recursive`. |
 | Artifact Registry | Elastic Container Registry (ECR) | Container image registry holding the 6 service images Step 9's CI pipeline builds and pushes. |
 | Artifact Registry immutable tags (`--immutable-tags`) | ECR tag immutability (`imageTagMutability: IMMUTABLE`) | Both refuse a push that would move an existing tag to a different image. Artifact Registry goes further: a tagged image can't be deleted or untagged (by hand or by a cleanup policy) while the setting is on, whereas ECR still lets you delete images and expire them with lifecycle policies. |
 | Access scopes (node pool / VM: `cloud-platform`, `devstorage.read_only`) | — (no direct equivalent) | Legacy per-VM OAuth scopes that cap what the attached service account can do on top of its IAM roles; pulling from Artifact Registry needs `devstorage.read_only` or `cloud-platform` (the latter defers entirely to IAM). The closest AWS cap is an IAM permissions boundary, set on the role rather than per instance. |
@@ -1142,7 +1620,14 @@ the Notes column for where the mapping breaks down.
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | The managed metric and log stores that `gke-metrics-agent`, `fluentbit-gke` and `event-exporter-gke` write to. On EKS, sending node/pod metrics and container logs to CloudWatch is opt-in (Container Insights / the CloudWatch Observability add-on). |
 | GCP project | AWS account | The resource-isolation, IAM and API-enablement boundary; billing rolls up to a separate billing account (next row). |
 | Billing account | AWS Organizations management (payer) account | The payment instrument projects attach to, separate from the projects themselves: credits, quota and free-tier allowances are counted per billing account, not per project — GKE's free tier is a monthly credit per billing account that only offsets zonal/Autopilot cluster fees (see the Zonal cluster row). AWS has no equivalent split below the account; consolidated billing instead rolls several accounts up under one payer account. |
+| Free Trial ($300 credit for 90 days) | AWS Free plan (accounts created since 2025-07-15; legacy 12-month Free Tier for older ones) | Both are credit-based trials with a hard end. GCP's ends at 90 days or when the $300 (~7,875,000₫) is spent; resources are then stopped and, without an upgrade within 30 days, permanently deleted (see Prerequisites). AWS's Free plan gives $100–200 (~2,625,000–5,250,000₫) of credits for up to 6 months; when it ends, the account is closed and AWS keeps its content for 90 days: upgrading to a paid plan within them restores access, otherwise the account and its resources are permanently deleted. |
+| Cloud Billing budget (`gcloud billing budgets create`) | AWS Budgets | Spend thresholds that send alerts (email by default); this guide's budget never stops spending (see "Budget alert" under Prerequisites). GCP's spend-cap budgets pause new usage of a few request-based services (such as Cloud Run and the Gemini API) but never running VMs or disks, so they can't stop a cluster; AWS Budgets can run Budget Actions automatically (e.g. apply an IAM policy, stop EC2 instances). Otherwise GCP needs a programmatic budget notification (to a Pub/Sub topic) plus your own code. |
+| Billing account IAM roles (`roles/billing.admin`, `roles/billing.costsManager`) | IAM policies with AWS Budgets actions (`budgets:ModifyBudget`, `budgets:ViewBudget`) | Needed to create a budget (see "Budget alert"). GCP grants these on the billing account, a resource separate from the project (see the Billing account row). AWS has no separate billing resource: they are ordinary IAM permissions in the account that owns the budget; a budget in the management (payer) account can track the whole organization's costs. |
+| Pub/Sub | Amazon SNS (fan-out) / Amazon SQS (queue) | Not used by this guide; it is the channel programmatic budget notifications arrive on. An AWS budget can likewise notify an SNS topic. |
+| Cloud Billing Reports (Console → Billing → Reports) | AWS Cost Explorer | Interactive spend breakdowns by project/account, service and SKU, with credits shown separately; where this guide checks which credit type GKE's fee offset falls under (see "Budget alert"). |
+| Billing credit types (`PROMOTION`, `FREE_TIER`, `SUSTAINED_USAGE_DISCOUNT`) | AWS Budgets "Charge type" filter (Credit, Refund, …) | Decide which credits a budget subtracts. GCP picks individual credit types, which is how this guide's budget subtracts the free-tier credit but not the trial's `PROMOTION` credit; an AWS budget includes or excludes credits as one Credit charge type. Sustained use discounts have no AWS counterpart: Savings Plans and Reserved Instances need a commitment. |
 | Organization policy (`iam.automaticIamGrantsForDefaultServiceAccounts`) | AWS Organizations policies (SCPs, declarative policies) | Constraints set on an organization, folder or project that restrict what configuration the projects below it may use. This one stops GCP from automatically granting the default service accounts the Editor role, and is enforced by default for organizations created on or after May 3, 2024 (see the Compute Engine default service account row); Google now recommends the stricter `iam.managed.preventPrivilegedBasicRolesForDefaultServiceAccounts`, which also blocks granting them Editor or Owner later. A project with no organization — like this guide's — has no organization policies, so its default compute service account keeps the automatic Editor grant. On AWS, SCPs cap the permissions accounts may use and declarative policies enforce service configuration; neither has an equivalent of this constraint, since AWS creates no default role to grant. |
+| Google Cloud console (Console → Billing) | AWS Management Console (Billing and Cost Management console) | The web UI. This guide uses it only for what `gcloud` doesn't show: the Free Trial's remaining credit and days (Billing → Overview) and the one-time credit-type check in Billing Reports (see the Cloud Billing Reports row). Its Billing pages show one billing account at a time, filterable by project; AWS's Billing and Cost Management console shows the signed-in account's costs, or, from an organization's management account, all its member accounts' costs. |
 | `gcloud` CLI | `aws` CLI + `eksctl` | GCP bundles cluster operations into `gcloud container clusters`; EKS-specific operations on AWS typically need `eksctl` (or Terraform) alongside the base `aws` CLI. Installed as the Google Cloud CLI, one of the tools Google groups under the name Google Cloud SDK (with the client libraries) — hence the `Cloud SDK` install directory and the `CLOUDSDK_*` environment variables such as `CLOUDSDK_PYTHON` (see Prerequisites); `gke-gcloud-auth-plugin` is one of its optional components. It bundles its own Python on Windows and x86_64 Linux; on macOS its installer installs one if needed. On AWS, an "SDK" is a per-language client library; the `aws` CLI is a separate install. |
 | `gcloud services enable` (API enablement) | — (no per-service enablement) | GCP requires enabling each service's API per project; AWS services are generally usable without a separate enablement step (some features, such as opt-in Regions, still need opting in). |
 | `gke-gcloud-auth-plugin` | `aws eks get-token` (via the `aws` CLI) | kubectl exec-credential plugin that turns cloud credentials into cluster auth tokens. `gcloud container clusters get-credentials` corresponds to `aws eks update-kubeconfig`. |
@@ -1165,8 +1650,13 @@ general GCP-vs-AWS difference.
 
 - Automating "Pausing and resuming the cluster between sessions" (a CD/teardown workflow or a
   scheduled job).
-- Fitting the nightly backup schedule to pausing: no scheduled backup runs while the cluster is
-  paused, and the catch-up one on resume fails, since Postgres is still hibernated.
+- Verifying the backups automatically: "Rehearsing a restore" is an occasional manual check, not
+  a scheduled job that restores and compares on its own.
+- Recovering Postgres straight from the `Retain`-policy disk a deleted `Cluster` leaves behind:
+  CNPG reuses a leftover PVC that still carries its labels and annotations, but rebuilding one by
+  hand around a `Released` disk isn't documented here. Recover from the bucket instead.
+- Backing up Kafka's data — it only carries saga messages in transit (see Prerequisites for what
+  losing them leaves to correct by hand).
 - An Artifact Registry cleanup policy — content-hash tags never collide or get overwritten, so
   the registry only grows; nothing here deletes an old image once no deployed release still
   references it. With immutable tags on (Step 9), a cleanup policy can't delete tagged images
@@ -1194,7 +1684,8 @@ Store CSI Driver, và các Helm chart triển khai 6 service Spring Boot.
 **Phạm vi**: từ hạ tầng cluster GKE tới khi deploy `charts/cafe` bằng `scripts/deploy.sh` thành công
 (Bước 1-8), cộng thêm CI pipeline build và push image container thật cho các pod đó (Bước 9). Tạm
 dừng và bật lại cluster giữa các buổi làm việc là 1 quy trình làm tay (có mục riêng, sau Bước 9); tự
-động hoá nó là việc riêng, chưa triển khai — xem mục "Chưa bao gồm trong tài liệu này" ở cuối.
+động hoá nó là việc riêng, chưa triển khai — xem mục "Chưa bao gồm trong tài liệu này" ở cuối. Khôi
+phục Postgres từ backup, kể cả 1 lần tập dượt, có mục riêng ngay sau mục tạm dừng và bật lại.
 
 Link tới file trong repo trỏ thẳng tới `master` trên GitHub.
 
@@ -1264,7 +1755,28 @@ mục "Yêu cầu môi trường").
 - `git` và `sha256sum` nằm trong `PATH` — `scripts/deploy.sh` kiểm tra trạng thái repo bằng git, còn
   `scripts/image-tag.sh` tính hash bằng `sha256sum` (Git Bash có sẵn cả 2; macOS trước bản 15
   (Sequoia) không có `sha256sum`).
-- Project GCP đã bật billing.
+- Project GCP đã bật billing. Project của tài liệu này chạy trên billing account **Free Trial**,
+  kết thúc vào ngày **2026-12-08** hoặc khi đã tiêu hết $300 (~7.875.000₫) credit, tuỳ mốc nào tới
+  trước (Console → Billing → Overview, mục "Free credit", cho biết số ngày và credit còn lại). Khi
+  đó mọi tài nguyên bị dừng; nếu không nâng cấp billing account trong 30 ngày gia hạn tiếp theo,
+  mọi thứ trong project bị xoá vĩnh viễn: cluster cùng các persistent disk (dữ liệu của Postgres và
+  Kafka), bucket backup trên GCS, Secret Manager, Artifact Registry và toàn bộ thiết lập IAM và
+  Workload Identity. Nâng cấp trong thời gian gia hạn thì *có thể* lấy lại được, nhưng Google không
+  cam kết. Trước ngày hết hạn, hoặc nâng cấp billing account lên tài khoản trả phí (credit chưa
+  dùng vẫn được giữ tới hạn của nó), hoặc chép toàn bộ bucket backup ra khỏi project — sang 1
+  bucket thuộc 1 project gắn với billing account trả phí khác, hoặc bằng
+  `gcloud storage rsync -r gs://cafe-microservices-cafe-pg-backups <dir>`. Chép mọi prefix, vì sau
+  1 lần khôi phục backup nằm dưới 1 prefix mới, và chép cả base backup lẫn WAL, vì thiếu 1 trong 2
+  thì phần còn lại vô dụng; cách khôi phục từ 1 trong 2 bản chép này nằm ở cuối mục "Khôi phục sau
+  khi mất cluster Postgres". Bucket chỉ chứa dữ liệu của Postgres; dữ liệu của Kafka xem gạch đầu
+  dòng tiếp theo.
+- Dữ liệu của Kafka không có backup nào: nó chỉ chứa các message saga đang chuyển giữa các
+  service, và mất nó là mất các message chưa được consume. Job saga reconciliation của
+  order-service gửi lại lệnh của order đang chờ reply cho lệnh reserve hoặc commit, nhưng chỉ 3
+  lần, cách nhau khoảng 1 phút, và các lần gửi lại trong lúc Kafka không hoạt động cũng bị tính.
+  Sau đó nó đưa order về OPEN hoặc CONFIRMED; stock mà inventory-service đã giữ hoặc đã trừ cho
+  order đó vẫn như vậy, cũng như stock mà 1 lệnh release-stock bị mất lẽ ra đã nhả, cho tới khi
+  được sửa tay.
 - Chạy mọi lệnh từ thư mục gốc của repo — các đường dẫn như `k8s/data-layer/` và `charts/cafe`
   là đường dẫn tương đối so với thư mục đó.
 - Chốt trước project ID, tên/zone cluster, tên bucket backup Postgres. Các giá trị này còn được đưa
@@ -1294,6 +1806,70 @@ gcloud services enable compute.googleapis.com container.googleapis.com secretman
 Bước 9 còn cần một repository GitHub đã bật Actions và quyền admin trên repo đó (để cấu hình
 branch protection) — không cần thêm CLI nào ngoài `gcloud` (và `docker`, chỉ cho bước lint local
 tùy chọn), dù GitHub CLI (`gh`) là cách tiện lợi để chạy lần đầu thủ công.
+
+### Cảnh báo ngân sách (budget alert)
+
+Một budget của Cloud Billing gửi email cho các admin và user của billing account khi chi tiêu vượt
+1 ngưỡng. Nó chỉ cảnh báo — không bao giờ chặn hay dừng việc chi tiêu — nhưng các ngưỡng thấp của
+nó là cách rẻ để không quên 1 cluster vẫn chạy giữa các buổi làm việc. Tạo budget cần role Billing
+Account Administrator hoặc Billing Account Costs Manager. Các API của nó được gọi qua project mà
+`gcloud config` đang trỏ tới, nên bật ở chính project đó. Chạy cả 2 block trong cùng 1 shell:
+
+```bash
+gcloud services enable cloudbilling.googleapis.com billingbudgets.googleapis.com
+billing_account="$(gcloud billing projects describe cafe-microservices --format='value(billingAccountName)')"
+billing_account="${billing_account#billingAccounts/}"
+gcloud billing accounts describe "$billing_account" --format='value(currencyCode)'
+```
+
+Lệnh cuối in ra đơn vị tiền của account; `--budget-amount` phải dùng đúng đơn vị đó. Với cách tính
+credit mặc định, budget đếm chi tiêu *sau* khi trừ credit, mà trên Free Trial con số này gần như
+bằng 0 cho tới khi hết credit, nên budget sẽ không bao giờ báo. Thay vào đó, budget chỉ trừ các
+loại credit liệt kê trong `--filter-credit-types`: credit free tier (nhiều khả năng gồm cả credit
+bù phí control plane của GKE; kiểm tra 1 lần ở cuối mục này) và giảm giá sustained use (node E2 và
+Spot không được giảm giá này, nên ở đây nó không thay đổi gì; nó được liệt kê để budget vẫn chỉ đo
+credit Free Trial nếu dùng loại máy khác). Credit `PROMOTION`, tức $300 (~7.875.000₫) của Free
+Trial, không bị trừ mà vẫn tính là chi tiêu, nhờ vậy budget đo được tốc độ tiêu credit Free Trial.
+
+Chi tiêu được tính lại từ ngày 1 mỗi tháng (giờ Thái Bình Dương) và chỉ hiện trong billing sau vài
+giờ tới khoảng 1 ngày, nên mỗi cảnh báo nghĩa là "chi tiêu từ đầu tháng tới giờ đã vượt mức này".
+Các ngưỡng là tỷ lệ của budget $100 (~2.625.000₫) và cho 2 tín hiệu:
+
+- $10, $20 và $40 (~262.500₫, ~525.000₫ và ~1.050.000₫): 1 cluster bị quên chưa tạm dừng. Khi cả 2
+  pool đều chạy, cluster tốn khoảng $2.2–2.8 (~58.000–74.000₫) mỗi ngày, nên chỉ riêng việc chạy
+  liên tục cũng chạm các mức này sau khoảng 4, 7–9 và 14–18 ngày (ước tính từ giá niêm yết của node
+  và disk, không lấy từ hoá đơn). Khi tạm dừng, disk, bucket, registry và secret chỉ tốn khoảng $1
+  (~26.000₫) mỗi tháng, nên riêng việc tạm dừng không bao giờ chạm các mức này, nhưng các buổi làm
+  việc trong tháng thì có: nếu 1 cảnh báo tới sớm hơn mức mà số giờ bạn đã chạy cluster giải thích
+  được, hãy kiểm tra cả 2 pool đều đang ở 0 node (lệnh cuối của phần "Tạm dừng").
+- $50, $90 và $100 (~1.312.500₫, ~2.362.500₫ và ~2.625.000₫), cùng mức $100 theo dự báo: tốc độ
+  tiêu credit Free Trial. $100 mỗi tháng xấp xỉ tốc độ tiêu hết $300 (~7.875.000₫) trong 90 ngày
+  của Free Trial, nên cảnh báo theo dự báo nghĩa là "đang tiêu nhanh tới mức sẽ hết credit sớm":
+
+```bash
+budgets="$(gcloud billing budgets list --billing-account="${billing_account:?run the block above in this shell first}" --filter='displayName="cafe-microservices monthly"' --format='value(name)')" &&
+  { [[ -z $budgets ]] || { echo "a budget named cafe-microservices monthly already exists: $budgets (see the notes after this block)" >&2; false; }; } &&
+  gcloud billing budgets create --billing-account="$billing_account" \
+    --display-name="cafe-microservices monthly" \
+    --budget-amount=100USD --calendar-period=month \
+    --filter-projects=projects/cafe-microservices \
+    --credit-types-treatment=include-specified-credits \
+    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT \
+    --threshold-rule=percent=0.1 --threshold-rule=percent=0.2 --threshold-rule=percent=0.4 \
+    --threshold-rule=percent=0.5 --threshold-rule=percent=0.9 --threshold-rule=percent=1.0 \
+    --threshold-rule=percent=1.0,basis=forecasted-spend
+```
+
+Nếu đơn vị tiền của account không phải USD, thay `100USD` bằng số tiền tương đương theo đơn vị đó.
+Nếu block dừng vì đã có 1 budget cùng tên, giữ budget đó — budget thứ 2 sẽ gửi mọi cảnh báo 2 lần —
+và sửa nó bằng `gcloud billing budgets update`. Kiểm tra 1 lần trong Console → Billing → Reports
+(lọc theo project này, có hiện credit) rằng credit của Kubernetes Engine được xếp vào loại credit
+miễn phí (free tier). Nếu nó nằm ở loại credit khác, thêm loại đó vào budget; nếu không, budget sẽ
+tính khoảng $73 (~1.900.000₫) phí control plane mỗi tháng của cluster là chi tiêu. Danh sách mới
+thay thế toàn bộ danh sách cũ của budget, nên phải liệt kê lại cả 2 loại ở trên, và `<name>` là tên
+`billingAccounts/…/budgets/…` mà
+`gcloud billing budgets list --billing-account="$billing_account" --format='value(name)'` in ra:
+`gcloud billing budgets update <name> --credit-types-treatment=include-specified-credits --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,<type>`.
 
 ---
 
@@ -1366,6 +1942,15 @@ gcloud storage buckets add-iam-policy-binding gs://cafe-microservices-cafe-pg-ba
   --member="serviceAccount:cafe-postgres-backup@cafe-microservices.iam.gserviceaccount.com" \
   --role=roles/storage.legacyBucketReader
 
+# Read-only GSA for restoring from those backups (see "Restoring Postgres from a backup"): a
+# restore only reads the bucket, so the cluster doing it can't overwrite or delete the backups
+gcloud iam service-accounts create cafe-postgres-restore
+for role in roles/storage.objectViewer roles/storage.legacyBucketReader; do
+  gcloud storage buckets add-iam-policy-binding gs://cafe-microservices-cafe-pg-backups \
+    --member="serviceAccount:cafe-postgres-restore@cafe-microservices.iam.gserviceaccount.com" \
+    --role="$role"
+done
+
 # One GSM-reader GSA per service (5 app services + gateway):
 for svc in auth-service menu-service order-service inventory-service report-service gateway; do
   gcloud iam service-accounts create "${svc}-gsm-reader"
@@ -1389,13 +1974,20 @@ gcloud iam service-accounts add-iam-policy-binding \
   "cafe-postgres-backup@cafe-microservices.iam.gserviceaccount.com" \
   --role=roles/iam.workloadIdentityUser \
   --member="serviceAccount:cafe-microservices.svc.id.goog[cafe/cafe-postgres]"
+
+# The restore GSA binds to `cafe-postgres-restore`, the KSA of the scratch Cluster a rehearsal
+# restores into; the binding stays, so a rehearsal never waits on IAM propagation
+gcloud iam service-accounts add-iam-policy-binding \
+  "cafe-postgres-restore@cafe-microservices.iam.gserviceaccount.com" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="serviceAccount:cafe-microservices.svc.id.goog[cafe/cafe-postgres-restore]"
 ```
 
 GSA backup của pod Postgres được gắn annotation theo cách khác — qua `serviceAccountTemplate` của
 CNPG `Cluster` (xem [k8s/data-layer/postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml)),
 không phải ServiceAccount do Helm quản lý, vì đây là tầng dữ liệu, không phải service ứng dụng.
-Template đó chỉ đặt annotation, nên binding ở trên vẫn bắt buộc — thiếu nó thì pod không xác
-thực được với bucket backup.
+Template đó chỉ đặt annotation, nên binding của `cafe-postgres-backup` → `cafe/cafe-postgres`
+ở trên vẫn bắt buộc — thiếu nó thì pod không xác thực được với bucket backup.
 
 Thay đổi IAM có thể mất vài phút để lan truyền — pod báo lỗi CSI mount
 `PermissionDenied: iam.serviceAccounts.getAccessToken denied` ngay sau khi vừa gắn binding mới
@@ -1555,7 +2147,9 @@ và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-pr
 - [postgres-storageclass.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-storageclass.yaml) — 1 StorageClass
   riêng với policy `Retain` cho PVC của Postgres (các class dựng sẵn của GKE đều là
   `Delete`; Postgres là nguồn dữ liệu gốc của app này, nên đĩa của nó phải sống sót kể cả khi
-  PVC/Cluster bị xoá nhầm).
+  PVC/Cluster bị xoá nhầm). Lấy lại dữ liệu từ 1 đĩa được giữ lại như vậy chỉ là cách làm tay,
+  bất đắc dĩ; đường khôi phục được hỗ trợ là các backup trên object store (xem "Khôi phục
+  Postgres từ backup").
 - [postgres-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-cluster.yaml) — CNPG `Cluster` cùng các database và role của nó:
   - `Cluster` bootstrap `auth_db` ngay lúc tạo (1 `Cluster` chỉ bootstrap được 1 database);
   - 4 `Database` CR tạo database cho các service còn lại;
@@ -1572,12 +2166,13 @@ và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-pr
     `kubectl explain cluster.spec.storage` để kiểm tra lại.
 - [postgres-backup.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/postgres-backup.yaml) — `ObjectStore` của Barman
   Cloud Plugin (trỏ tới GCS bucket, xác thực qua Workload Identity của chính Cluster, không cần
-  Secret credential riêng) và 1 `ScheduledBackup` chạy hàng ngày.
+  Secret credential riêng; `retentionPolicy` 10 ngày — "Tạm dừng" nói nó chạy khi nào) và 1
+  `ScheduledBackup` chạy hằng đêm (00:00 UTC).
 - [kafka-cluster.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/k8s/data-layer/kafka-cluster.yaml) — `KafkaNodePool` + `Kafka` KRaft
   1 broker, ghim vào `stateful-pool` qua node affinity/toleration. Cố tình dùng StorageClass
   `standard` dựng sẵn của GKE (reclaim `Delete`), khác với Postgres — Kafka ở đây chỉ chứa
-  message saga có thể replay lại, không phải dữ liệu gốc. Giống Postgres, phiên bản Kafka (4.3.1)
-  được ghim, nên nâng cấp operator Strimzi không thể âm thầm đổi nó.
+  message saga đang chuyển giữa các service, không phải dữ liệu gốc. Giống Postgres, phiên bản
+  Kafka (4.3.1) được ghim, nên nâng cấp operator Strimzi không thể âm thầm đổi nó.
 
 ```bash
 kubectl apply -f k8s/data-layer/postgres-storageclass.yaml
@@ -2144,23 +2739,78 @@ cluster autoscaler cùng lúc với resize bằng tay trên cùng 1 node pool.
 
 ### Tạm dừng
 
-Tắt các service trước, để không còn client nào của Postgres hay Kafka; sau đó cho Postgres
-hibernate, để CloudNativePG tắt nó an toàn mà vẫn giữ PVC; rồi mới bỏ các node — `stateful-pool`
-trước `stateless-pool`, vì operator CNPG, thứ thực hiện việc hibernate, chạy trên `stateless-pool`:
+Tắt các service trước, để không còn client nào của Postgres hay Kafka; sau đó ngưng lịch backup
+hằng đêm (`suspend`) và backup Postgres, để bucket chứa mọi thứ đã ghi trước khi tạm dừng và không
+còn backup theo lịch nào đang chạy khi Postgres tắt; rồi cho Postgres hibernate, để CloudNativePG
+tắt nó an toàn mà vẫn giữ PVC; rồi mới bỏ các node, `stateful-pool` trước `stateless-pool` — ngược
+với thứ tự của phần Bật lại. Chạy các block này, và các block của lần tập dượt, trong cùng 1 shell:
+block sau đọc biến (`$backup`, `$counts_dir`, `$counts_query`) do block trước đặt.
+
+Tắt các service và chờ tới khi pod của chúng biến mất hẳn (`kubectl scale` trả về trước khi các pod
+tắt xong):
 
 ```bash
 kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl annotate cluster cafe-postgres cnpg.io/hibernation=on --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=5m &&
-  gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=0 --zone=us-central1-a --quiet &&
-  gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --no-enable-autoscaling &&
-  gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=0 --zone=us-central1-a --quiet
-gcloud compute instances list --filter="name~^gke-cafe-cluster-"
+kubectl wait --for=delete pod -l 'app in (gateway,auth-service,menu-service,order-service,inventory-service,report-service)' -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=120s
 ```
 
-Lệnh cuối không được liệt kê instance nào. Chuỗi `&&` dừng ở lệnh đầu tiên bị fail, nên nếu Postgres
-chưa hibernate xong trong 5 phút thì cả 2 pool vẫn chạy. Lệnh sau cho biết việc hibernate đã tới
-đâu:
+Nếu muốn tập dượt restore trong lần tạm dừng này, hãy ghi lại số dòng ngay bây giờ (bước 1 của "Tập
+dượt restore"), trước khi backup.
+
+Ngưng lịch backup hằng đêm, rồi backup Postgres bằng 1 `Backup` chạy theo yêu cầu và chờ xong:
+
+```bash
+backup="cafe-postgres-on-demand-$(date -u +%Y%m%d-%H%M%S)"
+kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":true}}' &&
+  kubectl create -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -f - <<EOF
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: ${backup}
+  labels: {app.kubernetes.io/managed-by: kubectl}
+spec:
+  cluster: {name: cafe-postgres}
+  method: plugin
+  pluginConfiguration: {name: barman-cloud.cloudnative-pg.io}
+EOF
+phase=""
+for _ in $(seq 90); do
+  phase=$(kubectl get backup.postgresql.cnpg.io "$backup" -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.phase}') || { phase="kubectl error"; break; }
+  case "$phase" in ""|pending|started) sleep 10 ;; *) break ;; esac
+done
+echo "$backup: ${phase:-no phase yet}"
+```
+
+Vòng lặp chờ tối đa 15 phút rồi in ra phase cuối cùng. 1 backup kiểu này đi từ `pending` sang
+`started` rồi tới `completed` hoặc `failed`; nó nằm ở `pending` khi 1 backup khác của cluster vẫn
+đang chạy (ví dụ 1 backup hằng đêm đã bắt đầu trước khi lịch bị ngưng, hoặc backup bù mà 1 lần
+bật lại có thể tạo ra), và 15 phút đó đã tính cả thời gian chờ này. CNPG chạy lần lượt từng backup
+của 1 cluster, cái cũ trước, và việc ngưng lịch ngăn không cho backup mới được tạo, nên khi
+backup này hoàn tất thì không còn backup nào đang chạy để bị lần hibernate cắt ngang. Chỉ
+`completed` mới cho block tiếp theo chạy; với các giá trị khác mà vòng lặp in ra:
+
+- `pending` hoặc `started`: backup vẫn đang chạy. Chạy lại vòng lặp từ dòng `phase=""` (vẫn dùng
+  `$backup` cũ).
+- `no phase yet`: operator CNPG chưa nhận backup. Kiểm tra các pod trong `cnpg-system` có đang chạy
+  không, rồi chạy lại vòng lặp như trên.
+- `kubectl error`: kubectl đã in lý do ở phía trên. Nếu `Backup` không tồn tại (lệnh patch lịch
+  hoặc `kubectl create` bị lỗi), làm lại từ block backup; nếu không, chạy lại vòng lặp từ dòng
+  `phase=""`.
+- `failed` hoặc giá trị khác: lý do nằm ở
+  `kubectl get backup.postgresql.cnpg.io "$backup" -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.error}'`.
+  Cluster vẫn chạy, với lịch backup hằng đêm đang bị ngưng, nên hãy xử lý nguyên nhân rồi làm
+  lại từ block backup — hoặc, nếu muốn bỏ lần tạm dừng này, xem "Xử lý sự cố khi bật lại", mục 5.
+
+Sau đó cho Postgres hibernate:
+
+```bash
+[[ $(kubectl get backup.postgresql.cnpg.io "${backup:?run the backup block in this shell first}" -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.phase}') == completed ]] || { echo "the backup is not completed (see the backup block's phases)" >&2; false; } &&
+  kubectl annotate cluster cafe-postgres cnpg.io/hibernation=on --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster &&
+  kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=5m
+```
+
+Nếu block này dừng ở bước kiểm tra backup, quay lại block backup (xem ý nghĩa phase cuối cùng ở
+trên). Nếu Postgres chưa hibernate xong trong 5 phút, lệnh sau cho biết nó đã tới đâu:
 
 ```bash
 kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.conditions[?(@.type=="cnpg.io/hibernation")].reason}{"\n"}'
@@ -2173,24 +2823,60 @@ kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-ce
 - Dòng trống: operator CNPG chưa xử lý annotation — kiểm tra các pod trong `cnpg-system` (operator
   và Barman Cloud Plugin) có đang chạy không.
 
-Sau đó chạy lại từ dòng `kubectl wait`.
+Sau đó chạy lại block hibernate từ dòng `kubectl wait` của nó.
+
+Nếu muốn tập dượt restore, hãy làm ngay lúc này — Postgres đã tắt, nhờ vậy `stateful-pool` có chỗ
+cho cluster tạm — rồi quay lại chạy block cuối cùng (xem "Tập dượt restore").
+
+Cuối cùng là bỏ các node. Các dòng trước lệnh resize kiểm tra lại rằng lịch backup hằng đêm đã
+ngưng, Postgres đã hibernate và không còn sót cluster tạm nào:
+
+```bash
+[[ $(kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}') == true ]] || { echo "the nightly schedule is not suspended (see the notes after this block)" >&2; false; } &&
+  kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=cnpg.io/hibernation --timeout=10s &&
+  kubectl wait --for=delete cluster.postgresql.cnpg.io/cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=10s &&
+  kubectl wait --for=delete pod -l cnpg.io/cluster=cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=2m &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateful-pool --num-nodes=0 --zone=us-central1-a --quiet &&
+  gcloud container node-pools update stateless-pool --cluster=cafe-cluster --zone=us-central1-a --no-enable-autoscaling &&
+  gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=0 --zone=us-central1-a --quiet
+gcloud compute instances list --filter="name~^gke-cafe-cluster-"
+```
+
+Lệnh cuối không được liệt kê instance nào. Nếu 1 bước kiểm tra fail thì chưa có gì bị resize và cả
+2 pool vẫn chạy. Nếu 1 lệnh sau đó fail, xử lý nguyên nhân rồi chạy lại cả block: các bước kiểm tra
+vẫn qua, và resize 1 pool vốn đã ở 0 node không thay đổi gì. Nếu lịch backup hằng đêm chưa ngưng,
+hãy ngưng nó bằng
+`kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":true}}'`.
+Nếu Postgres chưa hibernate, hãy chạy xong block hibernate trước (xem phần ngay sau block đó). Nếu
+cluster tạm `cafe-postgres-restore` vẫn còn, chạy bước 4 của "Tập dượt restore" rồi chạy lại block
+này.
 
 Đừng resize `stateful-pool` khi chưa hibernate: PodDisruptionBudget của instance Postgres chặn việc
 drain node tới 1 giờ, sau đó Postgres bị tắt đột ngột, không qua bước tắt an toàn. Kafka không cần
 xử lý gì riêng — pod broker duy nhất bị evict khi node của `stateful-pool` bị drain, Strimzi tạo lại
 nó ngay, và pod mới nằm ở `Pending` cho tới khi `stateful-pool` có node trở lại.
 
-Khi operator CNPG không chạy, `ScheduledBackup` hằng đêm (`cafe-postgres-daily-backup`) không tạo
-backup nào trong lúc cluster tạm dừng. Nếu giờ backup trôi qua trong lúc tạm dừng, operator tạo 1
-backup bù ngay khi chạy lại — trước khi Postgres được đánh thức — và backup đó fail, vì CNPG không
-backup được 1 cluster đang hibernate. Vì vậy backup theo lịch chỉ thành công vào đêm cluster đang
-chạy lúc 00:00 UTC.
+`ScheduledBackup` hằng đêm (`cafe-postgres-daily-backup`, 00:00 UTC) bị ngưng từ block backup
+cho tới khi phần Bật lại mở lại nó, sau khi Postgres đã sẵn sàng: hibernate sẽ cắt ngang 1 backup
+hằng đêm còn đang chạy và đánh dấu nó là failed, và CNPG cũng không backup được 1 cluster đang
+hibernate. Bản backup tạo trước khi hibernate đã bao quát thời gian tạm dừng. Nếu trong lúc tạm
+dừng đã có 1 mốc 00:00 UTC trôi qua, CNPG sẽ tạo nhiều nhất 1 backup bù ngay khi lịch được mở lại,
+đặt tên theo mốc 00:00 UTC đầu tiên bị lỡ, và backup này thành công vì Postgres đang chạy — nên mỗi
+buổi làm việc thường bắt đầu bằng 1 base backup thứ 2, rất rẻ. Retention (`retentionPolicy: 10d`
+trong `postgres-backup.yaml`) chạy 30 phút 1 lần khi Postgres đang chạy và không bao giờ xoá backup
+hoàn tất mới nhất, dù tạm dừng lâu bao nhiêu. Object `Backup` của các backup hoàn tất của cluster
+này bị xoá cùng dữ liệu của nó khi retention xoá backup đó; object của các backup bị fail thì còn
+cho tới khi bạn tự xoá
+(`kubectl get backup.postgresql.cnpg.io -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster`
+liệt kê chúng).
 
 ### Bật lại
 
 Làm theo thứ tự ngược lại: `stateless-pool` trước, để các operator và pod hệ thống của GKE có chỗ
 chạy — operator CNPG phải chạy thì mới đánh thức được Postgres — sau đó `stateful-pool`, rồi
-Postgres, rồi các service:
+Postgres, rồi các service, inventory-service trước: job saga reconciliation của order-service gửi
+lại ngay lệnh của các order đang dở saga lúc tạm dừng và bỏ cuộc sau vài phút (xem Yêu cầu môi
+trường), nên inventory-service cần đang consume sẵn:
 
 ```bash
 gcloud container clusters resize cafe-cluster --node-pool=stateless-pool --num-nodes=1 --zone=us-central1-a --quiet
@@ -2201,23 +2887,35 @@ for ns in cert-manager cnpg-system strimzi-system; do
 done
 kubectl annotate cluster cafe-postgres cnpg.io/hibernation=off --overwrite -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
 kubectl get cluster cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.metadata.annotations.cnpg\.io/hibernation}{"\n"}'
-kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=10m
+kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=10m &&
+  kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":false}}'
+kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}{"\n"}'
 kubectl wait pod/cafe-kafka-cafe-kafka-pool-0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=10m
-kubectl scale deployment gateway auth-service menu-service order-service inventory-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
+kubectl scale deployment inventory-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+kubectl wait --for=condition=Available deployment/inventory-service -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m &&
+  kubectl scale deployment gateway auth-service menu-service order-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster &&
+  kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
 ```
 
-Lệnh kiểm tra annotation phải in ra `off`. Lệnh chờ Kafka đọc pod broker chứ không đọc resource
-`Kafka`, vì condition `Ready` của resource này có thể vẫn là `True` từ trước lúc tạm dừng.
-`--replicas=1` khớp với giá trị `replicas` của chart, và timeout 22 phút (giống `scripts/deploy.sh`)
-dài hơn `progressDeadlineSeconds` 1200s của các Deployment dùng DB, con số được tính để vừa với lần
-khởi động hợp lệ chậm nhất của chúng; `kubectl wait` không dừng ở deadline đó, nên 1 service bị kẹt
-sẽ hiện ra dưới dạng lệnh chờ này bị timeout.
+Lệnh kiểm tra annotation phải in ra `off`, và lệnh kiểm tra lịch backup phải in ra `false`; lịch
+chỉ được mở lại khi Postgres đã sẵn sàng, nên backup bù mà nó có thể tạo ra sẽ thấy Postgres đang
+chạy. 1 lệnh resize bị fail hay 1 lệnh chờ bị timeout đều không chặn các dòng sau nó — trừ việc các
+service còn lại chỉ được scale lên và được chờ khi inventory-service đã sẵn sàng. Nếu 1 lệnh chờ
+bị timeout, sửa nguyên nhân (xem "Xử lý sự cố khi bật lại"), rồi chạy lại block từ lệnh chờ đó;
+mọi dòng từ lệnh chờ đầu tiên trở đi đều chạy lại được an toàn. Với 1 lệnh resize bị fail, xem
+mục 3 ở đó. Lệnh chờ Kafka đọc pod broker chứ không đọc resource `Kafka`, vì condition `Ready` của
+resource này có thể vẫn là `True` từ trước lúc tạm dừng. `--replicas=1` khớp với giá trị `replicas`
+của chart, và timeout 22 phút (giống `scripts/deploy.sh`) dài hơn `progressDeadlineSeconds` 1200s
+của các Deployment dùng DB, con số được tính để vừa với lần khởi động hợp lệ chậm nhất của chúng;
+`kubectl wait` không dừng ở deadline đó, nên 1 service bị kẹt sẽ hiện ra dưới dạng 1 trong các lệnh
+chờ này bị timeout.
 
 `bash scripts/deploy.sh` (Bước 8) cũng đưa được các service lên lại, nhưng đồng thời deploy luôn
-commit đang checkout, có thể khác với bản đã chạy trước đó; dùng nó khi muốn vừa bật lại vừa deploy.
-Cho tới khi các service chạy, `Cluster` CNPG có thể báo thiếu Secret mật khẩu của các role — xem
-mục 6 của "Xử lý sự cố khi deploy".
+commit đang checkout, có thể khác với bản đã chạy trước đó, và script không tự đánh thức Postgres
+hay mở lại lịch backup. Script khởi động cả 6 service cùng lúc, nên để inventory-service chạy trước
+order-service, hãy bật lại bằng toàn bộ block ở trên trước rồi mới chạy script. Cho tới khi các
+service chạy, `Cluster` CNPG có thể báo thiếu Secret mật khẩu của các role — xem mục 6 của "Xử lý
+sự cố khi deploy".
 
 ### Xử lý sự cố khi bật lại
 
@@ -2232,9 +2930,282 @@ mục 6 của "Xử lý sự cố khi deploy".
    đó `NotReady`, các pod trên đó hiện `Completed`, và `kubectl get endpointslices -n cnpg-system`
    không có địa chỉ nào. Nó tự hồi phục khi pod thay thế được xếp lên 1 node Ready; chạy lại lệnh
    chờ. (`kubectl get endpoints` đã deprecated và có thể cập nhật chậm; hãy đọc EndpointSlice.)
-3. **1 lệnh resize fail với `ZONE_RESOURCE_POOL_EXHAUSTED`** — zone tạm hết máy `e2-medium`; đợi rồi
-   thử lại.
+3. **1 lệnh resize fail với `ZONE_RESOURCE_POOL_EXHAUSTED`** — zone tạm hết máy `e2-medium`. Các
+   dòng sau nó vẫn chạy, và các lệnh chờ bị timeout (Ctrl+C để dừng chúng). Đợi 1 lúc, rồi chạy lại
+   block của phần Bật lại từ lệnh resize `stateful-pool`. Nếu lệnh bị fail là lệnh resize
+   `stateless-pool`, đừng chạy lại nó: autoscaling do dòng kế tiếp bật sẽ thêm node cho các pod đang
+   `Pending` khi zone có máy trở lại, còn resize bằng tay sẽ bỏ bớt các node mà autoscaler đã thêm
+   ngoài node đầu tiên.
 4. **Volume CSI của 1 pod không mount được trên node mới** — xem mục 1 của "Xử lý sự cố khi deploy".
+5. **1 lần tạm dừng bị bỏ dở giữa chừng** (các service đã tắt; có thể lịch backup đã bị ngưng và
+   Postgres đã hibernate; node vẫn còn) — đưa mọi thứ trở lại bằng các dòng của phần Bật lại, từ
+   dòng annotation hibernation trở đi, gồm cả lệnh patch lịch backup; không có gì khác mở lại lịch
+   backup. Nếu Postgres chưa hề hibernate, các dòng đó chỉ thay đổi lịch backup và các
+   service. Nếu 1 lần tập dượt restore cũng bị bỏ dở (lệnh
+   `kubectl get cluster.postgresql.cnpg.io cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster`
+   vẫn thấy nó), hãy xoá nó trước bằng bước 4 của "Tập dượt restore": request 250m CPU của nó khiến
+   `stateful-pool` không còn chỗ cho `cafe-postgres-1`, pod này sẽ nằm ở `Pending`.
+
+---
+
+## Khôi phục Postgres từ backup
+
+Các backup trong `gs://cafe-microservices-cafe-pg-backups` (base backup cùng WAL liên tục, xem Bước
+6 và "Tạm dừng") là đường được hỗ trợ để lấy lại Postgres. Việc restore luôn dựng 1 `Cluster` CNPG
+*mới* từ bucket — dùng `bootstrap.recovery` thay cho `initdb` — và không bao giờ đụng vào các
+backup mà nó đọc. Lượng dữ liệu có thể mất — thứ mà *recovery point objective* (RPO) đặt giới hạn
+cho: khi Postgres đang chạy, tối đa là phần WAL chưa được archive, mà CNPG đóng lại và archive ít
+nhất 5 phút 1 lần (`archive_timeout`); qua 1 lần tạm dừng thì không mất gì, vì lần tạm dừng bắt
+đầu bằng 1 backup đã hoàn tất. Restore mất bao lâu — thứ mà *recovery time objective* (RTO) đặt
+giới hạn cho — thì do lần tập dượt dưới đây đo.
+
+### Tập dượt restore
+
+1 bước kiểm tra làm tay, thỉnh thoảng mới làm, để chắc rằng backup thật sự restore được, làm trong
+lúc tạm dừng: khi Postgres đã hibernate, `stateful-pool` có chỗ cho cluster tạm, vốn cần cùng mức
+request 250m CPU như cluster thật. Làm lại sau mỗi lần đổi bản Postgres lớn (major version), đổi
+Barman Cloud Plugin, đổi bucket hoặc IAM của nó. Lần tập dượt sẽ restore vào 1 `Cluster` riêng tên
+`cafe-postgres-restore` (cluster này đọc bucket bằng GSA chỉ đọc `cafe-postgres-restore` ở Bước 2
+và không archive gì), rồi xoá cluster đó.
+
+1. Trong lúc làm "Tạm dừng", sau khi pod của các service đã biến mất và trước khi backup, ghi lại
+   số dòng chính xác của mọi bảng:
+
+   ```bash
+   counts_dir="$(mktemp -d)"
+   counts_query="select table_schema||'.'||table_name, (xpath('/row/c/text()', query_to_xml(format('select count(*) c from %I.%I', table_schema, table_name), false, true, '')))[1]::text from information_schema.tables where table_type = 'BASE TABLE' and table_schema not in ('pg_catalog', 'information_schema') order by 1"
+   for db in auth_db menu_db order_db inventory_db report_db; do
+     echo "== $db"
+     kubectl exec cafe-postgres-1 -c postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -- psql -d "$db" -Atc "$counts_query"
+   done > "$counts_dir/before.txt"
+   ```
+
+2. Tiếp tục "Tạm dừng" cho tới hết block hibernate, rồi tạo cluster tạm. Nó lấy image, resource và
+   dung lượng đĩa từ `cafe-postgres` đang tồn tại và chạy ở cùng vị trí, nhưng dùng StorageClass
+   `standard` của GKE (reclaim `Delete`, nên xoá cluster xong không còn đĩa sót lại), không có khối
+   `plugins` (nên không archive WAL cũng không áp retention lên bucket), và restore `auth_db` do
+   `auth_service` sở hữu làm database bootstrap (nếu không, CNPG sẽ tạo thêm 1 database và role
+   `app`). `serverName` cho biết backup nào cần đọc — thiếu nó, plugin sẽ tìm theo tên của chính
+   cluster mới; block này đọc giá trị đó từ mục plugin của `cafe-postgres` đang tồn tại (nếu không
+   đặt thì là tên Cluster, giá trị mặc định của plugin):
+
+   ```bash
+   restore_start=$(date +%s)
+   server_name=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.plugins[?(@.name=="barman-cloud.cloudnative-pg.io")].parameters.serverName}') &&
+     image=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.imageName}') &&
+     resources=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.resources}') &&
+     storage_size=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.storage.size}') &&
+     kubectl apply -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -f - <<EOF &&
+   apiVersion: postgresql.cnpg.io/v1
+   kind: Cluster
+   metadata:
+     name: cafe-postgres-restore
+     labels: {app.kubernetes.io/managed-by: kubectl}
+   spec:
+     instances: 1
+     imageName: ${image:?cafe-postgres has no spec.imageName}
+     resources: ${resources:?cafe-postgres has no spec.resources}
+     enableSuperuserAccess: false
+     storage: {size: ${storage_size:?cafe-postgres has no spec.storage.size}, storageClass: standard}
+     affinity:
+       tolerations: [{key: "workload", operator: "Equal", value: "stateful", effect: "NoSchedule"}]
+       nodeSelector: {cloud.google.com/gke-nodepool: stateful-pool}
+     serviceAccountTemplate:
+       metadata:
+         annotations: {iam.gke.io/gcp-service-account: "cafe-postgres-restore@cafe-microservices.iam.gserviceaccount.com"}
+     bootstrap:
+       recovery: {source: origin, database: auth_db, owner: auth_service}
+     externalClusters:
+       - name: origin
+         plugin:
+           name: barman-cloud.cloudnative-pg.io
+           parameters: {barmanObjectName: cafe-postgres-backup-store, serverName: ${server_name:-cafe-postgres}}
+   EOF
+     kubectl wait cluster.postgresql.cnpg.io/cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=15m &&
+     echo "restore took $(( $(date +%s) - restore_start ))s"
+   ```
+
+   CNPG chạy trước 1 Job `cafe-postgres-restore-1-full-recovery`, rồi khởi động instance; instance
+   này tự restart 1 lần (sidecar của plugin chỉ cần trong lúc khôi phục); lệnh chờ đã tính cả lần
+   restart đó. Thời gian nó in ra chính là thời gian restore đo được. Nếu bước 3 vẫn không vào được
+   pod, chỉ chạy lại dòng `kubectl wait`, bỏ `&&` ở cuối, rồi bước 3 — không chạy lại lệnh `echo`,
+   vì nó sẽ cộng thêm cả khoảng thời gian từ đó tới giờ. Nếu lệnh chờ bị timeout, chạy lại ngay,
+   cùng lúc, 2 dòng cuối của block: thời gian chúng in ra vẫn tính từ lúc bắt đầu block, nên chậm
+   trễ trước khi chạy lại sẽ bị cộng vào.
+
+3. Đếm số dòng của các bảng đã restore theo cùng cách rồi so sánh:
+
+   ```bash
+   [[ -f ${counts_dir:?run step 1 in this shell first}/before.txt && -n ${counts_query:?run step 1 in this shell first} ]] &&
+     for db in auth_db menu_db order_db inventory_db report_db; do
+       echo "== $db"
+       kubectl exec cafe-postgres-restore-1 -c postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -- psql -d "$db" -Atc "$counts_query"
+     done > "$counts_dir/restored.txt" &&
+     diff "$counts_dir/before.txt" "$counts_dir/restored.txt" && echo "restore matches"
+   ```
+
+4. Dù bước 2–3 ra sao, hãy xoá cluster tạm và chờ tới khi nó và pod của nó biến mất hẳn — nếu
+   không, PodDisruptionBudget của nó sẽ chặn việc drain `stateful-pool` — rồi hoàn tất "Tạm dừng"
+   bằng block cuối cùng:
+
+   ```bash
+   kubectl delete cluster.postgresql.cnpg.io cafe-postgres-restore --ignore-not-found -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl wait --for=delete pod -l cnpg.io/cluster=cafe-postgres-restore -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=5m
+   ```
+
+### Khôi phục sau khi mất cluster Postgres
+
+Khi `Cluster` `cafe-postgres` cùng dữ liệu của nó đã mất, hãy tạo lại nó dưới đúng tên đó, để
+Service `-rw`, binding Workload Identity của KSA, các CR `Database` và `ScheduledBackup` vẫn hoạt
+động. Chỉ làm việc này khi thật sự cần khôi phục.
+
+Trước tiên tắt các service bằng block đầu tiên của "Tạm dừng", để không service nào ghi vào
+Cluster mới trước khi bước 3 backup nó; nếu chúng đã tắt sẵn thì block này không thay đổi gì. Nếu
+cluster đang tạm dừng, tiếp đó chạy các dòng của phần Bật lại tới hết các lệnh chờ operator (vòng
+lặp `for ns …`) — không chạy các dòng hibernation, vì Cluster mới không hibernate — và xoá
+`cafe-postgres-restore` nếu còn sót (xem "Xử lý sự cố khi bật lại", mục 5). Sau bước 4, chạy nốt 5
+dòng cuối của phần Bật lại (lệnh chờ Kafka, lệnh scale và lệnh chờ inventory-service, rồi lệnh
+scale và lệnh chờ các service còn lại).
+
+1. Kiểm tra không còn gì của cluster cũ:
+
+   ```bash
+   kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl get pvc -l cnpg.io/cluster=cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   ```
+
+   Lệnh đầu phải báo lỗi `NotFound`. Nếu nó tìm thấy Cluster, đĩa của Cluster có thể vẫn còn dữ
+   liệu: instance bị crash-loop hay đĩa đầy là lỗi cần sửa, không phải mất dữ liệu, nên dừng lại.
+   Chỉ khi đã kết luận dữ liệu bị mất (PVC không còn, hoặc đĩa không đọc được) mới xoá Cluster —
+   PVC bị xoá theo vì Cluster sở hữu nó, còn policy `Retain` của PV vẫn giữ đĩa (xem bước 5) — rồi
+   chạy lại các lệnh kiểm tra ở trên:
+
+   ```bash
+   kubectl delete cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl wait --for=delete pvc -l cnpg.io/cluster=cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=5m
+   ```
+
+   Lệnh kiểm tra thứ 2 phải in `No resources found in cafe namespace.` 1 PVC còn sót nghĩa là
+   đĩa cũ vẫn còn và có thể chứa dữ liệu mới hơn bucket; việc dựng lại từ đĩa đó không được hướng
+   dẫn ở đây. Cluster mới sẽ nhận lại PVC đó và chạy trên đĩa cũ thay vì restore, nên muốn restore
+   từ bucket thì xoá nó trước (policy `Retain` của PV vẫn giữ đĩa, xem bước 5):
+   `kubectl delete pvc <name> -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster`.
+
+2. Trong `k8s/data-layer/postgres-cluster.yaml`, thay `initdb: {database: auth_db, owner:
+   auth_service}` bằng `recovery: {source: origin, database: auth_db, owner: auth_service}` và thêm
+   đúng mục `externalClusters` như ở phần tập dượt, với `serverName` là `serverName` của plugin mà
+   file đang có (`cafe-postgres` nếu chưa có). Rồi đặt `serverName` của plugin trong `parameters`
+   thành 1 tên mới chưa có prefix nào trong bucket — tên `cafe-postgres-rN` đầu tiên
+   (`cafe-postgres-r1`, `-r2`, …) mà `gcloud storage ls gs://cafe-microservices-cafe-pg-backups/`
+   không liệt kê. Archive WAL sẽ fail nếu prefix đã có WAL (prefix nào có backup cũng có WAL).
+   Apply, rồi chờ instance của nó và lần archive WAL đầu tiên:
+
+   ```bash
+   kubectl apply -f k8s/data-layer/postgres-cluster.yaml --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   kubectl wait cluster.postgresql.cnpg.io/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=jsonpath='{.status.readyInstances}'=1 --timeout=15m &&
+     kubectl wait cluster.postgresql.cnpg.io/cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=ContinuousArchiving --timeout=10m
+   ```
+
+   Khác với lần tập dượt, instance này không restart sau khi khôi phục xong: plugin archive vẫn giữ
+   sidecar của nó. Nếu lệnh chờ archive bị timeout, lỗi archive nằm ở
+   `kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.status.conditions[?(@.type=="ContinuousArchiving")].message}{"\n"}'`.
+3. Tạo ngay 1 base backup đầu tiên dưới tên mới, thay vì chờ lịch backup hằng đêm: chạy block
+   backup của "Tạm dừng" (ý nghĩa phase cuối cùng của nó được giải thích ở đó), và chỉ đi tiếp khi
+   in `completed`. 1 backup hằng đêm được tạo trong lúc Cluster đã mất có thể chạy trước; vòng lặp
+   sẽ chờ nó như chờ 1 backup bù. Sau đó mở lại lịch backup, vốn bị block backup ngưng và không
+   bao giờ được reset khi apply `k8s/data-layer/`, nên luôn chạy lệnh này:
+
+   ```bash
+   kubectl patch scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --type=merge -p '{"spec":{"suspend":false}}'
+   kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}{"\n"}'
+   ```
+
+   Lệnh kiểm tra phải in ra `false`.
+4. Trong `postgres-cluster.yaml`, đặt lại `initdb: {database: auth_db, owner: auth_service}` và bỏ
+   mục `externalClusters`; giữ `serverName` mới trong `parameters` của plugin. `bootstrap` chỉ được
+   đọc khi tạo 1 Cluster, nên apply thay đổi này không ảnh hưởng gì tới cluster đang chạy, và file
+   vẫn dùng được để dựng 1 môi trường mới. Apply rồi commit thay đổi này trên 1 branch và merge
+   qua 1 PR, để lần `kubectl apply -f k8s/data-layer/` sau từ `master` không đặt tên archive về
+   lại tên cũ:
+
+   ```bash
+   kubectl apply -f k8s/data-layer/postgres-cluster.yaml --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   ```
+
+5. Từ đó trở đi các backup nằm dưới tên mới: lần tập dượt tự đọc tên này, còn lần khôi phục sau
+   đọc nó trong `externalClusters` và archive dưới tên tiếp theo chưa dùng. Không có gì tự dọn
+   prefix cũ trong bucket. Khi đã tin tưởng cluster vừa khôi phục và đã qua 10 ngày (khoảng
+   retention) kể từ lúc khôi phục, hãy tự xoá nó bằng
+   `gcloud storage rm --recursive gs://cafe-microservices-cafe-pg-backups/<old-serverName>/`
+   (`<old-serverName>` là `serverName` mà bước 2 đặt vào `externalClusters`), cùng với các object
+   `Backup` của cluster cũ — retention chỉ quản lý các object của Cluster hiện tại, nên chúng vẫn
+   hiện `completed` sau khi dữ liệu đã mất. Xoá 1 object `Backup` không bao giờ đụng tới bucket.
+   Liệt kê chúng (các backup hoàn tất do 1 Cluster UID khác tạo), xem lại danh sách, rồi xoá:
+
+   ```bash
+   cluster_uid=$(kubectl get cluster.postgresql.cnpg.io cafe-postgres -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.metadata.uid}') &&
+     old_backups=$(kubectl get backup.postgresql.cnpg.io -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{range .items[?(@.spec.cluster.name=="cafe-postgres")]}{.metadata.name}{" "}{.status.pluginMetadata.clusterUID}{"\n"}{end}' | awk -v uid="$cluster_uid" '$2 != "" && $2 != uid {print $1}') &&
+     printf '%s\n' "$old_backups"
+   ```
+
+   ```bash
+   [[ -n ${old_backups?run the block above in this shell first} ]] &&
+     kubectl delete backup.postgresql.cnpg.io $old_backups -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
+   ```
+
+   PersistentVolume cũ (reclaim policy `Retain`) nằm ở trạng thái `Released` và đĩa của nó vẫn tính
+   phí cho tới khi bạn xoá cả 2. Lệnh sau liệt kê các PV cùng claim, StorageClass và đĩa của chúng;
+   PV cũ là PV ở trạng thái `Released`, có class `cafe-postgres-retain`:
+
+   ```bash
+   kubectl get pv --context gke_cafe-microservices_us-central1-a_cafe-cluster -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,CLAIM:.spec.claimRef.name,CLASS:.spec.storageClassName,DISK:.spec.csi.volumeHandle
+   ```
+
+   Xoá PV đó bằng
+   `kubectl delete pv <name> --context gke_cafe-microservices_us-central1-a_cafe-cluster`, rồi xoá
+   đĩa của nó, có tên là đoạn cuối của đường dẫn `DISK`, bằng
+   `gcloud compute disks delete <disk> --zone=us-central1-a` (lệnh này hỏi bạn xác nhận).
+
+Các managed role và CR `Database` reconcile với các role và database đã restore như bình thường;
+các Secret mật khẩu của service được lấy lại từ Secret Manager khi các service chạy.
+
+Kafka không được khôi phục cùng Postgres: cả 5 database quay về cùng 1 thời điểm, nhưng Kafka vẫn
+giữ các message và offset đã commit của các consumer từ sau thời điểm đó:
+
+- Các dòng outbox chưa gửi tại thời điểm đó sẽ được gửi, có dòng là gửi lần 2, và không bản trùng
+  nào được áp dụng 2 lần (inbox của inventory-service kiểm tra correlation ID, saga của
+  order-service kiểm tra step hiện tại và correlation ID).
+- 1 message đã được consume sau thời điểm đó sẽ không được gửi lại, dù tác dụng của nó đã mất.
+  Điều này gồm cả những gì các service vẫn chạy trong lúc mất Postgres đã lấy từ Kafka: mỗi
+  message được thử lại tối đa vài phút, rồi bị chuyển vào `<topic>.dlq`, nơi không có gì replay
+  lại (xem mục 9 của "Xử lý sự cố khi deploy"). Trong lúc đó không có gì mới vào Kafka, vì mọi
+  message saga đều được gửi từ 1 database, nên phát hiện việc mất muộn cũng không làm việc này
+  tệ hơn.
+- Order đang chờ reply cho lệnh reserve hoặc commit sẽ được job saga reconciliation của
+  order-service gửi lại lệnh, tối đa 3 lần cách nhau khoảng 1 phút, bắt đầu ngay khi
+  order-service chạy; inventory-service trả lời 1 lệnh nó đã áp dụng bằng reply nó đã lưu. 5 dòng
+  cuối của phần Bật lại khởi động inventory-service trước để các lần gửi lại này được trả lời;
+  nếu cả 3 lần đều không được trả lời, order quay về OPEN hoặc CONFIRMED.
+- Stock cần sửa tay: phần inventory-service giữ hoặc trừ cho 1 order như vậy khi nó consume các
+  lệnh đó, và stock bị giữ mà không thuộc order nào — do 1 lệnh release-stock bị mất, hoặc 1 lệnh
+  cho 1 order đã mất mà inventory-service chưa consume.
+
+Để khôi phục vào 1 môi trường mới từ 1 bản chép của bucket (xem Yêu cầu môi trường), dựng môi
+trường đó theo tài liệu này, đặt bucket chứa các backup vào `destinationPath` của
+`postgres-backup.yaml` (xem danh sách các tên được ghi cứng vào file của repo trong Yêu cầu môi
+trường). Bản chép nằm trong bucket của 1 project trả phí khác thì dùng được ngay, bỏ qua lệnh
+`buckets create` ở Bước 2; bản chép trên máy thì đưa vào bucket mới bằng
+`gcloud storage rsync -r <dir> gs://<new-bucket>`, sau đó `gcloud storage ls gs://<new-bucket>/`
+phải liệt kê các prefix `<serverName>/` ngay ở gốc bucket. Trước lệnh
+`kubectl apply -f k8s/data-layer/` của Bước 6, sửa `postgres-cluster.yaml` như ở bước 2, để Cluster
+mới restore từ bucket thay vì chạy `initdb`. Sau lệnh apply đó, chạy các lệnh chờ của bước 2, bước
+3 và bước 4, rồi làm tiếp từ Bước 7; phần mở đầu của mục này không áp dụng, vì chưa có service nào
+chạy và Bước 8 sẽ khởi động chúng. Kafka ở đó bắt đầu rỗng, nên mọi message đã gửi nhưng chưa được
+consume tại thời điểm Postgres quay về đều mất, dù Kafka cũ sau đó có giao nó hay không; ngoài ra
+các gạch đầu dòng ở trên vẫn đúng. `deploy.sh` của Bước 8 khởi động cả 6 service cùng lúc, nên nếu
+inventory-service lên sau order-service vài phút, job saga reconciliation của order-service có thể
+bỏ cuộc với các order đang dở saga lúc đó trước khi inventory-service trả lời; khi đó hãy kiểm tra
+stock cần sửa tay như gạch đầu dòng cuối ở trên mô tả.
 
 ---
 
@@ -2299,8 +3270,8 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | GKE node allocatable reservation (1060 mCPU on shared-core E2) | EKS `kube-reserved` (node bootstrap defaults) | Cả 2 đều cắt 1 phần cố định của mỗi node cho thành phần hệ thống. GKE công bố 1 công thức CPU theo bậc dùng chung cho mọi loại máy (6% core đầu tiên, 1% core kế tiếp, 0,5% cho 2 core kế, 0,25% cho phần vượt quá 4 core) và ghi đè bằng mức cố định 1060 mCPU trên các máy E2 shared-core; AMI tối ưu của EKS áp dụng đúng công thức CPU theo bậc đó lúc bootstrap node, không có ngoại lệ nào cho máy shared-core. Chỉ riêng CPU là khớp — phần memory thì mỗi bên tính theo cách khác nhau. Xem phụ lục "các pod hệ thống GKE tự động thêm vào mỗi node". |
 | Spot VM | EC2 Spot Instance | Cùng cơ chế: dùng capacity dư thừa với giá rẻ hơn, có thể bị thu hồi với báo trước ngắn. |
 | Zone resource stock-out (`ZONE_RESOURCE_POOL_EXHAUSTED`) | EC2 insufficient capacity (`InsufficientInstanceCapacity`) | Zone tạm thời không còn capacity dư cho machine type được yêu cầu, nên việc tạo VM — ở đây là 1 lệnh resize node pool hoặc 1 lần autoscaler thêm node — fail với `ZONE_RESOURCE_POOL_EXHAUSTED` (hoặc `…_WITH_DETAILS`). Đây không phải lỗi quota (lỗi quota là `QUOTA_EXCEEDED`), nên cách xử lý là đợi rồi thử lại. EC2 trả về `InsufficientInstanceCapacity` trong cùng tình huống. |
-| Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Các tier lưu trữ block gắn qua mạng; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` nằm khoảng giữa `gp3` và `io1`/`io2` (không có tương đương chính xác); `pd-extreme` (không dùng ở đây) là tương đương gần nhất của `io1`/`io2` provisioned-IOPS. |
-| PD CSI driver (`pdcsi-node`) + default StorageClass (`standard-rwo`) | EBS CSI driver (EKS add-on) + default StorageClass (commonly `gp2`) | Cấp PersistentVolume từ block storage (dòng Persistent Disk đã nói về các tier đĩa). GKE cài sẵn driver; trên EKS đây là add-on cần cấu hình IAM riêng. |
+| Persistent Disk (`pd-standard`/`pd-balanced`/`pd-ssd`) | EBS (`gp2`/`gp3`/`io1`/`io2`/`st1`/`sc1`) | Các tier lưu trữ block gắn qua mạng; `pd-standard` ≈ `st1`/`sc1` (HDD), `pd-balanced` ≈ `gp3`, `pd-ssd` nằm khoảng giữa `gp3` và `io1`/`io2` (không có tương đương chính xác); `pd-extreme` (không dùng ở đây) là tương đương gần nhất của `io1`/`io2` provisioned-IOPS. Đĩa của 1 PV có policy `Retain` tồn tại lâu hơn PV và phải tự xoá bằng `gcloud compute disks delete`, giống 1 EBS volume với `aws ec2 delete-volume`. |
+| PD CSI driver (`pdcsi-node`) + built-in StorageClasses (`standard-rwo` default, `standard`) | EBS CSI driver (EKS add-on) + StorageClasses (legacy in-tree `gp2`, not default on new clusters since EKS 1.30; a `gp3` class — the EBS CSI add-on's optional default, or one you create) | Cấp PersistentVolume từ block storage (dòng Persistent Disk đã nói về các tier đĩa). `standard-rwo` (`pd-balanced`) dùng CSI trực tiếp và bind theo `WaitForFirstConsumer`; `standard` (`pd-standard`) tương ứng với class `gp2` cũ của EKS xét theo provisioner, không phải loại đĩa: cả 2 vẫn mang tên provisioner in-tree (`kubernetes.io/gce-pd`, `kubernetes.io/aws-ebs`), được CSI migration chuyển sang CSI driver. Khác với `gp2` (bind theo `WaitForFirstConsumer`), `standard` bind ngay (`Immediate`). Volume của Kafka và lần tập dượt restore dùng `standard`; mọi class có sẵn đều reclaim `Delete`. GKE cài sẵn driver; trên EKS đây là add-on cần cấu hình IAM riêng. |
 | Workload Identity Federation | IAM Roles for Service Accounts (IRSA) / EKS Pod Identity | Cả 2 đều cho phép 1 pod nhận danh tính IAM của cloud mà không cần static key. IRSA nối qua 1 OIDC provider đăng ký với cluster; EKS Pod Identity (mới hơn) đơn giản hoá cùng ý tưởng đó. Workload pool (`<project>.svc.id.goog`, dùng trong member `serviceAccount:<pool>[ns/ksa]`) là điểm neo tin cậy, giống IAM OIDC provider của IRSA; Pod Identity không có khái niệm tương ứng. GCP tự tạo pool, 1 lần cho mỗi project. |
 | Workload Identity Federation **for external identities** (GitHub Actions OIDC, Step 9) | IAM OIDC identity provider + `AssumeRoleWithWebIdentity` | Cùng cơ chế nền tảng với dòng phía trên, nhưng bên gọi là 1 lần chạy GitHub Actions xác thực qua token OIDC của chính nó, không phải 1 pod Kubernetes — không có thành phần nào theo pod/node, chỉ cần 1 workload identity pool + provider + 1 IAM binding. IAM OIDC identity provider của AWS đóng vai trò điểm neo tin cậy giống pool ở đây. |
 | Security Token Service (`sts.googleapis.com`) + IAM Service Account Credentials API (`iamcredentials.googleapis.com`) | AWS STS (`sts:AssumeRoleWithWebIdentity`) | Các API thực sự thực hiện việc đổi token OIDC lấy access token đứng sau cả 2 dòng Workload Identity Federation ở trên — chỉ cần bật 1 lần cho mỗi project (xem Yêu cầu môi trường). |
@@ -2313,7 +3284,7 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | KSA annotation `iam.gke.io/gcp-service-account` | KSA annotation `eks.amazonaws.com/role-arn` | Cùng cơ chế gắn kết, khác tên annotation. |
 | Google Secret Manager | AWS Secrets Manager | Kho lưu secret được quản lý, quyền truy cập qua IAM, có versioning. |
 | Secrets Store CSI Driver + **GCP provider** | Secrets Store CSI Driver + **AWS provider** | Cùng 1 driver Kubernetes SIGs gốc (`secrets-store-csi-driver`); chỉ khác plugin theo từng cloud. |
-| Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — ở đây là nơi Barman Cloud Plugin của CNPG lưu WAL/backup của Postgres (plugin này cũng hỗ trợ S3 trực tiếp). |
+| Google Cloud Storage (GCS) bucket | S3 bucket | Object storage — ở đây là nơi Barman Cloud Plugin của CNPG lưu WAL/backup của Postgres (plugin này cũng hỗ trợ S3 trực tiếp). Việc restore từ đó (`bootstrap.recovery` của CNPG, xem "Khôi phục Postgres từ backup") giống 1 lần restore point-in-time của RDS: cả 2 luôn dựng 1 instance mới từ backup chứ không ghi đè lên instance đang có. Việc chép 1 bucket sang bucket khác hoặc ra 1 thư mục local, hay chép ngược lại (`gcloud storage rsync -r`), tương ứng với `aws s3 sync`, lệnh này mặc định đã đệ quy; `gcloud storage ls` và `gcloud storage rm --recursive` tương ứng với `aws s3 ls` và `aws s3 rm --recursive`. |
 | Artifact Registry | Elastic Container Registry (ECR) | Registry lưu image container — chứa 6 image service mà CI pipeline ở Bước 9 build và push. |
 | Artifact Registry immutable tags (`--immutable-tags`) | ECR tag immutability (`imageTagMutability: IMMUTABLE`) | Cả 2 đều từ chối lần push làm 1 tag đã có trỏ sang image khác. Artifact Registry chặt hơn: khi bật, không xóa hay gỡ tag được khỏi 1 image còn tag (dù làm tay hay qua cleanup policy), còn ECR vẫn cho xóa image và cho lifecycle policy dọn chúng. |
 | Access scopes (node pool / VM: `cloud-platform`, `devstorage.read_only`) | — (no direct equivalent) | Các OAuth scope kiểu cũ, gắn theo từng VM, giới hạn những gì service account gắn với VM được làm, chồng lên trên các IAM role của nó; pull từ Artifact Registry cần `devstorage.read_only` hoặc `cloud-platform` (scope sau giao toàn quyền quyết định cho IAM). Giới hạn gần nhất bên AWS là 1 IAM permissions boundary, đặt trên role chứ không theo từng instance. |
@@ -2321,7 +3292,14 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | Nơi lưu metric và log được quản lý mà `gke-metrics-agent`, `fluentbit-gke` và `event-exporter-gke` ghi vào. Trên EKS, việc đẩy metric node/pod và log container sang CloudWatch phải bật thêm (Container Insights / add-on CloudWatch Observability). |
 | GCP project | AWS account | Ranh giới cô lập tài nguyên, IAM và bật API; phần billing được gom về 1 billing account riêng (dòng kế tiếp). |
 | Billing account | AWS Organizations management (payer) account | Phương tiện thanh toán mà các project gắn vào, tách rời khỏi bản thân project: credit, quota và các ưu đãi miễn phí được tính theo billing account chứ không theo project — ưu đãi miễn phí của GKE là 1 khoản credit hàng tháng cho mỗi billing account, chỉ bù được phí cluster zonal/Autopilot (xem dòng Zonal cluster). Bên AWS không có sự tách bạch tương ứng dưới cấp account; thay vào đó consolidated billing gom nhiều account về 1 payer account. |
+| Free Trial ($300 credit for 90 days) | AWS Free plan (accounts created since 2025-07-15; legacy 12-month Free Tier for older ones) | Cả 2 đều là gói dùng thử dựa trên credit, có hạn kết thúc cứng. Gói của GCP kết thúc sau 90 ngày hoặc khi tiêu hết $300 (~7.875.000₫); khi đó tài nguyên bị dừng và, nếu không nâng cấp trong 30 ngày, bị xoá vĩnh viễn (xem Yêu cầu môi trường). Free plan của AWS cho $100–200 (~2.625.000–5.250.000₫) credit trong tối đa 6 tháng; khi hết, account bị đóng và AWS giữ dữ liệu 90 ngày: nâng cấp lên gói trả phí trong 90 ngày đó thì lấy lại quyền truy cập, nếu không account cùng tài nguyên bị xoá vĩnh viễn. |
+| Cloud Billing budget (`gcloud billing budgets create`) | AWS Budgets | Ngưỡng chi tiêu gửi cảnh báo (mặc định qua email); budget của tài liệu này không bao giờ dừng chi tiêu (xem "Cảnh báo ngân sách" trong Yêu cầu môi trường). Spend-cap budget của GCP tạm dừng việc dùng mới của 1 vài dịch vụ tính theo request (như Cloud Run và Gemini API) nhưng không bao giờ dừng VM hay disk đang chạy, nên không dừng được 1 cluster; AWS Budgets tự chạy được Budget Actions (vd áp 1 IAM policy, dừng EC2 instance). Ngoài ra, GCP cần 1 programmatic budget notification (gửi tới 1 topic Pub/Sub) cộng code của chính bạn. |
+| Billing account IAM roles (`roles/billing.admin`, `roles/billing.costsManager`) | IAM policies with AWS Budgets actions (`budgets:ModifyBudget`, `budgets:ViewBudget`) | Cần để tạo budget (xem "Cảnh báo ngân sách"). GCP cấp các role này trên billing account, 1 resource tách khỏi project (xem dòng Billing account). AWS không có resource billing riêng: đó là các quyền IAM bình thường trong account sở hữu budget; 1 budget ở management (payer) account có thể theo dõi chi phí của cả organization. |
+| Pub/Sub | Amazon SNS (fan-out) / Amazon SQS (queue) | Tài liệu này không dùng; đây là kênh mà programmatic budget notification được gửi tới. 1 budget của AWS cũng có thể gửi thông báo tới 1 topic SNS. |
+| Cloud Billing Reports (Console → Billing → Reports) | AWS Cost Explorer | Biểu đồ chi tiêu tương tác theo project/account, dịch vụ và SKU, có hiện riêng các khoản credit; là nơi tài liệu này kiểm tra khoản bù phí của GKE thuộc loại credit nào (xem "Cảnh báo ngân sách"). |
+| Billing credit types (`PROMOTION`, `FREE_TIER`, `SUSTAINED_USAGE_DISCOUNT`) | AWS Budgets "Charge type" filter (Credit, Refund, …) | Quyết định budget trừ những credit nào khỏi chi tiêu. GCP chọn được từng loại credit, nhờ vậy budget của tài liệu này trừ credit free tier mà không trừ credit `PROMOTION` của Free Trial; budget của AWS tính hoặc bỏ credit như 1 charge type Credit duy nhất. Sustained use discount không có tương đương bên AWS: Savings Plans và Reserved Instances đều cần cam kết trước. |
 | Organization policy (`iam.automaticIamGrantsForDefaultServiceAccounts`) | AWS Organizations policies (SCPs, declarative policies) | Các ràng buộc đặt ở cấp organization, folder hoặc project, giới hạn cấu hình mà các project bên dưới được phép dùng. Constraint này ngăn GCP tự động cấp role Editor cho các service account mặc định, và được enforce mặc định với các organization tạo từ ngày 3/5/2024 trở đi (xem dòng Compute Engine default service account); Google hiện khuyến nghị constraint chặt hơn `iam.managed.preventPrivilegedBasicRolesForDefaultServiceAccounts`, chặn cả việc cấp Editor hoặc Owner cho chúng về sau. 1 project không thuộc organization nào — như project của tài liệu này — thì không có organization policy, nên service account compute mặc định của nó vẫn giữ role Editor được cấp tự động. Bên AWS, SCP giới hạn quyền mà các account được dùng, còn declarative policy enforce cấu hình dịch vụ; cả 2 đều không có constraint tương đương, vì AWS không tạo role mặc định nào để cấp. |
+| Google Cloud console (Console → Billing) | AWS Management Console (Billing and Cost Management console) | Giao diện web. Tài liệu này chỉ dùng nó cho những gì `gcloud` không hiển thị: số credit và số ngày còn lại của Free Trial (Billing → Overview) và lần kiểm tra loại credit 1 lần duy nhất trong Billing Reports (xem dòng Cloud Billing Reports). Các trang Billing của nó hiển thị từng billing account một, lọc được theo project; console Billing and Cost Management của AWS hiển thị chi phí của account đang đăng nhập, hoặc, từ management account của 1 organization, chi phí của mọi member account. |
 | `gcloud` CLI | `aws` CLI + `eksctl` | GCP gộp thao tác cluster vào `gcloud container clusters`; các thao tác riêng cho EKS bên AWS thường cần thêm `eksctl` (hoặc Terraform) cùng với CLI `aws` gốc. Được cài dưới dạng Google Cloud CLI, 1 trong các công cụ Google gộp dưới tên Google Cloud SDK (cùng với các thư viện client) — vì thế mới có thư mục cài đặt `Cloud SDK` và các biến môi trường `CLOUDSDK_*` như `CLOUDSDK_PYTHON` (xem Yêu cầu môi trường); `gke-gcloud-auth-plugin` là 1 trong các component tùy chọn của nó. Nó tự mang theo Python trên Windows và Linux x86_64; trên macOS, installer sẽ cài 1 bản nếu cần. Bên AWS, 1 "SDK" là 1 thư viện client theo từng ngôn ngữ; CLI `aws` được cài riêng. |
 | `gcloud services enable` (API enablement) | — (no per-service enablement) | GCP yêu cầu bật API của từng dịch vụ cho mỗi project; các dịch vụ AWS nhìn chung dùng được mà không cần bước bật riêng (vài tính năng, như Region opt-in, vẫn cần opt-in). |
 | `gke-gcloud-auth-plugin` | `aws eks get-token` (via the `aws` CLI) | Plugin exec-credential của kubectl, đổi credential cloud thành token xác thực với cluster. `gcloud container clusters get-credentials` tương ứng với `aws eks update-kubeconfig`. |
@@ -2343,8 +3321,13 @@ là đặc thù của giới hạn Free Trial đó, không phải khác biệt c
 
 - Tự động hoá quy trình "Tạm dừng và bật lại cluster giữa các buổi làm việc" (1 workflow CD/teardown
   hoặc 1 job chạy theo lịch).
-- Điều chỉnh lịch backup hằng đêm cho hợp với việc tạm dừng: trong lúc cluster tạm dừng không có
-  backup theo lịch nào chạy, còn backup bù lúc bật lại thì fail, vì Postgres vẫn đang hibernate.
+- Tự động kiểm tra backup: "Tập dượt restore" là 1 bước kiểm tra làm tay, thỉnh thoảng mới làm,
+  không phải 1 job chạy theo lịch tự restore và so sánh.
+- Khôi phục Postgres trực tiếp từ đĩa có policy `Retain` mà 1 `Cluster` đã xoá để lại: CNPG dùng
+  lại 1 PVC còn sót nếu nó vẫn mang đủ label và annotation của CNPG, nhưng việc tự dựng lại 1 PVC
+  như vậy quanh 1 đĩa `Released` không được hướng dẫn ở đây. Hãy khôi phục từ bucket.
+- Backup dữ liệu của Kafka — nó chỉ chứa các message saga đang chuyển giữa các service (xem phần
+  Yêu cầu môi trường để biết mất chúng thì phải sửa tay những gì).
 - Chính sách dọn dẹp Artifact Registry — tag content-hash không bao giờ trùng hay bị ghi đè, nên
   registry chỉ có tăng lên; không có gì ở đây xoá 1 image cũ khi không còn release nào đang deploy
   tham chiếu tới nó nữa. Khi đã bật immutable tags (Bước 9), cleanup policy cũng không xóa được

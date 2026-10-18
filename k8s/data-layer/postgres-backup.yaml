@@ -8,7 +8,9 @@ spec:
   configuration:
     destinationPath: "gs://cafe-microservices-cafe-pg-backups/"
     googleCredentials: {gkeEnvironment: true}   # Workload Identity via the Cluster's serviceAccountTemplate (see postgres-cluster.yaml) — no separate credentials Secret needed
-  retentionPolicy: "10d"   # the plugin architecture's field+location (Cluster.spec.backup.retentionPolicy is deprecated); cleanup runs automatically after each backup via barman-cloud-backup-delete, no separate cron needed
+  retentionPolicy: "10d"   # the plugin architecture's field+location (Cluster.spec.backup.retentionPolicy is deprecated); the plugin's sidecar enforces it every instanceSidecarConfiguration.retentionPolicyIntervalSeconds while the primary runs, and never deletes the newest completed backup
+  instanceSidecarConfiguration:
+    retentionPolicyIntervalSeconds: 1800   # the CRD's documented default, set explicitly: the API server applies it only when this block exists, and without the block the sidecar checks every 5 minutes
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: ScheduledBackup
