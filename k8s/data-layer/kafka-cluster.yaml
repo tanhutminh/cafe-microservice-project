@@ -20,8 +20,9 @@ spec:
       memory: 1536Mi
   roles: [controller, broker]
   # GKE's built-in `standard` StorageClass (Delete reclaim) is fine here, unlike Postgres's
-  # dedicated Retain class (see postgres-storageclass.yaml) - Kafka only carries replayable
-  # saga messages, not source-of-truth data, so losing the disk isn't a data-loss event.
+  # dedicated Retain class (see postgres-storageclass.yaml) - Kafka only carries saga messages
+  # in transit, not source-of-truth data. What losing its disk leaves to correct by hand is
+  # described in docs/gke-cicd-runbook.md (Prerequisites).
   # deleteClaim below is a separate, orthogonal control (Strimzi-level: delete the PVC on
   # scale-down) from the StorageClass's own reclaim policy (K8s-level: what happens to the
   # PV once a PVC IS deleted) - false here just avoids losing the PVC on a routine scale-down.
