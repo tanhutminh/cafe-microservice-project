@@ -141,9 +141,10 @@ local lint), though the GitHub CLI (`gh`) is a convenient way to trigger the fir
 
 A Cloud Billing budget emails the billing account's administrators and users when spend crosses
 a threshold. It only alerts — it never caps or stops spending — but its low thresholds are the
-cheap guard against a cluster left running between sessions. Creating one needs the Billing Account
-Administrator or Billing Account Costs Manager role. Its APIs are called through the project
-`gcloud config` points at, so they are enabled there. Run both blocks in the same shell:
+cheap guard against a cluster left running between sessions. Creating, updating or deleting one
+needs the Billing Account Administrator or Billing Account Costs Manager role. Its APIs are called
+through the project `gcloud config` points at, so they are enabled there. Run this section's blocks
+in the same shell, the last one (the update block) only for a budget that already exists:
 
 ```bash
 gcloud services enable cloudbilling.googleapis.com billingbudgets.googleapis.com
@@ -155,11 +156,13 @@ gcloud billing accounts describe "$billing_account" --format='value(currencyCode
 The last command prints the account's currency; `--budget-amount` must use it. With the default
 credit treatment a budget counts spend *after* credits, which on a Free Trial stays near 0 until
 the credit runs out, so the budget would never fire. Instead the budget subtracts only the credit
-types listed in `--filter-credit-types`: free-tier credits, which should include GKE's
-control-plane credit (checked once at the end of this section), and sustained use discounts (E2 and
-Spot nodes get none, so this changes nothing here; it is listed so the budget still measures only
-the trial credit if another machine type is used). `PROMOTION` credits, the Free Trial's $300
-(~7,875,000₫), stay counted as spend, so the budget measures how fast the trial credit is used.
+types listed in `--filter-credit-types`: `FREE_TIER` (services' free usage tiers);
+`SUSTAINED_USAGE_DISCOUNT` (E2 and Spot nodes get none, so this changes nothing here; it is listed
+so the budget still measures only the trial credit if another machine type is used); and
+`DISCOUNT`, which Google documents as contractual spending-based discounts but which also carries
+GKE's free tier, the offset for the zonal cluster's control-plane fee (see the one-time check below
+the create block). `PROMOTION` credits, the Free Trial's $300 (~7,875,000₫), stay counted as
+spend, so the budget measures how fast the trial credit is used.
 
 Spend is counted from the 1st of each month (Pacific Time) and shows up in billing hours to about a
 day after the usage, so each alert means "this month's spend so far has crossed this amount". The
@@ -184,22 +187,56 @@ budgets="$(gcloud billing budgets list --billing-account="${billing_account:?run
     --budget-amount=100USD --calendar-period=month \
     --filter-projects=projects/cafe-microservices \
     --credit-types-treatment=include-specified-credits \
-    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT \
+    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,DISCOUNT \
     --threshold-rule=percent=0.1 --threshold-rule=percent=0.2 --threshold-rule=percent=0.4 \
     --threshold-rule=percent=0.5 --threshold-rule=percent=0.9 --threshold-rule=percent=1.0 \
     --threshold-rule=percent=1.0,basis=forecasted-spend
 ```
 
-If the account's currency isn't USD, replace `100USD` with the equivalent amount in that currency.
-If the block stops because a budget with this name already exists, keep that one — a second would
-send every alert twice — and change it with `gcloud billing budgets update` instead. Check once, in
-Console → Billing → Reports (filtered to this project, credits shown), that the Kubernetes Engine
-credit is listed as a free-tier credit. If it shows under another credit type, add that type to the
-budget; otherwise the budget counts the cluster's ~$73 (~1,900,000₫) monthly control-plane fee as
-spend. The new list replaces the budget's whole list, so it repeats the two types above, and
-`<name>` is the `billingAccounts/…/budgets/…` name that
-`gcloud billing budgets list --billing-account="$billing_account" --format='value(name)'` prints:
-`gcloud billing budgets update <name> --credit-types-treatment=include-specified-credits --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,<type>`.
+If the account's currency isn't USD, replace `100USD` with the equivalent whole amount in that
+currency (gcloud misreads decimals: `92.5EUR` becomes 92.000000005 EUR). If the block stops because
+a budget with this name already exists, keep that one — a second would send every alert twice —
+and bring it in line with the update block below; if it prints more than one name, first delete
+all but one with `gcloud billing budgets delete` and rerun the block.
+
+Check once, a day or more after Step 1 has created the cluster, in Console → Billing → Cost
+breakdown, that the control-plane fee is offset: filter to this project and the Kubernetes Engine
+service, and set Time range to Charge period, covering days the cluster existed (the default,
+Billing period, only lists months already invoiced). The budget already subtracts the credit types
+on three of the report's lines: "Free tier usage" (`FREE_TIER`), "Sustained use discounts"
+(`SUSTAINED_USAGE_DISCOUNT`) and "Spending-based discounts" (`DISCOUNT`). Any part offset by
+"Promotional credits" (`PROMOTION`) is a fee that GKE's free tier didn't waive, such as a second or
+regional cluster's; the trial credit pays it and the budget correctly counts it, so don't add
+`PROMOTION`. If the offset shows under another line, add that line's credit type to
+`--filter-credit-types` in the create and update blocks and run the update block (after rerunning
+this section's first two blocks; the create block then stops and prints the budget's name). An
+offset the budget doesn't subtract — including one under "Others", a line with no credit type —
+makes it count the cluster's ~$73 (~1,900,000₫) monthly control-plane fee as spend, so its low
+thresholds fire even while the cluster is paused.
+
+For an existing budget, this block sets every value the create block sets except the display name:
+the amount, period, credit treatment, project and credit-type lists and threshold rules, the lists
+and rules replaced rather than merged. Everything else stays as it is, including the display name,
+notification settings and any filter the create block doesn't set, such as services or labels;
+the describe at the end prints the result. Replace `100USD` as above, but keep the currency code:
+the API rejects a code that differs from the budget's currency, while a bare number is accepted
+and read in that currency unchecked. Update's `--help` describes `percent` as an integer from 0 to
+100, but it sets the same field as create's `--threshold-rule`, so it takes the same fractions
+(0.1 is 10%):
+
+```bash
+[[ ${budgets:?no existing budget found by the block above: run it in this shell first, and use this block only if it stopped} != *$'\n'* ]] || { echo "more than one budget named cafe-microservices monthly: $budgets (see the notes after the create block)" >&2; false; } &&
+  gcloud billing budgets update "$budgets" \
+    --budget-amount=100USD --calendar-period=month \
+    --filter-projects=projects/cafe-microservices \
+    --credit-types-treatment=include-specified-credits \
+    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,DISCOUNT \
+    --clear-threshold-rules \
+    --add-threshold-rule=percent=0.1 --add-threshold-rule=percent=0.2 --add-threshold-rule=percent=0.4 \
+    --add-threshold-rule=percent=0.5 --add-threshold-rule=percent=0.9 --add-threshold-rule=percent=1.0 \
+    --add-threshold-rule=percent=1.0,basis=forecasted-spend &&
+  gcloud billing budgets describe "$budgets"
+```
 
 ---
 
@@ -253,6 +290,9 @@ gcloud container node-pools delete default-pool --cluster=cafe-cluster --zone=us
 `pd-standard` over `pd-balanced`/SSD for `stateless-pool`: cheaper, and on a Free Trial project
 SSD-family regional quota is easy to exhaust with no way to request an increase — `pd-standard`
 draws from a much larger, separate quota bucket.
+
+A day or more after this step, do the one-time check that the control-plane fee is offset (see
+"Budget alert" under Prerequisites).
 
 ---
 
@@ -1053,7 +1093,7 @@ Step 8 to deploy it (`scripts/deploy.sh`).
 Nothing here needs to run around the clock, so between work sessions both node pools can go down to
 0 nodes. What still bills then: the Postgres and Kafka PVCs' persistent disks, the GCS backup
 bucket, Artifact Registry storage and the Secret Manager secret versions. The zonal cluster's
-control-plane fee stays offset by the free-tier credit (see the Zonal cluster row in the GCP ↔ AWS
+control-plane fee stays offset by GKE's free tier (see the Zonal cluster row in the GCP ↔ AWS
 appendix).
 
 `stateless-pool`'s autoscaler can't get there by itself: GKE's system pods and the Step 3 operators
@@ -1621,13 +1661,13 @@ the Notes column for where the mapping breaks down.
 | GCP project | AWS account | The resource-isolation, IAM and API-enablement boundary; billing rolls up to a separate billing account (next row). |
 | Billing account | AWS Organizations management (payer) account | The payment instrument projects attach to, separate from the projects themselves: credits, quota and free-tier allowances are counted per billing account, not per project — GKE's free tier is a monthly credit per billing account that only offsets zonal/Autopilot cluster fees (see the Zonal cluster row). AWS has no equivalent split below the account; consolidated billing instead rolls several accounts up under one payer account. |
 | Free Trial ($300 credit for 90 days) | AWS Free plan (accounts created since 2025-07-15; legacy 12-month Free Tier for older ones) | Both are credit-based trials with a hard end. GCP's ends at 90 days or when the $300 (~7,875,000₫) is spent; resources are then stopped and, without an upgrade within 30 days, permanently deleted (see Prerequisites). AWS's Free plan gives $100–200 (~2,625,000–5,250,000₫) of credits for up to 6 months; when it ends, the account is closed and AWS keeps its content for 90 days: upgrading to a paid plan within them restores access, otherwise the account and its resources are permanently deleted. |
-| Cloud Billing budget (`gcloud billing budgets create`) | AWS Budgets | Spend thresholds that send alerts (email by default); this guide's budget never stops spending (see "Budget alert" under Prerequisites). GCP's spend-cap budgets pause new usage of a few request-based services (such as Cloud Run and the Gemini API) but never running VMs or disks, so they can't stop a cluster; AWS Budgets can run Budget Actions automatically (e.g. apply an IAM policy, stop EC2 instances). Otherwise GCP needs a programmatic budget notification (to a Pub/Sub topic) plus your own code. |
-| Billing account IAM roles (`roles/billing.admin`, `roles/billing.costsManager`) | IAM policies with AWS Budgets actions (`budgets:ModifyBudget`, `budgets:ViewBudget`) | Needed to create a budget (see "Budget alert"). GCP grants these on the billing account, a resource separate from the project (see the Billing account row). AWS has no separate billing resource: they are ordinary IAM permissions in the account that owns the budget; a budget in the management (payer) account can track the whole organization's costs. |
+| Cloud Billing budget (`gcloud billing budgets create` / `update`) | AWS Budgets | Spend thresholds that send alerts (email by default); this guide's budget never stops spending (see "Budget alert" under Prerequisites). GCP's spend-cap budgets pause new usage of a few request-based services (such as Cloud Run and the Gemini API) but never running VMs or disks, so they can't stop a cluster; AWS Budgets can run Budget Actions automatically (e.g. apply an IAM policy, stop EC2 instances). Otherwise GCP needs a programmatic budget notification (to a Pub/Sub topic) plus your own code. |
+| Billing account IAM roles (`roles/billing.admin`, `roles/billing.costsManager`) | IAM policies with AWS Budgets actions (`budgets:ModifyBudget`, `budgets:ViewBudget`) | Needed to create, update or delete a budget (see "Budget alert"). GCP grants these on the billing account, a resource separate from the project (see the Billing account row). AWS has no separate billing resource: they are ordinary IAM permissions in the account that owns the budget; a budget in the management (payer) account can track the whole organization's costs. |
 | Pub/Sub | Amazon SNS (fan-out) / Amazon SQS (queue) | Not used by this guide; it is the channel programmatic budget notifications arrive on. An AWS budget can likewise notify an SNS topic. |
-| Cloud Billing Reports (Console → Billing → Reports) | AWS Cost Explorer | Interactive spend breakdowns by project/account, service and SKU, with credits shown separately; where this guide checks which credit type GKE's fee offset falls under (see "Budget alert"). |
-| Billing credit types (`PROMOTION`, `FREE_TIER`, `SUSTAINED_USAGE_DISCOUNT`) | AWS Budgets "Charge type" filter (Credit, Refund, …) | Decide which credits a budget subtracts. GCP picks individual credit types, which is how this guide's budget subtracts the free-tier credit but not the trial's `PROMOTION` credit; an AWS budget includes or excludes credits as one Credit charge type. Sustained use discounts have no AWS counterpart: Savings Plans and Reserved Instances need a commitment. |
+| Cost breakdown report (Console → Billing → Cost breakdown) | AWS Bills page (Billing and Cost Management → Bills) | A built-in billing report that runs from usage cost through each savings line ("Free tier usage", "Promotional credits", "Spending-based discounts", …) to the total, filterable by project, service and time range (charge period or billing period); its links open Reports, GCP's interactive spend breakdowns (AWS Cost Explorer), with the same filters. This guide uses it only for the one-time check that GKE's control-plane fee is offset (see "Budget alert"). The AWS Bills page's Savings tab likewise lists a billing period's credits, Savings Plans and other discounts by type, each with details by service. |
+| Billing credit types (`PROMOTION`, `FREE_TIER`, `SUSTAINED_USAGE_DISCOUNT`, `DISCOUNT`) | AWS Budgets "Charge type" filter (Credit, Refund, …) | Decide which credits a budget subtracts. GCP picks individual credit types, which is how this guide's budget subtracts services' free usage tiers (`FREE_TIER`), sustained use discounts (`SUSTAINED_USAGE_DISCOUNT`) and GKE's free tier (credited as `DISCOUNT`) but not the trial's `PROMOTION` credit; an AWS budget includes or excludes credits as one Credit charge type, and discounts through its cost metric (net unblended and net amortized costs are after discounts). Sustained use discounts have no AWS counterpart: Savings Plans and Reserved Instances need a commitment. |
 | Organization policy (`iam.automaticIamGrantsForDefaultServiceAccounts`) | AWS Organizations policies (SCPs, declarative policies) | Constraints set on an organization, folder or project that restrict what configuration the projects below it may use. This one stops GCP from automatically granting the default service accounts the Editor role, and is enforced by default for organizations created on or after May 3, 2024 (see the Compute Engine default service account row); Google now recommends the stricter `iam.managed.preventPrivilegedBasicRolesForDefaultServiceAccounts`, which also blocks granting them Editor or Owner later. A project with no organization — like this guide's — has no organization policies, so its default compute service account keeps the automatic Editor grant. On AWS, SCPs cap the permissions accounts may use and declarative policies enforce service configuration; neither has an equivalent of this constraint, since AWS creates no default role to grant. |
-| Google Cloud console (Console → Billing) | AWS Management Console (Billing and Cost Management console) | The web UI. This guide uses it only for what `gcloud` doesn't show: the Free Trial's remaining credit and days (Billing → Overview) and the one-time credit-type check in Billing Reports (see the Cloud Billing Reports row). Its Billing pages show one billing account at a time, filterable by project; AWS's Billing and Cost Management console shows the signed-in account's costs, or, from an organization's management account, all its member accounts' costs. |
+| Google Cloud console (Console → Billing) | AWS Management Console (Billing and Cost Management console) | The web UI. This guide uses it only for what `gcloud` doesn't show: the Free Trial's remaining credit and days (Billing → Overview) and the one-time check in the Cost breakdown report (see the Cost breakdown report row). Its Billing pages show one billing account at a time, filterable by project; AWS's Billing and Cost Management console shows the signed-in account's costs, or, from an organization's management account, all its member accounts' costs. |
 | `gcloud` CLI | `aws` CLI + `eksctl` | GCP bundles cluster operations into `gcloud container clusters`; EKS-specific operations on AWS typically need `eksctl` (or Terraform) alongside the base `aws` CLI. Installed as the Google Cloud CLI, one of the tools Google groups under the name Google Cloud SDK (with the client libraries) — hence the `Cloud SDK` install directory and the `CLOUDSDK_*` environment variables such as `CLOUDSDK_PYTHON` (see Prerequisites); `gke-gcloud-auth-plugin` is one of its optional components. It bundles its own Python on Windows and x86_64 Linux; on macOS its installer installs one if needed. On AWS, an "SDK" is a per-language client library; the `aws` CLI is a separate install. |
 | `gcloud services enable` (API enablement) | — (no per-service enablement) | GCP requires enabling each service's API per project; AWS services are generally usable without a separate enablement step (some features, such as opt-in Regions, still need opting in). |
 | `gke-gcloud-auth-plugin` | `aws eks get-token` (via the `aws` CLI) | kubectl exec-credential plugin that turns cloud credentials into cluster auth tokens. `gcloud container clusters get-credentials` corresponds to `aws eks update-kubeconfig`. |
@@ -1811,9 +1851,10 @@ tùy chọn), dù GitHub CLI (`gh`) là cách tiện lợi để chạy lần đ
 
 Một budget của Cloud Billing gửi email cho các admin và user của billing account khi chi tiêu vượt
 1 ngưỡng. Nó chỉ cảnh báo — không bao giờ chặn hay dừng việc chi tiêu — nhưng các ngưỡng thấp của
-nó là cách rẻ để không quên 1 cluster vẫn chạy giữa các buổi làm việc. Tạo budget cần role Billing
-Account Administrator hoặc Billing Account Costs Manager. Các API của nó được gọi qua project mà
-`gcloud config` đang trỏ tới, nên bật ở chính project đó. Chạy cả 2 block trong cùng 1 shell:
+nó là cách rẻ để không quên 1 cluster vẫn chạy giữa các buổi làm việc. Tạo, sửa hoặc xoá budget cần
+role Billing Account Administrator hoặc Billing Account Costs Manager. Các API của nó được gọi qua
+project mà `gcloud config` đang trỏ tới, nên bật ở chính project đó. Chạy các block của mục này
+trong cùng 1 shell, riêng block cuối (block sửa budget) chỉ dùng cho budget đã có sẵn:
 
 ```bash
 gcloud services enable cloudbilling.googleapis.com billingbudgets.googleapis.com
@@ -1825,11 +1866,13 @@ gcloud billing accounts describe "$billing_account" --format='value(currencyCode
 Lệnh cuối in ra đơn vị tiền của account; `--budget-amount` phải dùng đúng đơn vị đó. Với cách tính
 credit mặc định, budget đếm chi tiêu *sau* khi trừ credit, mà trên Free Trial con số này gần như
 bằng 0 cho tới khi hết credit, nên budget sẽ không bao giờ báo. Thay vào đó, budget chỉ trừ các
-loại credit liệt kê trong `--filter-credit-types`: credit free tier (nhiều khả năng gồm cả credit
-bù phí control plane của GKE; kiểm tra 1 lần ở cuối mục này) và giảm giá sustained use (node E2 và
-Spot không được giảm giá này, nên ở đây nó không thay đổi gì; nó được liệt kê để budget vẫn chỉ đo
-credit Free Trial nếu dùng loại máy khác). Credit `PROMOTION`, tức $300 (~7.875.000₫) của Free
-Trial, không bị trừ mà vẫn tính là chi tiêu, nhờ vậy budget đo được tốc độ tiêu credit Free Trial.
+loại credit liệt kê trong `--filter-credit-types`: `FREE_TIER` (free tier của các dịch vụ);
+`SUSTAINED_USAGE_DISCOUNT` (node E2 và Spot không được giảm giá này, nên ở đây nó không thay đổi
+gì; nó được liệt kê để budget vẫn chỉ đo credit Free Trial nếu dùng loại máy khác); và
+`DISCOUNT` — Google mô tả là giảm giá theo hợp đồng chi tiêu, nhưng ưu đãi miễn phí của GKE (khoản
+bù phí control plane của cluster zonal) cũng nằm ở loại này (xem lần kiểm tra 1 lần ở dưới block
+tạo budget). Credit `PROMOTION`, tức $300 (~7.875.000₫) của Free Trial, không bị trừ mà vẫn tính là
+chi tiêu, nhờ vậy budget đo được tốc độ tiêu credit Free Trial.
 
 Chi tiêu được tính lại từ ngày 1 mỗi tháng (giờ Thái Bình Dương) và chỉ hiện trong billing sau vài
 giờ tới khoảng 1 ngày, nên mỗi cảnh báo nghĩa là "chi tiêu từ đầu tháng tới giờ đã vượt mức này".
@@ -1854,22 +1897,55 @@ budgets="$(gcloud billing budgets list --billing-account="${billing_account:?run
     --budget-amount=100USD --calendar-period=month \
     --filter-projects=projects/cafe-microservices \
     --credit-types-treatment=include-specified-credits \
-    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT \
+    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,DISCOUNT \
     --threshold-rule=percent=0.1 --threshold-rule=percent=0.2 --threshold-rule=percent=0.4 \
     --threshold-rule=percent=0.5 --threshold-rule=percent=0.9 --threshold-rule=percent=1.0 \
     --threshold-rule=percent=1.0,basis=forecasted-spend
 ```
 
-Nếu đơn vị tiền của account không phải USD, thay `100USD` bằng số tiền tương đương theo đơn vị đó.
-Nếu block dừng vì đã có 1 budget cùng tên, giữ budget đó — budget thứ 2 sẽ gửi mọi cảnh báo 2 lần —
-và sửa nó bằng `gcloud billing budgets update`. Kiểm tra 1 lần trong Console → Billing → Reports
-(lọc theo project này, có hiện credit) rằng credit của Kubernetes Engine được xếp vào loại credit
-miễn phí (free tier). Nếu nó nằm ở loại credit khác, thêm loại đó vào budget; nếu không, budget sẽ
-tính khoảng $73 (~1.900.000₫) phí control plane mỗi tháng của cluster là chi tiêu. Danh sách mới
-thay thế toàn bộ danh sách cũ của budget, nên phải liệt kê lại cả 2 loại ở trên, và `<name>` là tên
-`billingAccounts/…/budgets/…` mà
-`gcloud billing budgets list --billing-account="$billing_account" --format='value(name)'` in ra:
-`gcloud billing budgets update <name> --credit-types-treatment=include-specified-credits --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,<type>`.
+Nếu đơn vị tiền của account không phải USD, thay `100USD` bằng số tiền nguyên tương đương theo đơn
+vị đó (gcloud đọc sai phần thập phân: `92.5EUR` thành 92.000000005 EUR). Nếu block dừng vì đã có 1
+budget cùng tên, giữ budget đó — budget thứ 2 sẽ gửi mọi cảnh báo 2 lần — và đưa nó về đúng cấu
+hình bằng block sửa budget bên dưới; nếu block in ra nhiều hơn 1 tên, trước hết xoá bớt bằng
+`gcloud billing budgets delete` cho tới khi chỉ còn 1, rồi chạy lại block.
+
+Kiểm tra 1 lần, từ khoảng 1 ngày sau khi Bước 1 tạo cluster, trong Console → Billing → Cost
+breakdown, rằng phí control plane đã được bù: lọc theo project này và dịch vụ Kubernetes Engine,
+và chọn Time range là Charge period, gồm những ngày cluster tồn tại (mặc định là Billing period,
+chỉ liệt kê các tháng đã xuất hoá đơn). Budget đã trừ các loại credit ở 3 dòng của report này:
+"Free tier usage" (`FREE_TIER`), "Sustained use discounts" (`SUSTAINED_USAGE_DISCOUNT`) và
+"Spending-based discounts" (`DISCOUNT`). Phần nào được bù bằng "Promotional credits" (`PROMOTION`)
+là phí mà ưu đãi miễn phí của GKE không miễn, ví dụ phí của cluster thứ 2 hoặc cluster regional;
+credit Free Trial trả phần đó và budget đúng khi tính nó là chi tiêu, nên đừng thêm `PROMOTION`.
+Nếu khoản bù nằm ở dòng khác, thêm loại credit của dòng đó vào `--filter-credit-types` ở cả block
+tạo budget và block sửa budget rồi chạy block sửa budget (sau khi chạy lại 2 block đầu của mục
+này; lần này block tạo budget sẽ dừng và in ra tên budget). Khoản bù nào budget không trừ — kể cả
+khoản nằm ở dòng "Others", dòng không ứng với loại credit nào — sẽ khiến budget tính khoảng $73
+(~1.900.000₫) phí control plane mỗi tháng của cluster là chi tiêu, nên các ngưỡng thấp sẽ báo cả
+khi cluster đang tạm dừng.
+
+Với 1 budget đã có, block này đặt mọi giá trị mà block tạo budget đặt, trừ tên hiển thị: số tiền,
+chu kỳ, cách tính credit, danh sách project, danh sách loại credit và các ngưỡng, trong đó danh
+sách và ngưỡng bị thay thế chứ không gộp. Mọi thứ khác giữ nguyên, gồm tên hiển thị, phần cài đặt
+thông báo và mọi bộ lọc mà block tạo budget không đặt, như service hay label; lệnh describe ở cuối
+in ra kết quả. Thay `100USD` như ở trên nhưng giữ mã tiền tệ: API từ chối mã khác với đơn vị tiền
+của budget, còn 1 con số không kèm mã được chấp nhận và hiểu theo đơn vị đó mà không kiểm tra.
+`--help` của lệnh update mô tả `percent` là số nguyên từ 0 tới 100, nhưng nó đặt cùng field với
+`--threshold-rule` của lệnh create, nên nhận cùng dạng phân số (0.1 là 10%):
+
+```bash
+[[ ${budgets:?no existing budget found by the block above: run it in this shell first, and use this block only if it stopped} != *$'\n'* ]] || { echo "more than one budget named cafe-microservices monthly: $budgets (see the notes after the create block)" >&2; false; } &&
+  gcloud billing budgets update "$budgets" \
+    --budget-amount=100USD --calendar-period=month \
+    --filter-projects=projects/cafe-microservices \
+    --credit-types-treatment=include-specified-credits \
+    --filter-credit-types=FREE_TIER,SUSTAINED_USAGE_DISCOUNT,DISCOUNT \
+    --clear-threshold-rules \
+    --add-threshold-rule=percent=0.1 --add-threshold-rule=percent=0.2 --add-threshold-rule=percent=0.4 \
+    --add-threshold-rule=percent=0.5 --add-threshold-rule=percent=0.9 --add-threshold-rule=percent=1.0 \
+    --add-threshold-rule=percent=1.0,basis=forecasted-spend &&
+  gcloud billing budgets describe "$budgets"
+```
 
 ---
 
@@ -1922,6 +1998,9 @@ gcloud container node-pools delete default-pool --cluster=cafe-cluster --zone=us
 Dùng `pd-standard` thay vì `pd-balanced`/SSD cho `stateless-pool`: rẻ hơn, và trên project Free
 Trial thì quota SSD theo region rất dễ cạn mà không xin tăng được — `pd-standard` lấy từ 1 quota
 bucket khác, rộng rãi hơn nhiều.
+
+Từ khoảng 1 ngày sau bước này, thực hiện lần kiểm tra 1 lần rằng phí control plane đã được bù
+(xem "Cảnh báo ngân sách" trong Yêu cầu môi trường).
 
 ---
 
@@ -2728,8 +2807,8 @@ Bước 8 để deploy nó (`scripts/deploy.sh`).
 Không có gì ở đây cần chạy suốt ngày đêm, nên giữa các buổi làm việc có thể đưa cả 2 node pool về 0
 node. Khi đó vẫn còn tính phí: persistent disk của các PVC Postgres và Kafka, bucket GCS chứa
 backup, dung lượng Artifact Registry và các version secret trên Secret Manager. Phí control plane
-của cluster zonal vẫn được bù bằng credit miễn phí (xem dòng Zonal cluster trong phụ lục đối chiếu
-GCP ↔ AWS).
+của cluster zonal vẫn được bù bằng ưu đãi miễn phí của GKE (xem dòng Zonal cluster trong phụ lục
+đối chiếu GCP ↔ AWS).
 
 Autoscaler của `stateless-pool` không tự về 0 được: các pod hệ thống của GKE và các operator ở
 Bước 3 (cert-manager, operator CNPG cùng Barman Cloud Plugin, và Strimzi) luôn cần chỗ chạy, nên
@@ -3293,13 +3372,13 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | GCP project | AWS account | Ranh giới cô lập tài nguyên, IAM và bật API; phần billing được gom về 1 billing account riêng (dòng kế tiếp). |
 | Billing account | AWS Organizations management (payer) account | Phương tiện thanh toán mà các project gắn vào, tách rời khỏi bản thân project: credit, quota và các ưu đãi miễn phí được tính theo billing account chứ không theo project — ưu đãi miễn phí của GKE là 1 khoản credit hàng tháng cho mỗi billing account, chỉ bù được phí cluster zonal/Autopilot (xem dòng Zonal cluster). Bên AWS không có sự tách bạch tương ứng dưới cấp account; thay vào đó consolidated billing gom nhiều account về 1 payer account. |
 | Free Trial ($300 credit for 90 days) | AWS Free plan (accounts created since 2025-07-15; legacy 12-month Free Tier for older ones) | Cả 2 đều là gói dùng thử dựa trên credit, có hạn kết thúc cứng. Gói của GCP kết thúc sau 90 ngày hoặc khi tiêu hết $300 (~7.875.000₫); khi đó tài nguyên bị dừng và, nếu không nâng cấp trong 30 ngày, bị xoá vĩnh viễn (xem Yêu cầu môi trường). Free plan của AWS cho $100–200 (~2.625.000–5.250.000₫) credit trong tối đa 6 tháng; khi hết, account bị đóng và AWS giữ dữ liệu 90 ngày: nâng cấp lên gói trả phí trong 90 ngày đó thì lấy lại quyền truy cập, nếu không account cùng tài nguyên bị xoá vĩnh viễn. |
-| Cloud Billing budget (`gcloud billing budgets create`) | AWS Budgets | Ngưỡng chi tiêu gửi cảnh báo (mặc định qua email); budget của tài liệu này không bao giờ dừng chi tiêu (xem "Cảnh báo ngân sách" trong Yêu cầu môi trường). Spend-cap budget của GCP tạm dừng việc dùng mới của 1 vài dịch vụ tính theo request (như Cloud Run và Gemini API) nhưng không bao giờ dừng VM hay disk đang chạy, nên không dừng được 1 cluster; AWS Budgets tự chạy được Budget Actions (vd áp 1 IAM policy, dừng EC2 instance). Ngoài ra, GCP cần 1 programmatic budget notification (gửi tới 1 topic Pub/Sub) cộng code của chính bạn. |
-| Billing account IAM roles (`roles/billing.admin`, `roles/billing.costsManager`) | IAM policies with AWS Budgets actions (`budgets:ModifyBudget`, `budgets:ViewBudget`) | Cần để tạo budget (xem "Cảnh báo ngân sách"). GCP cấp các role này trên billing account, 1 resource tách khỏi project (xem dòng Billing account). AWS không có resource billing riêng: đó là các quyền IAM bình thường trong account sở hữu budget; 1 budget ở management (payer) account có thể theo dõi chi phí của cả organization. |
+| Cloud Billing budget (`gcloud billing budgets create` / `update`) | AWS Budgets | Ngưỡng chi tiêu gửi cảnh báo (mặc định qua email); budget của tài liệu này không bao giờ dừng chi tiêu (xem "Cảnh báo ngân sách" trong Yêu cầu môi trường). Spend-cap budget của GCP tạm dừng việc dùng mới của 1 vài dịch vụ tính theo request (như Cloud Run và Gemini API) nhưng không bao giờ dừng VM hay disk đang chạy, nên không dừng được 1 cluster; AWS Budgets tự chạy được Budget Actions (vd áp 1 IAM policy, dừng EC2 instance). Ngoài ra, GCP cần 1 programmatic budget notification (gửi tới 1 topic Pub/Sub) cộng code của chính bạn. |
+| Billing account IAM roles (`roles/billing.admin`, `roles/billing.costsManager`) | IAM policies with AWS Budgets actions (`budgets:ModifyBudget`, `budgets:ViewBudget`) | Cần để tạo, sửa hoặc xoá budget (xem "Cảnh báo ngân sách"). GCP cấp các role này trên billing account, 1 resource tách khỏi project (xem dòng Billing account). AWS không có resource billing riêng: đó là các quyền IAM bình thường trong account sở hữu budget; 1 budget ở management (payer) account có thể theo dõi chi phí của cả organization. |
 | Pub/Sub | Amazon SNS (fan-out) / Amazon SQS (queue) | Tài liệu này không dùng; đây là kênh mà programmatic budget notification được gửi tới. 1 budget của AWS cũng có thể gửi thông báo tới 1 topic SNS. |
-| Cloud Billing Reports (Console → Billing → Reports) | AWS Cost Explorer | Biểu đồ chi tiêu tương tác theo project/account, dịch vụ và SKU, có hiện riêng các khoản credit; là nơi tài liệu này kiểm tra khoản bù phí của GKE thuộc loại credit nào (xem "Cảnh báo ngân sách"). |
-| Billing credit types (`PROMOTION`, `FREE_TIER`, `SUSTAINED_USAGE_DISCOUNT`) | AWS Budgets "Charge type" filter (Credit, Refund, …) | Quyết định budget trừ những credit nào khỏi chi tiêu. GCP chọn được từng loại credit, nhờ vậy budget của tài liệu này trừ credit free tier mà không trừ credit `PROMOTION` của Free Trial; budget của AWS tính hoặc bỏ credit như 1 charge type Credit duy nhất. Sustained use discount không có tương đương bên AWS: Savings Plans và Reserved Instances đều cần cam kết trước. |
+| Cost breakdown report (Console → Billing → Cost breakdown) | AWS Bills page (Billing and Cost Management → Bills) | 1 report billing có sẵn, đi từ chi phí sử dụng (usage cost) qua từng dòng savings ("Free tier usage", "Promotional credits", "Spending-based discounts", …) tới tổng, lọc được theo project, dịch vụ và khoảng thời gian (charge period hoặc billing period); các link của nó mở Reports — biểu đồ chi tiêu tương tác của GCP (tương ứng AWS Cost Explorer) — với cùng bộ lọc. Tài liệu này chỉ dùng nó cho lần kiểm tra 1 lần duy nhất rằng phí control plane của GKE đã được bù (xem "Cảnh báo ngân sách"). Tab Savings của trang Bills bên AWS cũng liệt kê credit, Savings Plans và các khoản giảm giá khác của 1 kỳ billing theo từng loại, mỗi loại có chi tiết theo dịch vụ. |
+| Billing credit types (`PROMOTION`, `FREE_TIER`, `SUSTAINED_USAGE_DISCOUNT`, `DISCOUNT`) | AWS Budgets "Charge type" filter (Credit, Refund, …) | Quyết định budget trừ những credit nào khỏi chi tiêu. GCP chọn được từng loại credit, nhờ vậy budget của tài liệu này trừ free tier của các dịch vụ (`FREE_TIER`), sustained use discount (`SUSTAINED_USAGE_DISCOUNT`) và ưu đãi miễn phí của GKE (nằm ở loại `DISCOUNT`) mà không trừ credit `PROMOTION` của Free Trial; budget của AWS tính hoặc bỏ credit như 1 charge type Credit duy nhất, còn các khoản giảm giá thì qua cost metric được chọn (net unblended và net amortized cost là chi phí sau giảm giá). Sustained use discount không có tương đương bên AWS: Savings Plans và Reserved Instances đều cần cam kết trước. |
 | Organization policy (`iam.automaticIamGrantsForDefaultServiceAccounts`) | AWS Organizations policies (SCPs, declarative policies) | Các ràng buộc đặt ở cấp organization, folder hoặc project, giới hạn cấu hình mà các project bên dưới được phép dùng. Constraint này ngăn GCP tự động cấp role Editor cho các service account mặc định, và được enforce mặc định với các organization tạo từ ngày 3/5/2024 trở đi (xem dòng Compute Engine default service account); Google hiện khuyến nghị constraint chặt hơn `iam.managed.preventPrivilegedBasicRolesForDefaultServiceAccounts`, chặn cả việc cấp Editor hoặc Owner cho chúng về sau. 1 project không thuộc organization nào — như project của tài liệu này — thì không có organization policy, nên service account compute mặc định của nó vẫn giữ role Editor được cấp tự động. Bên AWS, SCP giới hạn quyền mà các account được dùng, còn declarative policy enforce cấu hình dịch vụ; cả 2 đều không có constraint tương đương, vì AWS không tạo role mặc định nào để cấp. |
-| Google Cloud console (Console → Billing) | AWS Management Console (Billing and Cost Management console) | Giao diện web. Tài liệu này chỉ dùng nó cho những gì `gcloud` không hiển thị: số credit và số ngày còn lại của Free Trial (Billing → Overview) và lần kiểm tra loại credit 1 lần duy nhất trong Billing Reports (xem dòng Cloud Billing Reports). Các trang Billing của nó hiển thị từng billing account một, lọc được theo project; console Billing and Cost Management của AWS hiển thị chi phí của account đang đăng nhập, hoặc, từ management account của 1 organization, chi phí của mọi member account. |
+| Google Cloud console (Console → Billing) | AWS Management Console (Billing and Cost Management console) | Giao diện web. Tài liệu này chỉ dùng nó cho những gì `gcloud` không hiển thị: số credit và số ngày còn lại của Free Trial (Billing → Overview) và lần kiểm tra 1 lần duy nhất trong report Cost breakdown (xem dòng Cost breakdown report). Các trang Billing của nó hiển thị từng billing account một, lọc được theo project; console Billing and Cost Management của AWS hiển thị chi phí của account đang đăng nhập, hoặc, từ management account của 1 organization, chi phí của mọi member account. |
 | `gcloud` CLI | `aws` CLI + `eksctl` | GCP gộp thao tác cluster vào `gcloud container clusters`; các thao tác riêng cho EKS bên AWS thường cần thêm `eksctl` (hoặc Terraform) cùng với CLI `aws` gốc. Được cài dưới dạng Google Cloud CLI, 1 trong các công cụ Google gộp dưới tên Google Cloud SDK (cùng với các thư viện client) — vì thế mới có thư mục cài đặt `Cloud SDK` và các biến môi trường `CLOUDSDK_*` như `CLOUDSDK_PYTHON` (xem Yêu cầu môi trường); `gke-gcloud-auth-plugin` là 1 trong các component tùy chọn của nó. Nó tự mang theo Python trên Windows và Linux x86_64; trên macOS, installer sẽ cài 1 bản nếu cần. Bên AWS, 1 "SDK" là 1 thư viện client theo từng ngôn ngữ; CLI `aws` được cài riêng. |
 | `gcloud services enable` (API enablement) | — (no per-service enablement) | GCP yêu cầu bật API của từng dịch vụ cho mỗi project; các dịch vụ AWS nhìn chung dùng được mà không cần bước bật riêng (vài tính năng, như Region opt-in, vẫn cần opt-in). |
 | `gke-gcloud-auth-plugin` | `aws eks get-token` (via the `aws` CLI) | Plugin exec-credential của kubectl, đổi credential cloud thành token xác thực với cluster. `gcloud container clusters get-credentials` tương ứng với `aws eks update-kubeconfig`. |
