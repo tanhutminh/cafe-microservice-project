@@ -31,7 +31,9 @@
          raise it as coverage improves, never lower it); modules at or above it inherit it. -->
     <jacoco.line.coverage.minimum>0.70</jacoco.line.coverage.minimum>
     <spotless.version>2.44.3</spotless.version>
+    <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.5.6</maven-surefire-plugin.version>
+    <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
     <testcontainers-bom.version>2.0.5</testcontainers-bom.version>
     <google-java-format.version>1.25.2</google-java-format.version>
   </properties>
@@ -147,6 +149,10 @@
     </resources>
     <pluginManagement>
       <plugins>
+        <!-- repackage copies provided-scope dependencies into the jar's BOOT-INF/lib too, but
+             leaves optional ones out (includeOptional defaults to false). A compile-only
+             dependency such as lombok is therefore also marked <optional>true</optional> in each
+             module that declares it, which keeps it out of the jar and so out of the image. -->
         <plugin>
           <groupId>org.springframework.boot</groupId>
           <artifactId>spring-boot-maven-plugin</artifactId>
@@ -162,6 +168,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
+          <version>${maven-compiler-plugin.version}</version>
           <configuration>
             <release>${java.version}</release>
             <parameters>true</parameters>
@@ -224,6 +231,15 @@
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>${maven-surefire-plugin.version}</version>
+        </plugin>
+        <!-- Bound to no lifecycle phase, so it runs only when one of its goals is invoked
+             directly, e.g. `mvn dependency:go-offline`. Pinned because, left unpinned, it would
+             get its version from the super POM of the Maven running the build, which can differ
+             between Maven releases. -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-dependency-plugin</artifactId>
+          <version>${maven-dependency-plugin.version}</version>
         </plugin>
       </plugins>
     </pluginManagement>

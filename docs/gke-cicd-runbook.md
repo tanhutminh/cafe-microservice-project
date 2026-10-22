@@ -575,6 +575,14 @@ Key values (full schema: [values.yaml](https://github.com/tanhutminh/cafe-micros
   `latest` tag, only content-hash ones, so a deploy that forgets to override it fails loudly
   instead of silently trying to pull a tag that doesn't exist. Step 8 sets it per service via
   `--set-string <alias>.image.tag=<content-hash-tag>`.
+- `resources.limits.memory` (`512Mi`) also sizes the JVM heap: `backend/Dockerfile` sets
+  `-XX:MaxRAMPercentage=50.0`, so the heap is half of this limit (about 256 MiB) and grows with
+  it. `docker-compose.yml`'s `mem_limit` and `memswap_limit` mirror it, so change them together.
+  To override it for one service, add `resources: {limits: {memory: 768Mi}}` inside that
+  service's existing block in `charts/cafe/values.yaml` (e.g. under `order-service:`); Helm
+  merges this with the defaults, so the other `resources` values stay. In compose, set
+  `mem_limit` and `memswap_limit`, to the same value, in that service's own entry rather than in
+  the shared `x-backend-service` block, which every backend service merges.
 
 Templates ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/deployment.yaml)):
 
@@ -640,8 +648,9 @@ helm template charts/cafe > /dev/null
 
 This step needs images to deploy: do Step 9's GCP setup and let one CI run build them first.
 
-Each service's image tag is a content hash of its own source, `common-lib` and the parent pom
-(see Step 9), so — unlike a single shared release tag — one `$TAG` does not fit all six.
+Each service's image tag is a content hash of its own source, `common-lib`, the parent pom and
+`backend/Dockerfile` (see Step 9), so — unlike a single shared release tag — one `$TAG` does not
+fit all six.
 [scripts/deploy.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/deploy.sh)
 deploys the images for the checked-out commit. Before any `helm upgrade` it aborts if:
 
@@ -819,6 +828,23 @@ causes:
     creates the role from the newly synced Secret — see item 6). After 600s it exits with the last
     error and restarts with a fresh window; the Deployment's 1200s `progressDeadlineSeconds` then
     fails the rollout if it never gets through.
+11. **Every pod start logs two ERROR-severity `NOTE: Picked up JDK_JAVA_OPTIONS: ...` lines** —
+    expected, not a fault: the java launcher prints that line to stderr whenever the variable is
+    set (`backend/Dockerfile` sets it for the JVM's heap-size and out-of-memory flags), twice on
+    the Alpine-based image, where it re-executes itself once; GKE logs any non-JSON stderr line at
+    ERROR severity. To leave them out of an error search in Logs Explorer, add
+    `NOT textPayload:"Picked up JDK_JAVA_OPTIONS"` to the query.
+12. **A service pod restarts with `Exit Code: 3`** (`Last State: Terminated` in
+    `kubectl describe pod <pod> -n cafe`) — its JVM hit an OutOfMemoryError for the Java heap or
+    metaspace and exited on purpose (`-XX:+ExitOnOutOfMemoryError` in
+    `backend/Dockerfile`); the last line of that run's log, from
+    `kubectl logs <pod> -n cafe --previous`, starts with
+    `Terminating due to java.lang.OutOfMemoryError`, e.g.
+    `Terminating due to java.lang.OutOfMemoryError: Java heap space`. `Reason: OOMKilled` with
+    exit code 137 means instead that the container as a whole went over its memory limit. Either
+    way, raise that service's memory limit (`resources.limits.memory`, see Step 7, and compose's
+    `mem_limit` and `memswap_limit` with it) or find the leak; don't add `-Xmx`, since the heap
+    already follows the limit.
 
 ---
 
@@ -828,8 +854,9 @@ Builds and pushes each service's image to Artifact Registry on every push to `ma
 the `test` job runs (see "What the workflow does" below), or via a manual `workflow_dispatch` on
 `master` — only after that same run's lint/test/coverage checks and secret scan pass.
 Everything below is already implemented in
-[backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
-and [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
+[backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml),
+[image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
+and [backend/Dockerfile](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/Dockerfile)
 — this section documents the GCP-side setup those files assume, and how the pieces fit together.
 
 ### GCP setup
@@ -1005,12 +1032,15 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   CRDs-catalog one when the CNPG, Strimzi or barman-cloud version in `k8s/` changes, or the
   manifests are checked against old CRD schemas.
 - **`build-and-push`** — needs both `test` and `gitleaks` to succeed, and only runs on a push (or
-  manual `workflow_dispatch`) to `master`, never on a PR. Its image build only packages
-  (`-DskipTests`): the tests run once, in `test`. For each of the 6 services: compute its tag with
-  `scripts/image-tag.sh <service>` (a content hash of that service's own directory, `common-lib` and
-  the parent pom — the exact inputs its `Dockerfile` copies; see the script's own header comment for
-  what that deliberately excludes and for the `salt` constant — bump it to force every service's tag
-  to change when nothing in those hashed inputs did, e.g. after a base-image security update), check
+  manual `workflow_dispatch`) to `master`, never on a PR, so a change that breaks the image build,
+  e.g. in `backend/Dockerfile`, passes a PR's checks and fails only on `master`: build all 6
+  locally first with `docker compose build`. Its image build only packages
+  (`-Dmaven.test.skip=true`): the tests run once, in `test`. For each of the 6 services: compute
+  its tag with `scripts/image-tag.sh <service>` (a content hash of that service's own directory,
+  `common-lib`, the parent pom and `backend/Dockerfile`, the one recipe all 6 images are built from
+  with `--build-arg SERVICE=<service>`; see the script's own header comment for what that
+  deliberately excludes and for the `salt` constant — bump it to force every service's tag to
+  change when nothing in those hashed inputs did, e.g. after a base-image tag moved), check
   whether Artifact Registry already has an image at that tag (`docker manifest inspect`), and only
   build+push if not. This makes the job idempotent: a `workflow_dispatch` run on `master`, or any
   later push to `master` on which `test` runs, builds whatever is missing once that run's own Maven
@@ -1085,8 +1115,9 @@ gcloud artifacts docker images list \
 ```
 
 From here on, an ordinary push to `master` that touches `backend/**` only rebuilds the services
-whose content actually changed (or all 6, if `common-lib`/the parent `pom.xml` changed) — see
-Step 8 to deploy it (`scripts/deploy.sh`).
+whose content actually changed (or all 6, if `common-lib`, the parent pom or `backend/Dockerfile`
+changed), and one to `scripts/image-tag.sh` that changes the tags it computes, e.g. a `salt`
+bump, rebuilds all 6 — see Step 8 to deploy it (`scripts/deploy.sh`).
 
 ## Pausing and resuming the cluster between sessions
 
@@ -1658,6 +1689,7 @@ the Notes column for where the mapping breaks down.
 | Access scopes (node pool / VM: `cloud-platform`, `devstorage.read_only`) | — (no direct equivalent) | Legacy per-VM OAuth scopes that cap what the attached service account can do on top of its IAM roles; pulling from Artifact Registry needs `devstorage.read_only` or `cloud-platform` (the latter defers entirely to IAM). The closest AWS cap is an IAM permissions boundary, set on the role rather than per instance. |
 | Google Managed Prometheus (GMP) | Amazon Managed Service for Prometheus (AMP) | Managed Prometheus-compatible metrics collection, enabled by default on a new GKE Standard cluster. Its `gmp-operator` and per-node `collector` pods run in `gmp-system`. |
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | The managed metric and log stores that `gke-metrics-agent`, `fluentbit-gke` and `event-exporter-gke` write to. On EKS, sending node/pod metrics and container logs to CloudWatch is opt-in (Container Insights / the CloudWatch Observability add-on). |
+| Logs Explorer (Cloud Logging's query page; Logging query language fields `textPayload`, `severity`) | Amazon CloudWatch Logs Insights | Where this guide searches container logs (see "Troubleshooting deploys", item 11). A Logs Explorer query filters on the fields of each log entry, such as `textPayload` (the text of a non-JSON line) and `severity`; Logs Insights queries log groups in its own pipe-based language (`fields`, `filter`, `sort`, …). GKE gives each non-JSON container log line a severity from its stream, INFO for stdout and ERROR for stderr; CloudWatch Logs has no severity field of its own, and the Fluent Bit that Container Insights runs on EKS records only the stream (`stream`: `stdout` or `stderr`). |
 | GCP project | AWS account | The resource-isolation, IAM and API-enablement boundary; billing rolls up to a separate billing account (next row). |
 | Billing account | AWS Organizations management (payer) account | The payment instrument projects attach to, separate from the projects themselves: credits, quota and free-tier allowances are counted per billing account, not per project — GKE's free tier is a monthly credit per billing account that only offsets zonal/Autopilot cluster fees (see the Zonal cluster row). AWS has no equivalent split below the account; consolidated billing instead rolls several accounts up under one payer account. |
 | Free Trial ($300 credit for 90 days) | AWS Free plan (accounts created since 2025-07-15; legacy 12-month Free Tier for older ones) | Both are credit-based trials with a hard end. GCP's ends at 90 days or when the $300 (~7,875,000₫) is spent; resources are then stopped and, without an upgrade within 30 days, permanently deleted (see Prerequisites). AWS's Free plan gives $100–200 (~2,625,000–5,250,000₫) of credits for up to 6 months; when it ends, the account is closed and AWS keeps its content for 90 days: upgrading to a paid plan within them restores access, otherwise the account and its resources are permanently deleted. |
@@ -2284,6 +2316,14 @@ Các value chính (schema đầy đủ: [values.yaml](https://github.com/tanhutm
   tag `latest`, chỉ push tag content-hash, nên 1 lần deploy quên override nó sẽ báo lỗi ngay lập
   tức thay vì âm thầm cố pull 1 tag không tồn tại. Bước 8 set nó cho từng service qua
   `--set-string <alias>.image.tag=<content-hash-tag>`.
+- `resources.limits.memory` (`512Mi`) cũng quyết định kích thước heap của JVM: `backend/Dockerfile`
+  đặt `-XX:MaxRAMPercentage=50.0`, nên heap bằng 1 nửa limit này (khoảng 256 MiB) và tăng theo
+  nó. `mem_limit` và `memswap_limit` trong `docker-compose.yml` lấy cùng giá trị, nên hãy đổi
+  chúng cùng lúc. Để override cho 1 service, thêm `resources: {limits: {memory: 768Mi}}` vào
+  trong block sẵn có của service đó trong `charts/cafe/values.yaml` (vd dưới `order-service:`);
+  Helm merge giá trị này với giá trị mặc định, nên các value `resources` khác vẫn giữ nguyên.
+  Trong compose, đặt `mem_limit` và `memswap_limit`, cùng 1 giá trị, trong mục riêng của service
+  đó thay vì trong block chung `x-backend-service` mà mọi service backend đều merge vào.
 
 Template ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/deployment.yaml)):
 
@@ -2352,9 +2392,10 @@ helm template charts/cafe > /dev/null
 Bước này cần có image để deploy: làm phần thiết lập GCP ở Bước 9 và để 1 lần chạy CI build image
 trước.
 
-Tag image của mỗi service là 1 hash nội dung tính từ source của chính nó, `common-lib` và pom
-cha (xem Bước 9), nên — khác với 1 tag release dùng chung — không thể dùng 1 `$TAG` cho cả 6
-service. [scripts/deploy.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/deploy.sh)
+Tag image của mỗi service là 1 hash nội dung tính từ source của chính nó, `common-lib`, pom cha và
+`backend/Dockerfile` (xem Bước 9), nên — khác với 1 tag release dùng chung — không thể dùng 1
+`$TAG` cho cả 6 service.
+[scripts/deploy.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/deploy.sh)
 deploy image ứng với commit đang checkout. Trước mọi lần `helm upgrade`, script dừng nếu:
 
 - bash cũ hơn 4.3, hoặc `gcloud`, `helm`, `kubectl`, `gke-gcloud-auth-plugin`, `git` hay
@@ -2534,6 +2575,23 @@ Các triệu chứng có thể gặp khi deploy — phần lớn ở lần deplo
     cho tới khi CNPG tạo role từ Secret vừa được sync — xem mục 6). Sau 600s nó thoát kèm lỗi cuối
     cùng và khởi động lại với 1 khung chờ mới; nếu mãi không qua được, `progressDeadlineSeconds`
     1200s của Deployment sẽ làm fail lần rollout.
+11. **Mỗi lần pod khởi động đều ghi 2 dòng mức ERROR `NOTE: Picked up JDK_JAVA_OPTIONS: ...`** —
+    bình thường, không phải lỗi: java launcher in dòng này ra stderr mỗi khi biến đó được đặt
+    (`backend/Dockerfile` đặt nó cho các cờ kích thước heap và out-of-memory của JVM), 2 lần trên
+    image nền Alpine, vì ở đó launcher tự exec lại chính nó 1 lần; GKE ghi mọi dòng stderr không
+    phải JSON ở mức ERROR. Để loại chúng khỏi 1 lần tìm lỗi trong Logs Explorer, thêm
+    `NOT textPayload:"Picked up JDK_JAVA_OPTIONS"` vào query.
+12. **1 pod service khởi động lại với `Exit Code: 3`** (`Last State: Terminated` trong
+    `kubectl describe pod <pod> -n cafe`) — JVM của nó đã gặp 1 OutOfMemoryError về Java heap hoặc
+    metaspace và chủ động thoát (`-XX:+ExitOnOutOfMemoryError` trong
+    `backend/Dockerfile`); dòng cuối trong log của lần chạy đó, xem bằng
+    `kubectl logs <pod> -n cafe --previous`, bắt đầu bằng
+    `Terminating due to java.lang.OutOfMemoryError`, vd
+    `Terminating due to java.lang.OutOfMemoryError: Java heap space`. Còn `Reason: OOMKilled` với
+    exit code 137 nghĩa là cả container đã vượt memory limit của nó. Trường hợp nào cũng vậy, hãy
+    tăng memory limit của service đó (`resources.limits.memory`, xem Bước 7, và cả `mem_limit` lẫn
+    `memswap_limit` của compose theo) hoặc tìm chỗ rò rỉ; đừng thêm `-Xmx`, vì heap đã tự theo
+    limit.
 
 ---
 
@@ -2543,10 +2601,11 @@ Build và push image của từng service lên Artifact Registry ở mỗi lần
 `test` có chạy (xem "Workflow làm gì" bên dưới), hoặc qua `workflow_dispatch` thủ công trên
 `master` — chỉ sau khi các kiểm tra lint/test/coverage và bước quét secret của chính lần chạy đó
 pass. Mọi thứ dưới đây đã được implement trong
-[backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml)
-và [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
-— mục này chỉ ghi lại phần cấu hình phía GCP mà 2 file đó giả định đã có, và cách các phần khớp
-với nhau.
+[backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml),
+[image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
+và [backend/Dockerfile](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/Dockerfile)
+— mục này chỉ ghi lại phần cấu hình phía GCP mà các file đó giả định đã có, và cách các phần
+khớp với nhau.
 
 ### Thiết lập phía GCP
 
@@ -2719,14 +2778,17 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   `git ls-remote <repo> HEAD`, và luôn làm mới pin của CRDs-catalog khi phiên bản CNPG, Strimzi hay
   barman-cloud trong `k8s/` thay đổi, nếu không manifest sẽ bị kiểm theo schema CRD cũ.
 - **`build-and-push`** — cần cả `test` lẫn `gitleaks` cùng thành công, và chỉ chạy khi push (hoặc
-  `workflow_dispatch` thủ công) lên `master`, không bao giờ chạy trên PR. Bước build image của nó
-  chỉ đóng gói (`-DskipTests`): test chỉ chạy 1 lần, trong job `test`. Với mỗi trong 6 service: tính
-  tag bằng `scripts/image-tag.sh <service>` (hash nội dung của thư mục service đó, `common-lib` và
-  pom cha — đúng các input mà `Dockerfile` của nó copy vào; xem comment ở đầu file script để biết
-  những gì cố tình bị loại ra, và về hằng số `salt` — tăng giá trị này để buộc tag của mọi service
-  đổi ngay cả khi không input nào trong số đó thay đổi, ví dụ sau khi vá bảo mật base image), kiểm
-  tra xem Artifact Registry đã có image ở tag đó chưa (`docker manifest inspect`), và chỉ build+push
-  nếu chưa có. Điều này làm job trở nên idempotent: 1 lần chạy `workflow_dispatch` trên `master`,
+  `workflow_dispatch` thủ công) lên `master`, không bao giờ chạy trên PR, nên 1 thay đổi làm hỏng
+  bước build image, vd trong `backend/Dockerfile`, vẫn pass các kiểm tra của PR và chỉ fail trên
+  `master`: hãy build thử cả 6 ở máy trước bằng `docker compose build`. Bước build image của nó
+  chỉ đóng gói (`-Dmaven.test.skip=true`): test chỉ chạy 1 lần, trong job `test`. Với mỗi trong 6
+  service: tính tag bằng `scripts/image-tag.sh <service>` (hash nội dung của thư mục service đó,
+  `common-lib`, pom cha và `backend/Dockerfile`, công thức chung mà cả 6 image được build từ đó với
+  `--build-arg SERVICE=<service>`; xem comment ở đầu file script để biết những gì cố tình bị loại
+  ra, và về hằng số `salt` — tăng giá trị này để buộc tag của mọi service đổi ngay cả khi không
+  input nào trong số đó thay đổi, ví dụ sau khi 1 tag base image trỏ sang image khác), kiểm tra
+  xem Artifact Registry đã có image ở tag đó chưa (`docker manifest inspect`), và chỉ build+push nếu
+  chưa có. Điều này làm job trở nên idempotent: 1 lần chạy `workflow_dispatch` trên `master`,
   hoặc bất kỳ lần push nào sau đó lên `master` mà `test` có chạy, sẽ build những gì còn thiếu sau
   khi các kiểm tra Maven của chính lần chạy đó pass, bất kể lần chạy trước đã build hay chưa build
   gì — kể cả nội dung còn chưa được build vì job `test` của 1 lần chạy trước thất bại, thứ mà 1 kiểm
@@ -2799,8 +2861,9 @@ gcloud artifacts docker images list \
 ```
 
 Từ đây trở đi, 1 lần push bình thường lên `master` có đụng tới `backend/**` chỉ rebuild những
-service có nội dung thực sự thay đổi (hoặc cả 6, nếu `common-lib`/`pom.xml` cha thay đổi) — xem
-Bước 8 để deploy nó (`scripts/deploy.sh`).
+service có nội dung thực sự thay đổi (hoặc cả 6, nếu `common-lib`, pom cha hay `backend/Dockerfile`
+thay đổi), còn 1 lần push sửa `scripts/image-tag.sh` làm đổi các tag nó tính ra, vd tăng `salt`,
+sẽ rebuild cả 6 — xem Bước 8 để deploy nó (`scripts/deploy.sh`).
 
 ## Tạm dừng và bật lại cluster giữa các buổi làm việc
 
@@ -3369,6 +3432,7 @@ biết chỗ nào việc đối chiếu không còn chính xác.
 | Access scopes (node pool / VM: `cloud-platform`, `devstorage.read_only`) | — (no direct equivalent) | Các OAuth scope kiểu cũ, gắn theo từng VM, giới hạn những gì service account gắn với VM được làm, chồng lên trên các IAM role của nó; pull từ Artifact Registry cần `devstorage.read_only` hoặc `cloud-platform` (scope sau giao toàn quyền quyết định cho IAM). Giới hạn gần nhất bên AWS là 1 IAM permissions boundary, đặt trên role chứ không theo từng instance. |
 | Google Managed Prometheus (GMP) | Amazon Managed Service for Prometheus (AMP) | Dịch vụ thu thập metric tương thích Prometheus được quản lý, mặc định bật sẵn trên cluster GKE Standard mới. Các pod `gmp-operator` và `collector` (mỗi node 1 pod) của nó chạy trong `gmp-system`. |
 | Cloud Monitoring / Cloud Logging | Amazon CloudWatch (metrics / Logs) | Nơi lưu metric và log được quản lý mà `gke-metrics-agent`, `fluentbit-gke` và `event-exporter-gke` ghi vào. Trên EKS, việc đẩy metric node/pod và log container sang CloudWatch phải bật thêm (Container Insights / add-on CloudWatch Observability). |
+| Logs Explorer (Cloud Logging's query page; Logging query language fields `textPayload`, `severity`) | Amazon CloudWatch Logs Insights | Nơi tài liệu này tìm log container (xem mục 11 của "Xử lý sự cố khi deploy"). 1 query trong Logs Explorer lọc theo các field của từng log entry, như `textPayload` (nội dung của 1 dòng không phải JSON) và `severity`; Logs Insights truy vấn log group bằng ngôn ngữ riêng dạng pipe (`fields`, `filter`, `sort`, …). GKE gán severity cho mỗi dòng log container không phải JSON theo stream của nó, INFO cho stdout và ERROR cho stderr; CloudWatch Logs không có field severity riêng, và Fluent Bit mà Container Insights chạy trên EKS chỉ ghi lại stream (`stream`: `stdout` hoặc `stderr`). |
 | GCP project | AWS account | Ranh giới cô lập tài nguyên, IAM và bật API; phần billing được gom về 1 billing account riêng (dòng kế tiếp). |
 | Billing account | AWS Organizations management (payer) account | Phương tiện thanh toán mà các project gắn vào, tách rời khỏi bản thân project: credit, quota và các ưu đãi miễn phí được tính theo billing account chứ không theo project — ưu đãi miễn phí của GKE là 1 khoản credit hàng tháng cho mỗi billing account, chỉ bù được phí cluster zonal/Autopilot (xem dòng Zonal cluster). Bên AWS không có sự tách bạch tương ứng dưới cấp account; thay vào đó consolidated billing gom nhiều account về 1 payer account. |
 | Free Trial ($300 credit for 90 days) | AWS Free plan (accounts created since 2025-07-15; legacy 12-month Free Tier for older ones) | Cả 2 đều là gói dùng thử dựa trên credit, có hạn kết thúc cứng. Gói của GCP kết thúc sau 90 ngày hoặc khi tiêu hết $300 (~7.875.000₫); khi đó tài nguyên bị dừng và, nếu không nâng cấp trong 30 ngày, bị xoá vĩnh viễn (xem Yêu cầu môi trường). Free plan của AWS cho $100–200 (~2.625.000–5.250.000₫) credit trong tối đa 6 tháng; khi hết, account bị đóng và AWS giữ dữ liệu 90 ngày: nâng cấp lên gói trả phí trong 90 ngày đó thì lấy lại quyền truy cập, nếu không account cùng tài nguyên bị xoá vĩnh viễn. |
