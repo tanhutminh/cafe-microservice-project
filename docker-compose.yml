@@ -1,3 +1,13 @@
+# Settings shared by the six backend services, merged into each with `<<: *backend-service`. The
+# merge is shallow, so each service still spells out its own `build` section. mem_limit matches the
+# Helm chart's memory limit, so the JVM sizes its heap (MaxRAMPercentage in backend/Dockerfile) the
+# same way here as on GKE. memswap_limit, memory plus swap, is the same value, so the container
+# gets no swap: unset, Docker would allow as much swap again, and a container that outgrows its
+# limit would swap here where GKE, whose nodes have no swap by default, kills it.
+x-backend-service: &backend-service
+  mem_limit: 512m
+  memswap_limit: 512m
+
 services:
   postgres:
     image: postgres:16
@@ -79,9 +89,11 @@ services:
       start_period: 20s
 
   gateway:
+    <<: *backend-service
     build:
       context: ./backend
-      dockerfile: gateway/Dockerfile
+      args:
+        SERVICE: gateway
     environment:
       MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT: "http://zipkin:9411/api/v2/spans"
       # Sourced from .env (see .env.example) - not used for the real K8s deployment, which
@@ -100,9 +112,11 @@ services:
       start_period: 30s
 
   auth-service:
+    <<: *backend-service
     build:
       context: ./backend
-      dockerfile: auth-service/Dockerfile
+      args:
+        SERVICE: auth-service
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/auth_db"
       SPRING_DATASOURCE_USERNAME: ${AUTH_SERVICE_DB_USERNAME}
@@ -126,9 +140,11 @@ services:
       start_period: 40s
 
   menu-service:
+    <<: *backend-service
     build:
       context: ./backend
-      dockerfile: menu-service/Dockerfile
+      args:
+        SERVICE: menu-service
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/menu_db"
       SPRING_DATASOURCE_USERNAME: ${MENU_SERVICE_DB_USERNAME}
@@ -149,9 +165,11 @@ services:
       start_period: 40s
 
   order-service:
+    <<: *backend-service
     build:
       context: ./backend
-      dockerfile: order-service/Dockerfile
+      args:
+        SERVICE: order-service
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/order_db"
       SPRING_DATASOURCE_USERNAME: ${ORDER_SERVICE_DB_USERNAME}
@@ -175,9 +193,11 @@ services:
       start_period: 40s
 
   inventory-service:
+    <<: *backend-service
     build:
       context: ./backend
-      dockerfile: inventory-service/Dockerfile
+      args:
+        SERVICE: inventory-service
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/inventory_db"
       SPRING_DATASOURCE_USERNAME: ${INVENTORY_SERVICE_DB_USERNAME}
@@ -201,9 +221,11 @@ services:
       start_period: 40s
 
   report-service:
+    <<: *backend-service
     build:
       context: ./backend
-      dockerfile: report-service/Dockerfile
+      args:
+        SERVICE: report-service
     environment:
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/report_db"
       SPRING_DATASOURCE_USERNAME: ${REPORT_SERVICE_DB_USERNAME}

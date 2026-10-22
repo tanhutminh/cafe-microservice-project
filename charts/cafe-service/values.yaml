@@ -7,6 +7,8 @@ image:
 replicas: 1
 port: 8080
 
+# limits.memory also sizes the JVM heap (half of it: MaxRAMPercentage=50.0 in backend/Dockerfile);
+# docker-compose.yml's mem_limit and memswap_limit mirror it.
 resources:
   requests:
     cpu: 100m

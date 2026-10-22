@@ -22,14 +22,21 @@ check() {
 
 blob() { git hash-object -w --stdin <<<"$1"; }
 
-# backend/svc-a, backend/svc-b, backend/common-lib, backend/pom.xml as plain blobs - image-tag.sh
-# only ever hashes the object id found at each path, so a blob stands in for a real directory tree
-# just as well for this purpose.
+# backend/svc-a, backend/svc-b, backend/common-lib, backend/pom.xml, backend/Dockerfile as plain
+# blobs - image-tag.sh only ever hashes the object id found at each path, so a blob stands in for a
+# real directory tree just as well for this purpose. An empty <common_lib>, <pom> or <dockerfile>
+# leaves that path out of the tree, to test a ref that lacks it.
 mktree_commit() {
-  local svc_a=$1 svc_b=$2 common_lib=$3 pom=$4
+  local svc_a=$1 svc_b=$2 common_lib=$3 pom=$4 dockerfile=$5
   local backend_tree root_tree
-  backend_tree=$(printf '100644 blob %s\tsvc-a\n100644 blob %s\tsvc-b\n100644 blob %s\tcommon-lib\n100644 blob %s\tpom.xml\n' \
-    "$svc_a" "$svc_b" "$common_lib" "$pom" | git mktree)
+  backend_tree=$(
+    {
+      printf '100644 blob %s\tsvc-a\n100644 blob %s\tsvc-b\n' "$svc_a" "$svc_b"
+      [ -z "$common_lib" ] || printf '100644 blob %s\tcommon-lib\n' "$common_lib"
+      [ -z "$pom" ] || printf '100644 blob %s\tpom.xml\n' "$pom"
+      [ -z "$dockerfile" ] || printf '100644 blob %s\tDockerfile\n' "$dockerfile"
+    } | git mktree
+  )
   root_tree=$(printf '040000 tree %s\tbackend\n' "$backend_tree" | git mktree)
   GIT_AUTHOR_NAME="image-tag-test" GIT_AUTHOR_EMAIL="image-tag-test@localhost" \
     GIT_COMMITTER_NAME="image-tag-test" GIT_COMMITTER_EMAIL="image-tag-test@localhost" \
@@ -45,17 +52,28 @@ common_lib_1=$(blob "common-lib v1")
 common_lib_2=$(blob "common-lib v2")
 pom_1=$(blob "pom v1")
 pom_2=$(blob "pom v2")
+dockerfile_1=$(blob "Dockerfile v1")
+dockerfile_2=$(blob "Dockerfile v2")
 
-base_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1")
-svc_a_changed_ref=$(mktree_commit "$svc_a_2" "$svc_b_1" "$common_lib_1" "$pom_1")
-common_lib_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_2" "$pom_1")
-pom_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_2")
+base_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1" "$dockerfile_1")
+svc_a_changed_ref=$(mktree_commit "$svc_a_2" "$svc_b_1" "$common_lib_1" "$pom_1" "$dockerfile_1")
+common_lib_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_2" "$pom_1" "$dockerfile_1")
+pom_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_2" "$dockerfile_1")
+dockerfile_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1" "$dockerfile_2")
+no_common_lib_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "" "$pom_1" "$dockerfile_1")
+no_pom_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "" "$dockerfile_1")
+no_dockerfile_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1" "")
 
 base_a=$(tag svc-a "$base_ref")
 base_b=$(tag svc-b "$base_ref")
 
 [ "$(tag svc-a "$base_ref")" = "$base_a" ] && tag_is_deterministic=true || tag_is_deterministic=false
 check "determinism: same content yields the same tag" "$tag_is_deterministic"
+
+# The other checks only compare tags with each other, so they would also pass with a tag of the
+# wrong length or case, or with sha256sum's whole line ("<hash>  -"), which Docker rejects.
+[[ $base_a =~ ^[0-9a-f]{16}$ ]] && tag_is_16_lowercase_hex=true || tag_is_16_lowercase_hex=false
+check "the tag is 16 lowercase hex characters" "$tag_is_16_lowercase_hex"
 
 svc_a_after=$(tag svc-a "$svc_a_changed_ref")
 [ "$base_a" != "$svc_a_after" ] && own_change_changes_tag=true || own_change_changes_tag=false
@@ -81,6 +99,14 @@ svc_b_pom_changed=$(tag svc-b "$pom_changed_ref")
 [ "$base_b" != "$svc_b_pom_changed" ] && pom_change_changes_svc_b_tag=true || pom_change_changes_svc_b_tag=false
 check "changing the parent pom changes a different service's tag too" "$pom_change_changes_svc_b_tag"
 
+svc_a_dockerfile_changed=$(tag svc-a "$dockerfile_changed_ref")
+[ "$base_a" != "$svc_a_dockerfile_changed" ] && dockerfile_change_changes_svc_a_tag=true || dockerfile_change_changes_svc_a_tag=false
+check "changing the Dockerfile changes a service's tag" "$dockerfile_change_changes_svc_a_tag"
+
+svc_b_dockerfile_changed=$(tag svc-b "$dockerfile_changed_ref")
+[ "$base_b" != "$svc_b_dockerfile_changed" ] && dockerfile_change_changes_svc_b_tag=true || dockerfile_change_changes_svc_b_tag=false
+check "changing the Dockerfile changes a different service's tag too" "$dockerfile_change_changes_svc_b_tag"
+
 # Uses a real, always-present directory (common-lib) rather than the synthetic fixtures above,
 # since exercising the default-ref fallback needs a ref that's actually reachable as HEAD.
 default_ref_out=$(bash scripts/image-tag.sh common-lib)
@@ -96,6 +122,44 @@ set -e
 check "an unknown service name exits non-zero" "$unknown_svc_exits_nonzero"
 [ -z "$bad_out" ] && unknown_svc_prints_no_tag=true || unknown_svc_prints_no_tag=false
 check "an unknown service name prints no tag to stdout" "$unknown_svc_prints_no_tag"
+
+# common-lib exists at HEAD, so a script that fell back to HEAD on a bad ref would print a tag.
+# Git refuses a space in any branch or tag name, so the bad ref below can never resolve.
+set +e
+bad_ref_out=$(bash scripts/image-tag.sh common-lib 'no such ref' 2>/dev/null)
+bad_ref_code=$?
+set -e
+[ "$bad_ref_code" -ne 0 ] && unknown_ref_exits_nonzero=true || unknown_ref_exits_nonzero=false
+check "an unknown git ref exits non-zero" "$unknown_ref_exits_nonzero"
+[ -z "$bad_ref_out" ] && unknown_ref_prints_no_tag=true || unknown_ref_prints_no_tag=false
+check "an unknown git ref prints no tag to stdout" "$unknown_ref_prints_no_tag"
+
+set +e
+no_common_lib_out=$(bash scripts/image-tag.sh svc-a "$no_common_lib_ref" 2>/dev/null)
+no_common_lib_code=$?
+set -e
+[ "$no_common_lib_code" -ne 0 ] && no_common_lib_exits_nonzero=true || no_common_lib_exits_nonzero=false
+check "a ref without backend/common-lib exits non-zero" "$no_common_lib_exits_nonzero"
+[ -z "$no_common_lib_out" ] && no_common_lib_prints_no_tag=true || no_common_lib_prints_no_tag=false
+check "a ref without backend/common-lib prints no tag to stdout" "$no_common_lib_prints_no_tag"
+
+set +e
+no_pom_out=$(bash scripts/image-tag.sh svc-a "$no_pom_ref" 2>/dev/null)
+no_pom_code=$?
+set -e
+[ "$no_pom_code" -ne 0 ] && no_pom_exits_nonzero=true || no_pom_exits_nonzero=false
+check "a ref without backend/pom.xml exits non-zero" "$no_pom_exits_nonzero"
+[ -z "$no_pom_out" ] && no_pom_prints_no_tag=true || no_pom_prints_no_tag=false
+check "a ref without backend/pom.xml prints no tag to stdout" "$no_pom_prints_no_tag"
+
+set +e
+no_dockerfile_out=$(bash scripts/image-tag.sh svc-a "$no_dockerfile_ref" 2>/dev/null)
+no_dockerfile_code=$?
+set -e
+[ "$no_dockerfile_code" -ne 0 ] && no_dockerfile_exits_nonzero=true || no_dockerfile_exits_nonzero=false
+check "a ref without backend/Dockerfile exits non-zero" "$no_dockerfile_exits_nonzero"
+[ -z "$no_dockerfile_out" ] && no_dockerfile_prints_no_tag=true || no_dockerfile_prints_no_tag=false
+check "a ref without backend/Dockerfile prints no tag to stdout" "$no_dockerfile_prints_no_tag"
 
 set +e
 missing_out=$(bash scripts/image-tag.sh 2>/dev/null)

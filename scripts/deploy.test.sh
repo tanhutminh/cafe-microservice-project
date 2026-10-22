@@ -508,6 +508,7 @@ assert_fixture_repo() {
     echo "$dir" > "backend/$dir/source"
   done
   echo pom > backend/pom.xml
+  echo dockerfile > backend/Dockerfile
   echo "name: cafe" > charts/cafe/Chart.yaml
   cp "$script_dir/../.gitignore" .
   echo readme > README.md
@@ -690,6 +691,8 @@ check "main: a detached HEAD at an older origin/master commit deploys it cleanly
 # ls-files -v's `h`/`S` tag, or `!! ` for a git-ignored file.
 dirty_cases=(
   "a modified backend file| M backend/gateway/source|echo changed >> backend/gateway/source"
+  "a modified backend/Dockerfile| M backend/Dockerfile|echo '# changed' >> backend/Dockerfile"
+  "a modified backend/pom.xml| M backend/pom.xml|echo changed >> backend/pom.xml"
   "an untracked backend file|?? backend/gateway/New.java|echo new > backend/gateway/New.java"
   "a deleted backend file| D backend/gateway/source|rm backend/gateway/source"
   "a modified tracked charts file| M charts/cafe/Chart.yaml|echo '# changed' >> charts/cafe/Chart.yaml"
