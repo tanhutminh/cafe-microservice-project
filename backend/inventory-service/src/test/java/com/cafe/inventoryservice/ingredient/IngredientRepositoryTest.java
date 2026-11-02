@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
+import com.cafe.inventoryservice.testsupport.ContainerImages;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.LockTimeoutException;
 import jakarta.persistence.PessimisticLockException;
@@ -56,7 +57,7 @@ class IngredientRepositoryTest {
   private static final long AWAIT_SECONDS = 5;
 
   @Container @ServiceConnection
-  static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
+  static final PostgreSQLContainer postgres = new PostgreSQLContainer(ContainerImages.POSTGRES);
 
   @Autowired private TestEntityManager entityManager;
   @Autowired private IngredientRepository ingredientRepository;

@@ -1,10 +1,36 @@
 #!/usr/bin/env bash
 # Behavioral tests for image-tag.sh. Run directly: `bash scripts/image-tag.test.sh`.
-# Builds disconnected git commit objects via plumbing (hash-object/mktree/commit-tree) - none of
-# them are pointed to by any ref, so this never touches the real branch, working tree, or HEAD;
-# the loose objects it creates are ordinary git garbage, cleaned up by the next `git gc`.
+# Every case runs image-tag.sh inside a throwaway git repository in a temporary directory, on
+# fixture commits built via plumbing (hash-object/mktree/commit-tree), so the suite never writes
+# to this repository: no objects, refs or files. The temporary directory is removed on exit.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+
+# Inherited git variables (set, for example, inside a git hook) would point the git commands
+# below, which write objects and move HEAD, at the repository they name, not the throwaway one.
+git_env=$(git rev-parse --local-env-vars) || exit 1
+# shellcheck disable=SC2086 # deliberately split into one variable name per word
+unset $git_env
+# GIT_TEMPLATE_DIR isn't in that list, but an inherited one would make `git init` below copy its
+# hooks into the throwaway repo, where git would run them (update-ref runs reference-transaction).
+unset GIT_TEMPLATE_DIR
+
+# An inherited CDPATH would make the relative `cd` below resolve against it instead of here.
+unset CDPATH
+script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/image-tag.sh"
+
+# Everything the suite writes lives under $work. The trap is set before the mktemp, so it is
+# already in place once work is assigned; until then work is empty and the trap removes nothing.
+work=""
+cleanup() {
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
+work=$(mktemp -d)
+# Neither the system's nor the user's git config applies, so a setting such as commit.gpgSign
+# can't change how the fixtures are built.
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+git init -q "$work/repo"
+cd "$work/repo"
 
 pass=0
 fail=0
@@ -22,12 +48,13 @@ check() {
 
 blob() { git hash-object -w --stdin <<<"$1"; }
 
-# backend/svc-a, backend/svc-b, backend/common-lib, backend/pom.xml, backend/Dockerfile as plain
-# blobs - image-tag.sh only ever hashes the object id found at each path, so a blob stands in for a
-# real directory tree just as well for this purpose. An empty <common_lib>, <pom> or <dockerfile>
-# leaves that path out of the tree, to test a ref that lacks it.
+# backend/svc-a, backend/svc-b, backend/common-lib, backend/pom.xml, backend/Dockerfile and,
+# optionally, backend/.dockerignore as plain blobs - image-tag.sh only ever hashes the object id
+# found at each path, so a blob stands in for a real directory tree just as well for this
+# purpose. An empty <common_lib>, <pom> or <dockerfile> leaves that path out of the tree, to test
+# a ref that lacks it; so does an empty or omitted <dockerignore>.
 mktree_commit() {
-  local svc_a=$1 svc_b=$2 common_lib=$3 pom=$4 dockerfile=$5
+  local svc_a=$1 svc_b=$2 common_lib=$3 pom=$4 dockerfile=$5 dockerignore=${6:-}
   local backend_tree root_tree
   backend_tree=$(
     {
@@ -35,6 +62,7 @@ mktree_commit() {
       [ -z "$common_lib" ] || printf '100644 blob %s\tcommon-lib\n' "$common_lib"
       [ -z "$pom" ] || printf '100644 blob %s\tpom.xml\n' "$pom"
       [ -z "$dockerfile" ] || printf '100644 blob %s\tDockerfile\n' "$dockerfile"
+      [ -z "$dockerignore" ] || printf '100644 blob %s\t.dockerignore\n' "$dockerignore"
     } | git mktree
   )
   root_tree=$(printf '040000 tree %s\tbackend\n' "$backend_tree" | git mktree)
@@ -43,7 +71,20 @@ mktree_commit() {
     git commit-tree "$root_tree" -m "image-tag.sh test fixture" </dev/null
 }
 
-tag() { bash scripts/image-tag.sh "$1" "$2"; }
+tag() { bash "$script" "$1" "$2"; }
+
+# Runs image-tag.sh with the given arguments and checks that it fails cleanly: a non-zero exit
+# and nothing on stdout, which a caller would read as the tag. <subject> begins the description
+# of both checks.
+check_fails() {
+  local subject=$1 out code=0 exits_nonzero prints_no_tag
+  shift
+  out=$(bash "$script" "$@" 2>/dev/null) || code=$?
+  [ "$code" -ne 0 ] && exits_nonzero=true || exits_nonzero=false
+  check "$subject exits non-zero" "$exits_nonzero"
+  [ -z "$out" ] && prints_no_tag=true || prints_no_tag=false
+  check "$subject prints no tag to stdout" "$prints_no_tag"
+}
 
 svc_a_1=$(blob "svc-a v1")
 svc_a_2=$(blob "svc-a v2")
@@ -54,12 +95,14 @@ pom_1=$(blob "pom v1")
 pom_2=$(blob "pom v2")
 dockerfile_1=$(blob "Dockerfile v1")
 dockerfile_2=$(blob "Dockerfile v2")
+dockerignore_1=$(blob "dockerignore v1")
 
 base_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1" "$dockerfile_1")
 svc_a_changed_ref=$(mktree_commit "$svc_a_2" "$svc_b_1" "$common_lib_1" "$pom_1" "$dockerfile_1")
 common_lib_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_2" "$pom_1" "$dockerfile_1")
 pom_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_2" "$dockerfile_1")
 dockerfile_changed_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1" "$dockerfile_2")
+dockerignore_added_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1" "$dockerfile_1" "$dockerignore_1")
 no_common_lib_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "" "$pom_1" "$dockerfile_1")
 no_pom_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "" "$dockerfile_1")
 no_dockerfile_ref=$(mktree_commit "$svc_a_1" "$svc_b_1" "$common_lib_1" "$pom_1" "")
@@ -79,6 +122,8 @@ svc_a_after=$(tag svc-a "$svc_a_changed_ref")
 [ "$base_a" != "$svc_a_after" ] && own_change_changes_tag=true || own_change_changes_tag=false
 check "changing a service's own content changes its tag" "$own_change_changes_tag"
 
+# svc-a's blob stands for a whole module directory, its pom included, so this also checks that
+# one module's pom is not part of another service's tag.
 svc_b_after=$(tag svc-b "$svc_a_changed_ref")
 [ "$base_b" = "$svc_b_after" ] && other_svc_tag_unchanged=true || other_svc_tag_unchanged=false
 check "changing one service's content leaves an unrelated service's tag unchanged" "$other_svc_tag_unchanged"
@@ -107,69 +152,38 @@ svc_b_dockerfile_changed=$(tag svc-b "$dockerfile_changed_ref")
 [ "$base_b" != "$svc_b_dockerfile_changed" ] && dockerfile_change_changes_svc_b_tag=true || dockerfile_change_changes_svc_b_tag=false
 check "changing the Dockerfile changes a different service's tag too" "$dockerfile_change_changes_svc_b_tag"
 
-# Uses a real, always-present directory (common-lib) rather than the synthetic fixtures above,
-# since exercising the default-ref fallback needs a ref that's actually reachable as HEAD.
-default_ref_out=$(bash scripts/image-tag.sh common-lib)
-explicit_head_out=$(bash scripts/image-tag.sh common-lib HEAD)
-[ "$default_ref_out" = "$explicit_head_out" ] && default_matches_head=true || default_matches_head=false
+svc_a_dockerignore_added=$(tag svc-a "$dockerignore_added_ref")
+[ "$base_a" = "$svc_a_dockerignore_added" ] && dockerignore_leaves_tag=true || dockerignore_leaves_tag=false
+check "adding backend/.dockerignore leaves a service's tag unchanged" "$dockerignore_leaves_tag"
+
+# salt is a literal in image-tag.sh, so a copy with another value stands in for a bump; comparing
+# the copy with the original makes the checks fail if the edit no longer finds the salt line.
+sed 's/^salt=.*/&-bumped/' "$script" >"$work/image-tag-salted.sh"
+cmp -s "$script" "$work/image-tag-salted.sh" && salt_line_found=false || salt_line_found=true
+salted_a=$(bash "$work/image-tag-salted.sh" svc-a "$base_ref")
+salted_b=$(bash "$work/image-tag-salted.sh" svc-b "$base_ref")
+[ "$salt_line_found" = true ] && [ "$base_a" != "$salted_a" ] && salt_changes_svc_a_tag=true || salt_changes_svc_a_tag=false
+check "bumping the salt changes a service's tag" "$salt_changes_svc_a_tag"
+[ "$salt_line_found" = true ] && [ "$base_b" != "$salted_b" ] && salt_changes_svc_b_tag=true || salt_changes_svc_b_tag=false
+check "bumping the salt changes a different service's tag too" "$salt_changes_svc_b_tag"
+
+git update-ref HEAD "$svc_a_changed_ref"
+default_ref_out=$(bash "$script" svc-a)
+[ "$default_ref_out" = "$svc_a_after" ] && default_matches_head=true || default_matches_head=false
 check "omitting the git-ref argument defaults to HEAD" "$default_matches_head"
 
-set +e
-bad_out=$(bash scripts/image-tag.sh does-not-exist "$base_ref" 2>/dev/null)
-bad_code=$?
-set -e
-[ "$bad_code" -ne 0 ] && unknown_svc_exits_nonzero=true || unknown_svc_exits_nonzero=false
-check "an unknown service name exits non-zero" "$unknown_svc_exits_nonzero"
-[ -z "$bad_out" ] && unknown_svc_prints_no_tag=true || unknown_svc_prints_no_tag=false
-check "an unknown service name prints no tag to stdout" "$unknown_svc_prints_no_tag"
+check_fails "an unknown service name" does-not-exist "$base_ref"
 
-# common-lib exists at HEAD, so a script that fell back to HEAD on a bad ref would print a tag.
+# svc-a exists at HEAD, so a script that fell back to HEAD on a bad ref would print a tag.
 # Git refuses a space in any branch or tag name, so the bad ref below can never resolve.
-set +e
-bad_ref_out=$(bash scripts/image-tag.sh common-lib 'no such ref' 2>/dev/null)
-bad_ref_code=$?
-set -e
-[ "$bad_ref_code" -ne 0 ] && unknown_ref_exits_nonzero=true || unknown_ref_exits_nonzero=false
-check "an unknown git ref exits non-zero" "$unknown_ref_exits_nonzero"
-[ -z "$bad_ref_out" ] && unknown_ref_prints_no_tag=true || unknown_ref_prints_no_tag=false
-check "an unknown git ref prints no tag to stdout" "$unknown_ref_prints_no_tag"
+check_fails "an unknown git ref" svc-a 'no such ref'
 
-set +e
-no_common_lib_out=$(bash scripts/image-tag.sh svc-a "$no_common_lib_ref" 2>/dev/null)
-no_common_lib_code=$?
-set -e
-[ "$no_common_lib_code" -ne 0 ] && no_common_lib_exits_nonzero=true || no_common_lib_exits_nonzero=false
-check "a ref without backend/common-lib exits non-zero" "$no_common_lib_exits_nonzero"
-[ -z "$no_common_lib_out" ] && no_common_lib_prints_no_tag=true || no_common_lib_prints_no_tag=false
-check "a ref without backend/common-lib prints no tag to stdout" "$no_common_lib_prints_no_tag"
+check_fails "a ref without backend/common-lib" svc-a "$no_common_lib_ref"
+check_fails "a ref without backend/pom.xml" svc-a "$no_pom_ref"
+check_fails "a ref without backend/Dockerfile" svc-a "$no_dockerfile_ref"
 
-set +e
-no_pom_out=$(bash scripts/image-tag.sh svc-a "$no_pom_ref" 2>/dev/null)
-no_pom_code=$?
-set -e
-[ "$no_pom_code" -ne 0 ] && no_pom_exits_nonzero=true || no_pom_exits_nonzero=false
-check "a ref without backend/pom.xml exits non-zero" "$no_pom_exits_nonzero"
-[ -z "$no_pom_out" ] && no_pom_prints_no_tag=true || no_pom_prints_no_tag=false
-check "a ref without backend/pom.xml prints no tag to stdout" "$no_pom_prints_no_tag"
-
-set +e
-no_dockerfile_out=$(bash scripts/image-tag.sh svc-a "$no_dockerfile_ref" 2>/dev/null)
-no_dockerfile_code=$?
-set -e
-[ "$no_dockerfile_code" -ne 0 ] && no_dockerfile_exits_nonzero=true || no_dockerfile_exits_nonzero=false
-check "a ref without backend/Dockerfile exits non-zero" "$no_dockerfile_exits_nonzero"
-[ -z "$no_dockerfile_out" ] && no_dockerfile_prints_no_tag=true || no_dockerfile_prints_no_tag=false
-check "a ref without backend/Dockerfile prints no tag to stdout" "$no_dockerfile_prints_no_tag"
-
-set +e
-missing_out=$(bash scripts/image-tag.sh 2>/dev/null)
-missing_code=$?
-missing_err=$(bash scripts/image-tag.sh 2>&1 >/dev/null)
-set -e
-[ "$missing_code" -ne 0 ] && missing_arg_exits_nonzero=true || missing_arg_exits_nonzero=false
-check "a missing service argument exits non-zero" "$missing_arg_exits_nonzero"
-[ -z "$missing_out" ] && missing_arg_prints_no_tag=true || missing_arg_prints_no_tag=false
-check "a missing service argument prints no tag to stdout" "$missing_arg_prints_no_tag"
+check_fails "a missing service argument"
+missing_err=$(bash "$script" 2>&1 >/dev/null) || true
 case "$missing_err" in
 *"usage: image-tag.sh"*) missing_arg_usage_documented=true ;;
 *) missing_arg_usage_documented=false ;;

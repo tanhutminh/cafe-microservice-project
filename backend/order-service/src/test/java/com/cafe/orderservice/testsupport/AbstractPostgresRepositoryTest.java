@@ -27,7 +27,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 public abstract class AbstractPostgresRepositoryTest {
 
   @ServiceConnection
-  static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
+  static final PostgreSQLContainer postgres = new PostgreSQLContainer(ContainerImages.POSTGRES);
 
   static {
     postgres.start();

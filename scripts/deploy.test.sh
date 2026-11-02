@@ -23,6 +23,10 @@ set -euo pipefail
 git_env=$(git rev-parse --local-env-vars) || exit 1
 # shellcheck disable=SC2086 # deliberately split into one variable name per word
 unset $git_env
+# GIT_TEMPLATE_DIR isn't in that list, but an inherited one would make the fixture repo's
+# `git init` below copy that directory into the repo: its hooks would run on git commands such as
+# update-ref, and an info/exclude file would change which files count as untracked.
+unset GIT_TEMPLATE_DIR
 # An inherited CDPATH would make the relative `cd` below resolve against it instead of here.
 unset CDPATH
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -44,8 +48,8 @@ check() {
 # shellcheck source-path=SCRIPTDIR/..
 source scripts/deploy.sh
 
-# Everything the suite writes lives under $work. The trap goes in before the mktemp, so a failure
-# part-way through still removes it.
+# Everything the suite writes lives under $work. The trap is set before the mktemp, so it is
+# already in place once work is assigned; until then work is empty and the trap removes nothing.
 work=""
 cleanup() {
   rm -rf -- "$work"

@@ -59,8 +59,9 @@ are written as plain bash. On Git Bash for Windows, `gcloud` needs `CLOUDSDK_PYT
 - `gitleaks` (only needed if you ever move the dev JWT keypair, or another `.gitleaksignore`-listed
   credential, to a different file/line and must regenerate fingerprints — see `.gitleaksignore`
   below; CI itself runs it via `gitleaks/gitleaks-action`, no local install needed for the pipeline).
-- `docker` (only needed to run the pinned shellcheck lint locally, Step 9; CI runs the same image
-  itself).
+- `docker` with Docker Compose (only needed locally, for Step 9: to run the pinned shellcheck
+  lint, whose image CI runs itself, and to build all 6 images with `docker compose build`, which
+  no PR check does).
 - `gke-gcloud-auth-plugin` on your `PATH` (check with `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` and `cmctl` all need it to talk to a GKE cluster. Install it with
   `gcloud components install gke-gcloud-auth-plugin` (standalone SDK / Windows installer) or, with
@@ -135,7 +136,8 @@ gcloud services enable compute.googleapis.com container.googleapis.com secretman
 
 Step 9 also needs a GitHub repository with Actions enabled and admin access to it (to configure
 branch protection) — no extra CLI tooling beyond `gcloud` (and `docker`, only for the optional
-local lint), though the GitHub CLI (`gh`) is a convenient way to trigger the first manual run.
+local lint and image build), though the GitHub CLI (`gh`) is a convenient way to trigger the first
+manual run.
 
 ### Budget alert
 
@@ -530,7 +532,22 @@ Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
   - `imageName` pins the Postgres image (18.4, `standard` flavor, the one upstream recommends
     with the Barman Cloud Plugin) by an immutable timestamped tag, so neither upgrading the CNPG
     operator nor a CVE rebuild of upstream's rolling tag can silently change what runs. With
-    `instances: 1`, changing it restarts the single instance (a short outage);
+    `instances: 1`, a new build or minor version restarts the single instance (a short outage),
+    while a new major version runs CNPG's offline in-place major upgrade, which keeps Postgres
+    down until `pg_upgrade` ends. A major upgrade needs a backup first (the backup block in
+    "Pausing") and, in the same edit as `imageName`, a new `serverName` in the plugin's
+    `parameters`: the first `cafe-postgres-rN` (`cafe-postgres-r1`, `-r2`, …) that
+    `gcloud storage ls gs://cafe-microservices-cafe-pg-backups/` doesn't list (the comment above
+    `imageName` in the file says why). A backup taken before the upgrade can't recover to any point
+    after it, so as soon as the upgrade ends, run the backup block again, then lift the suspension
+    it sets on the nightly schedule with the commands in step 3 of "Recovering after losing the
+    Postgres cluster". Restoring the pre-upgrade backup needs an image of the old major version in
+    `imageName`, and the old `serverName` in `externalClusters`. Retention deletes backups only
+    under the current `serverName`'s prefix, so once 10 days (the retention window) have passed
+    since the upgrade, delete the old prefix with
+    `gcloud storage rm --recursive gs://cafe-microservices-cafe-pg-backups/<old-serverName>/`, where
+    `<old-serverName>` is the plugin's `serverName` before the upgrade (`cafe-postgres` if it had
+    none);
   - tip: the storage field is `spec.storage.storageClass` (CNPG's own CRD field), not
     `storageClassName` (the plain-PVC name) — an easy mix-up, verify with
     `kubectl explain cluster.spec.storage`.
@@ -583,6 +600,12 @@ Key values (full schema: [values.yaml](https://github.com/tanhutminh/cafe-micros
   merges this with the defaults, so the other `resources` values stay. In compose, set
   `mem_limit` and `memswap_limit`, to the same value, in that service's own entry rather than in
   the shared `x-backend-service` block, which every backend service merges.
+- `resources.limits.cpu` (`500m`) is mirrored by `docker-compose.yml`'s `cpus: 0.5`, so change
+  them together: under either limit the JVM counts one available processor, so it sizes its
+  thread pools the same way on GKE as in compose. To override it for one service, add
+  `resources: {limits: {cpu: 1000m}}` to that service's block in `charts/cafe/values.yaml`, as
+  for memory, and set `cpus` (here `1.0`) in that service's own compose entry rather than in
+  `x-backend-service`.
 
 Templates ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/deployment.yaml)):
 
@@ -595,16 +618,19 @@ Templates ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-pro
   retries a `psql` connection for up to 600s, reading host, user, database and password from
   libpq's own `PGHOST`/`PGUSER`/`PGDATABASE`/`PGPASSWORD`, with `PGCONNECT_TIMEOUT` capping
   each attempt's connection at 5s, and times the window with `date +%s` — **not** `$SECONDS`,
-  which BusyBox `ash` (the `postgres:16-alpine` image's shell) silently expands to empty, turning
-  the timeout check into dead code. It logs psql's error the first time and whenever it changes,
-  and the last one when it times out: `kubectl logs <pod> -n cafe -c wait-for-db`. Its test
-  suite, `wait-for-db.test.sh`, sits next to it; the chart's `.helmignore` keeps `*.test.sh` out
-  of the packaged chart.
+  which BusyBox `ash` (the shell of the initContainer's Alpine-based `postgres` image) silently
+  expands to empty, turning the timeout check into dead code. It logs psql's error the first time
+  and whenever it changes, and the last one when it times out:
+  `kubectl logs <pod> -n cafe -c wait-for-db`. Its test suite, `wait-for-db.test.sh`, sits next
+  to it; the chart's `.helmignore` keeps `*.test.sh` out of the packaged chart.
 - `progressDeadlineSeconds: 1200` on the DB-backed Deployments, so a pod waiting in `wait-for-db`
   doesn't fail a legitimate first rollout (see Step 8 for the arithmetic).
 - `startupProbe` (30 × 10s budget) gates when `readinessProbe`/`livenessProbe` even start being
   checked — more robust than a fixed `initialDelaySeconds` guess under JVM + Flyway boot time on
   a Spot node.
+- `terminationGracePeriodSeconds` is left unset, so each pod gets Kubernetes' default of 30s
+  between SIGTERM and SIGKILL; `docker-compose.yml`'s `stop_grace_period: 30s` mirrors it, so
+  change them together.
 - Two separate pod volumes: `config` (a `configMap`) and `secrets-store` (a `csi` volume) — they
   cannot be nested under one `projected` volume, since `csi` isn't a valid `projected` source.
   The CSI volume **must** actually be mounted (not just declared) — an unmounted CSI volume
@@ -633,7 +659,9 @@ with that service's real port/db/kafka/jwt values and its own `image.repository`
 ```bash
 # `build`, not `update`: packages the file:// subchart against the committed Chart.lock without
 # rewriting it, and fails if Chart.yaml's dependencies no longer match that lock;
-# --skip-refresh: a file:// dependency needs none of the Helm repositories added above
+# --skip-refresh: skips re-downloading the indexes of all Helm repositories configured on this
+# machine (`helm repo list`), which a file:// dependency doesn't need; Helm still reads their
+# cached indexes, so those must exist
 helm dependency build --skip-refresh charts/cafe
 # render and lint locally before touching the real cluster (rendering is the real check);
 # lint should report 0 failed - an "icon is recommended" INFO and a "templates/ directory does
@@ -818,9 +846,12 @@ causes:
    or commit reply are re-sent their command by order-service's saga reconciliation job and,
    after its retry limit, put back to OPEN or CONFIRMED. A dead-lettered release-stock command is
    not retried, so that stock stays reserved until corrected by hand. If it was the reply that
-   was dead-lettered, inventory-service already applied the command: the order goes back to OPEN
-   or CONFIRMED while the stock stays reserved or deducted — correct it by hand too. Item 8
-   covers a release left `pending-*`.
+   was dead-lettered, inventory-service already applied the command; the re-sent command makes
+   it send the reply again, rebuilt from what it stored, in the format of the inventory-service
+   version now running. If inventory-service was rolled back too, that reply may now be applied;
+   otherwise it is dead-lettered again, and the order goes back to OPEN or CONFIRMED while the
+   stock stays reserved or deducted — correct it by hand too. Item 8 covers a release left
+   `pending-*`.
 10. **A DB-backed pod stays in `Init:0/1`** — its `wait-for-db` initContainer can't connect to the
     database yet. Read why with `kubectl logs <pod> -n cafe -c wait-for-db`: it logs psql's error
     whenever it changes (a connection timeout or refused connection means Postgres isn't up or
@@ -845,6 +876,25 @@ causes:
     way, raise that service's memory limit (`resources.limits.memory`, see Step 7, and compose's
     `mem_limit` and `memswap_limit` with it) or find the leak; don't add `-Xmx`, since the heap
     already follows the limit.
+13. **`scripts/deploy.sh` (or Step 7's `helm dependency build`) fails with
+    `open …\helm\repository\<repo>-index.yaml: The system cannot find the file specified` (or
+    `… the path specified`; on Linux and macOS,
+    `open …/helm/repository/<repo>-index.yaml: no such file or directory`), where
+    `<repo>-index.yaml` is e.g. `cnpg-index.yaml`** — Helm's cache of repository indexes is gone,
+    and nothing has reached the cluster yet. `helm dependency build` reads the cached index of every
+    repository in Helm's list (`helm repo list`, which includes the three added in Step 3), in that
+    order, even with `--skip-refresh` and only `file://` dependencies, and stops at the first one
+    missing: the file the error names. On Windows that cache lives under `%TEMP%\helm` by default,
+    which Disk Cleanup can empty. Run `helm repo update` to rebuild the indexes, then deploy
+    again. To keep the cache out of `%TEMP%`, add `HELM_CACHE_HOME` to `~/.bashrc`, as with
+    `CLOUDSDK_PYTHON` in Prerequisites:
+
+    ```bash
+    echo 'export HELM_CACHE_HOME="$LOCALAPPDATA/helm"' >> ~/.bashrc
+    ```
+
+    Then open a new Git Bash window and run `helm repo update` once more, since the new cache
+    starts empty.
 
 ---
 
@@ -1291,9 +1341,9 @@ kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-c
 kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}{"\n"}'
 kubectl wait pod/cafe-kafka-cafe-kafka-pool-0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=10m
 kubectl scale deployment inventory-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl wait --for=condition=Available deployment/inventory-service -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m &&
+kubectl rollout status deployment/inventory-service -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m &&
   kubectl scale deployment gateway auth-service menu-service order-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster &&
-  kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
+  kubectl rollout status deployment -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
 ```
 
 The annotation check must print `off`, and the schedule check `false`; the schedule is lifted only
@@ -1303,10 +1353,19 @@ and waited for only once inventory-service is available. If a wait times out, fi
 "Troubleshooting resume"), then rerun the block from that wait; every line from the first wait on
 is safe to repeat. For a failed resize, see item 3 there. Kafka's wait reads the broker pod rather
 than the `Kafka` resource, whose `Ready` condition can still be `True` from before the pause.
-`--replicas=1` matches the chart's `replicas` value, and the 22-minute timeout (as in
-`scripts/deploy.sh`) outlasts the DB-backed Deployments' 1200s `progressDeadlineSeconds`, which
-their slowest legitimate start is sized to fit; `kubectl wait` doesn't stop at that deadline, so a
-stalled service shows up as one of these waits timing out.
+`--replicas=1` matches the chart's `replicas` value. The services are waited for with
+`kubectl rollout status`, which first waits until the Deployment controller has seen the new
+replica count: a Deployment scaled to 0 reports `Available=True`, which a
+`kubectl wait --for=condition=Available` run right after the scale could read before the
+controller updates it. The wait for the operators doesn't have this problem: their Deployments keep
+their replica count through the pause and lose their pods with the nodes, so each reports
+`Available=False` until a new pod is ready. The 22-minute timeout, the same value as the Helm
+timeout in `scripts/deploy.sh`, applies here to each Deployment in turn. It is longer than a
+DB-backed service's slowest legitimate start, which the 1200s `progressDeadlineSeconds` the chart
+gives DB-backed Deployments is sized to fit. That deadline itself doesn't apply here: the Deployment
+controller checks it only while the latest rollout is unfinished, and scaling up a Deployment whose
+last rollout completed leaves its `Progressing` condition at that rollout's reason,
+`NewReplicaSetAvailable`. A stalled service therefore shows up as one of these waits timing out.
 
 `bash scripts/deploy.sh` (Step 8) brings the services back too, but it also deploys the checked-out
 commit, which may differ from what was running, and it doesn't wake Postgres or lift the
@@ -1800,7 +1859,9 @@ mục "Yêu cầu môi trường").
 - `gitleaks` (chỉ cần khi bạn di chuyển cặp khoá JWT dev, hay bất kỳ credential nào khác nằm trong
   `.gitleaksignore`, sang file/dòng khác và phải tạo lại fingerprint — xem `.gitleaksignore` bên
   dưới; bản thân CI chạy nó qua `gitleaks/gitleaks-action`, không cần cài local cho pipeline).
-- `docker` (chỉ cần để chạy lint shellcheck đã pin ở local, Bước 9; CI tự chạy đúng image đó).
+- `docker` cùng Docker Compose (chỉ cần ở local, cho Bước 9: để chạy lint shellcheck đã pin bằng
+  đúng image mà CI tự chạy, và để build cả 6 image bằng `docker compose build`, việc mà không
+  kiểm tra nào của PR làm).
 - `gke-gcloud-auth-plugin` nằm trong `PATH` (kiểm tra bằng `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` và `cmctl` đều cần nó để nói chuyện với cluster GKE. Cài bằng
   `gcloud components install gke-gcloud-auth-plugin` (SDK độc lập / bộ cài Windows) hoặc, nếu
@@ -1876,8 +1937,8 @@ gcloud services enable compute.googleapis.com container.googleapis.com secretman
 ```
 
 Bước 9 còn cần một repository GitHub đã bật Actions và quyền admin trên repo đó (để cấu hình
-branch protection) — không cần thêm CLI nào ngoài `gcloud` (và `docker`, chỉ cho bước lint local
-tùy chọn), dù GitHub CLI (`gh`) là cách tiện lợi để chạy lần đầu thủ công.
+branch protection) — không cần thêm CLI nào ngoài `gcloud` (và `docker`, chỉ cho bước lint và
+build image ở local, đều tùy chọn), dù GitHub CLI (`gh`) là cách tiện lợi để chạy lần đầu thủ công.
 
 ### Cảnh báo ngân sách (budget alert)
 
@@ -2271,7 +2332,21 @@ và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-pr
   - `imageName` ghim image Postgres (18.4, flavor `standard` — flavor upstream khuyên dùng cùng
     Barman Cloud Plugin) bằng 1 tag bất biến có timestamp, nên cả việc nâng cấp operator CNPG lẫn
     việc rebuild vá CVE của tag rolling upstream đều không thể âm thầm đổi thứ đang chạy. Với
-    `instances: 1`, đổi giá trị này sẽ restart instance duy nhất (gián đoạn ngắn);
+    `instances: 1`, 1 bản build hoặc minor version mới sẽ restart instance duy nhất (gián đoạn
+    ngắn), còn 1 major version mới sẽ chạy offline in-place major upgrade của CNPG: Postgres ngừng
+    cho tới khi `pg_upgrade` chạy xong. 1 major upgrade cần backup trước (block backup trong "Tạm
+    dừng") cùng 1 `serverName` mới trong `parameters` của plugin, đặt trong cùng lần sửa
+    `imageName`: tên `cafe-postgres-rN` đầu tiên (`cafe-postgres-r1`, `-r2`, …) mà
+    `gcloud storage ls gs://cafe-microservices-cafe-pg-backups/` không liệt kê (comment phía trên
+    `imageName` trong file giải thích lý do). 1 backup tạo trước lần upgrade không khôi phục được
+    tới thời điểm nào sau đó, nên ngay khi upgrade xong, hãy chạy lại block backup, rồi mở lại lịch
+    backup hằng đêm, vốn bị block đó ngưng, bằng các lệnh ở bước 3 của "Khôi phục sau khi mất
+    cluster Postgres". Muốn restore backup tạo trước lần upgrade thì cần 1 image của major version
+    cũ trong `imageName`, và `serverName` cũ trong `externalClusters`. Retention chỉ xoá các backup
+    nằm dưới prefix của `serverName` hiện tại, nên khi đã qua 10 ngày (khoảng retention) kể từ lần
+    upgrade, hãy xoá prefix cũ bằng
+    `gcloud storage rm --recursive gs://cafe-microservices-cafe-pg-backups/<old-serverName>/`, với
+    `<old-serverName>` là `serverName` của plugin trước lần upgrade (`cafe-postgres` nếu chưa có);
   - mẹo: field đúng là `spec.storage.storageClass` (field riêng của CNPG CRD), không phải
     `storageClassName` (tên field của PVC thuần) — rất dễ nhầm, dùng
     `kubectl explain cluster.spec.storage` để kiểm tra lại.
@@ -2324,6 +2399,12 @@ Các value chính (schema đầy đủ: [values.yaml](https://github.com/tanhutm
   Helm merge giá trị này với giá trị mặc định, nên các value `resources` khác vẫn giữ nguyên.
   Trong compose, đặt `mem_limit` và `memswap_limit`, cùng 1 giá trị, trong mục riêng của service
   đó thay vì trong block chung `x-backend-service` mà mọi service backend đều merge vào.
+- `resources.limits.cpu` (`500m`) và `cpus: 0.5` trong `docker-compose.yml` có cùng giá trị, nên
+  hãy đổi chúng cùng lúc: với limit nào trong 2 limit đó, JVM cũng đếm được 1 processor khả dụng,
+  nên nó đặt kích thước thread pool như nhau trên GKE và trong compose. Để override cho 1
+  service, thêm `resources: {limits: {cpu: 1000m}}` vào block của service đó trong
+  `charts/cafe/values.yaml`, như với memory, và đặt `cpus` (ở đây là `1.0`) trong mục riêng của
+  service đó trong compose thay vì trong `x-backend-service`.
 
 Template ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/charts/cafe-service/templates/deployment.yaml)):
 
@@ -2336,15 +2417,19 @@ Template ([deployment.yaml](https://github.com/tanhutminh/cafe-microservice-proj
   `psql` lặp lại tới 600s, đọc host, user, database và password từ chính các biến của libpq là
   `PGHOST`/`PGUSER`/`PGDATABASE`/`PGPASSWORD`, `PGCONNECT_TIMEOUT` giới hạn phần kết nối của mỗi
   lần thử ở 5s, và tính khung chờ bằng `date +%s` — **không phải** `$SECONDS`, vì BusyBox `ash`
-  (shell của image `postgres:16-alpine`) âm thầm coi nó là chuỗi rỗng, biến điều kiện timeout thành
-  dead code. Nó ghi log lỗi của psql ở lần đầu và mỗi khi lỗi thay đổi, và in lỗi cuối cùng khi hết
-  giờ: `kubectl logs <pod> -n cafe -c wait-for-db`. Bộ test của nó, `wait-for-db.test.sh`, nằm
-  ngay cạnh; `.helmignore` của chart loại `*.test.sh` ra khỏi chart được đóng gói.
+  (shell của image `postgres` nền Alpine dùng cho initContainer) âm thầm coi nó là chuỗi rỗng, biến
+  điều kiện timeout thành dead code. Nó ghi log lỗi của psql ở lần đầu và mỗi khi lỗi thay đổi, và
+  in lỗi cuối cùng khi hết giờ: `kubectl logs <pod> -n cafe -c wait-for-db`. Bộ test của nó,
+  `wait-for-db.test.sh`, nằm ngay cạnh; `.helmignore` của chart loại `*.test.sh` ra khỏi chart
+  được đóng gói.
 - `progressDeadlineSeconds: 1200` trên các Deployment dùng DB, để 1 pod đang chờ trong
   `wait-for-db` không làm fail 1 lần rollout đầu hợp lệ (xem Bước 8 để biết cách tính).
 - `startupProbe` (ngân sách 30 × 10s) quyết định khi nào `readinessProbe`/`livenessProbe` mới
   bắt đầu được kiểm tra — chắc chắn hơn việc đoán 1 `initialDelaySeconds` cố định trong lúc JVM
   + Flyway khởi động trên node Spot.
+- `terminationGracePeriodSeconds` không được đặt, nên mỗi pod có mặc định 30s của Kubernetes giữa
+  SIGTERM và SIGKILL; `stop_grace_period: 30s` trong `docker-compose.yml` lấy cùng giá trị, nên
+  hãy đổi chúng cùng lúc.
 - 2 volume pod riêng biệt: `config` (kiểu `configMap`) và `secrets-store` (kiểu `csi`) — không
   thể lồng chung vào 1 volume `projected`, vì `csi` không phải nguồn hợp lệ của `projected`.
   Volume CSI **bắt buộc phải** thực sự được mount (không chỉ khai báo) — 1 volume CSI không
@@ -2376,7 +2461,9 @@ alias với giá trị port/db/kafka/jwt thật của service đó và `image.re
 ```bash
 # `build`, not `update`: packages the file:// subchart against the committed Chart.lock without
 # rewriting it, and fails if Chart.yaml's dependencies no longer match that lock;
-# --skip-refresh: a file:// dependency needs none of the Helm repositories added above
+# --skip-refresh: skips re-downloading the indexes of all Helm repositories configured on this
+# machine (`helm repo list`), which a file:// dependency doesn't need; Helm still reads their
+# cached indexes, so those must exist
 helm dependency build --skip-refresh charts/cafe
 # render and lint locally before touching the real cluster (rendering is the real check);
 # lint should report 0 failed - an "icon is recommended" INFO and a "templates/ directory does
@@ -2565,9 +2652,12 @@ Các triệu chứng có thể gặp khi deploy — phần lớn ở lần deplo
    order đang chờ reply cho lệnh reserve hoặc commit sẽ được job saga reconciliation của
    order-service gửi lại lệnh và, sau khi hết số lần retry, đưa về OPEN hoặc CONFIRMED. 1 lệnh
    release-stock đã rơi vào DLQ thì không được retry, nên lượng stock đó vẫn bị giữ cho tới khi
-   sửa tay. Nếu chính reply mới là thứ rơi vào DLQ thì inventory-service đã thực hiện lệnh rồi:
-   order quay về OPEN hoặc CONFIRMED trong khi stock vẫn bị giữ hoặc đã bị trừ — cũng phải sửa tay.
-   Mục 8 xử lý trường hợp release bị kẹt ở `pending-*`.
+   sửa tay. Nếu chính reply mới là thứ rơi vào DLQ thì inventory-service đã thực hiện lệnh rồi;
+   lệnh được gửi lại khiến nó gửi lại reply, dựng lại từ những gì nó đã lưu, theo định dạng của
+   phiên bản inventory-service đang chạy. Nếu inventory-service cũng đã được rollback thì reply đó
+   có thể được áp dụng; nếu không, nó lại rơi vào DLQ, và order quay về OPEN hoặc CONFIRMED trong
+   khi stock vẫn bị giữ hoặc đã bị trừ — cũng phải sửa tay. Mục 8 xử lý trường hợp release bị kẹt
+   ở `pending-*`.
 10. **1 pod dùng DB đứng mãi ở `Init:0/1`** — initContainer `wait-for-db` của nó chưa kết nối
     được tới database. Xem lý do bằng `kubectl logs <pod> -n cafe -c wait-for-db`: nó ghi log lỗi
     của psql mỗi khi lỗi thay đổi (connection timeout hay connection refused nghĩa là Postgres
@@ -2592,6 +2682,25 @@ Các triệu chứng có thể gặp khi deploy — phần lớn ở lần deplo
     tăng memory limit của service đó (`resources.limits.memory`, xem Bước 7, và cả `mem_limit` lẫn
     `memswap_limit` của compose theo) hoặc tìm chỗ rò rỉ; đừng thêm `-Xmx`, vì heap đã tự theo
     limit.
+13. **`scripts/deploy.sh` (hoặc lệnh `helm dependency build` ở Bước 7) fail với
+    `open …\helm\repository\<repo>-index.yaml: The system cannot find the file specified` (hoặc
+    `… the path specified`; trên Linux và macOS là
+    `open …/helm/repository/<repo>-index.yaml: no such file or directory`), trong đó
+    `<repo>-index.yaml` là vd `cnpg-index.yaml`** — cache index repository của Helm đã mất, và chưa
+    có gì được gửi tới cluster. `helm dependency build` đọc index đã cache của mọi repository trong
+    danh sách của Helm (`helm repo list`, gồm cả 3 repository thêm ở Bước 3), theo đúng thứ tự đó,
+    kể cả khi dùng `--skip-refresh` và chỉ có dependency `file://`, và dừng ở repository đầu tiên
+    bị thiếu: file mà lỗi nêu tên. Trên Windows, cache đó mặc định nằm trong `%TEMP%\helm`, nơi
+    Disk Cleanup có thể xoá sạch. Chạy `helm repo update` để tạo lại các index, rồi deploy lại.
+    Để đưa cache ra khỏi `%TEMP%`, thêm `HELM_CACHE_HOME` vào `~/.bashrc`, giống `CLOUDSDK_PYTHON`
+    ở phần Yêu cầu môi trường:
+
+    ```bash
+    echo 'export HELM_CACHE_HOME="$LOCALAPPDATA/helm"' >> ~/.bashrc
+    ```
+
+    Rồi mở 1 cửa sổ Git Bash mới và chạy `helm repo update` thêm 1 lần, vì cache mới ban đầu còn
+    trống.
 
 ---
 
@@ -3034,9 +3143,9 @@ kubectl wait cluster/cafe-postgres -n cafe --context gke_cafe-microservices_us-c
 kubectl get scheduledbackup.postgresql.cnpg.io cafe-postgres-daily-backup -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster -o jsonpath='{.spec.suspend}{"\n"}'
 kubectl wait pod/cafe-kafka-cafe-kafka-pool-0 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --for=condition=Ready --timeout=10m
 kubectl scale deployment inventory-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster
-kubectl wait --for=condition=Available deployment/inventory-service -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m &&
+kubectl rollout status deployment/inventory-service -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m &&
   kubectl scale deployment gateway auth-service menu-service order-service report-service --replicas=1 -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster &&
-  kubectl wait --for=condition=Available deployment --all -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
+  kubectl rollout status deployment -n cafe --context gke_cafe-microservices_us-central1-a_cafe-cluster --timeout=22m
 ```
 
 Lệnh kiểm tra annotation phải in ra `off`, và lệnh kiểm tra lịch backup phải in ra `false`; lịch
@@ -3047,9 +3156,18 @@ bị timeout, sửa nguyên nhân (xem "Xử lý sự cố khi bật lại"), r�
 mọi dòng từ lệnh chờ đầu tiên trở đi đều chạy lại được an toàn. Với 1 lệnh resize bị fail, xem
 mục 3 ở đó. Lệnh chờ Kafka đọc pod broker chứ không đọc resource `Kafka`, vì condition `Ready` của
 resource này có thể vẫn là `True` từ trước lúc tạm dừng. `--replicas=1` khớp với giá trị `replicas`
-của chart, và timeout 22 phút (giống `scripts/deploy.sh`) dài hơn `progressDeadlineSeconds` 1200s
-của các Deployment dùng DB, con số được tính để vừa với lần khởi động hợp lệ chậm nhất của chúng;
-`kubectl wait` không dừng ở deadline đó, nên 1 service bị kẹt sẽ hiện ra dưới dạng 1 trong các lệnh
+của chart. Các service được chờ bằng `kubectl rollout status`, lệnh này trước hết chờ tới khi
+Deployment controller đã thấy số replica mới: 1 Deployment đã scale về 0 vẫn báo `Available=True`,
+và 1 lệnh `kubectl wait --for=condition=Available` chạy ngay sau lệnh scale có thể đọc giá trị đó
+trước khi controller kịp cập nhật. Lệnh chờ các operator thì không gặp vấn đề này: các Deployment
+của chúng vẫn giữ số replica suốt lúc tạm dừng và mất pod cùng với node, nên mỗi Deployment báo
+`Available=False` cho tới khi có 1 pod mới sẵn sàng. Timeout 22 phút, bằng giá trị timeout của Helm
+trong `scripts/deploy.sh`, ở đây áp dụng lần lượt cho từng Deployment. Nó dài hơn lần khởi động hợp
+lệ chậm nhất của 1 service dùng DB; `progressDeadlineSeconds` 1200s mà chart đặt cho các Deployment
+dùng DB được tính để vừa với lần khởi động đó. Bản thân deadline đó không áp dụng ở đây: Deployment
+controller chỉ kiểm tra nó khi lần rollout gần nhất chưa hoàn tất, còn việc scale lên 1 Deployment
+có lần rollout trước đó đã hoàn tất sẽ để nguyên condition `Progressing` của nó ở reason của lần
+rollout đó, `NewReplicaSetAvailable`. Vì vậy 1 service bị kẹt sẽ hiện ra dưới dạng 1 trong các lệnh
 chờ này bị timeout.
 
 `bash scripts/deploy.sh` (Bước 8) cũng đưa được các service lên lại, nhưng đồng thời deploy luôn

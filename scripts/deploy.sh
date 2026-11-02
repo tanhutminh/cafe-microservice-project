@@ -269,7 +269,9 @@ main() {
   # `build`, not `update`: re-packages the file:// subchart from the current charts/cafe-service
   # (so a stale local .tgz never deploys) against the committed Chart.lock, without rewriting it.
   # `--skip-refresh`: the only dependency is file://, so there is no reason to contact any Helm
-  # repository configured on this machine.
+  # repository configured on this machine. Helm still reads each one's cached index, and fails if
+  # one is missing (docs/gke-cicd-runbook.md, Step 8, "Troubleshooting deploys", the
+  # `cnpg-index.yaml` item).
   helm dependency build --skip-refresh charts/cafe || exit 1
 
   if ! helm upgrade --install cafe charts/cafe -n "$namespace" --kube-context "$kube_context" \

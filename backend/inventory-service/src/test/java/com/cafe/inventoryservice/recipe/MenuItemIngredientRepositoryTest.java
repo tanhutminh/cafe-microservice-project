@@ -3,6 +3,7 @@ package com.cafe.inventoryservice.recipe;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.cafe.inventoryservice.ingredient.Ingredient;
+import com.cafe.inventoryservice.testsupport.ContainerImages;
 import java.math.BigDecimal;
 import java.util.List;
 import org.hibernate.Hibernate;
@@ -37,7 +38,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 class MenuItemIngredientRepositoryTest {
 
   @Container @ServiceConnection
-  static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
+  static final PostgreSQLContainer postgres = new PostgreSQLContainer(ContainerImages.POSTGRES);
 
   @Autowired private TestEntityManager entityManager;
   @Autowired private MenuItemIngredientRepository menuItemIngredientRepository;

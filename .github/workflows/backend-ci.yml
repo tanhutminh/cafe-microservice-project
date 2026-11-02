@@ -308,6 +308,10 @@ jobs:
       # One recipe for all six images (backend/Dockerfile); SERVICE picks the module it builds.
       # The tag hashes none of the settings below: for a change to what they put in the images
       # (build-args, labels, ...) to reach all six, bump `salt` in scripts/image-tag.sh.
+      # The revision label needs no bump although its value changes with every commit: the image a
+      # tag names is never replaced (the check above skips the build, and the repository's
+      # immutable tags refuse a push that would move the tag), so the label names the commit that
+      # built it, not necessarily a later one deployed with the same tag.
       - name: Build and push
         if: steps.exists.outputs.exists == 'false'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

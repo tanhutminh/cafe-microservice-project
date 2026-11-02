@@ -3,14 +3,31 @@
 # Helm chart's memory limit, so the JVM sizes its heap (MaxRAMPercentage in backend/Dockerfile) the
 # same way here as on GKE. memswap_limit, memory plus swap, is the same value, so the container
 # gets no swap: unset, Docker would allow as much swap again, and a container that outgrows its
-# limit would swap here where GKE, whose nodes have no swap by default, kills it.
+# limit would swap here where GKE, whose nodes have no swap by default, kills it. cpus matches the
+# chart's CPU limit, so the JVM sees one processor here as on GKE and sizes its thread pools the
+# same way; a service also starts more slowly than it would without the limit.
+# stop_grace_period is how long Docker waits after SIGTERM before it kills a service being stopped
+# or replaced: 30s, as Kubernetes' default terminationGracePeriodSeconds, which the chart keeps.
+# Docker's own default can be shorter than a service needs to shut down gracefully and exit.
+# The restart policy is unless-stopped, as on postgres, kafka, kafka-ui and zipkin. Docker restarts
+# the container whenever it exits, as Kubernetes restarts a Deployment's containers, and starts it
+# again when the Docker daemon restarts. It does neither for a container stopped by hand
+# (`docker compose stop` or `docker compose kill`). The daemon starts all these containers at once,
+# without depends_on's order or health conditions, so a service that reaches Postgres before it is
+# ready exits and is restarted until it connects.
 x-backend-service: &backend-service
   mem_limit: 512m
   memswap_limit: 512m
+  cpus: 0.5
+  stop_grace_period: 30s
+  restart: unless-stopped
 
 services:
   postgres:
-    image: postgres:16
+    # The comment above the version in k8s/data-layer/postgres-cluster.yaml lists every place to
+    # change with it.
+    image: postgres:18.4
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USERNAME}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -28,17 +45,43 @@ services:
       REPORT_SERVICE_DB_PASSWORD: ${REPORT_SERVICE_DB_PASSWORD}
     ports:
       - "5432:5432"
+    # Since Postgres 18 the image keeps its data in a subdirectory per major version
+    # (/var/lib/postgresql/<major>/docker), so that one volume, mounted at /var/lib/postgresql,
+    # can hold an old and a new major version side by side for pg_upgrade --link. The entrypoint,
+    # though, initializes a new data directory only on a volume that holds no other version's
+    # data, in the old /var/lib/postgresql/data layout or the new one; otherwise it exits. So the
+    # volume is named after the major version: a new major version starts on a new, empty volume,
+    # and moving the data to it takes a dump and restore, or pg_upgrade, which needs both versions'
+    # binaries and so can't run in this image alone.
+    # README.md's "Moving to a new Postgres major version" has the dump-and-restore steps.
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres-init:/docker-entrypoint-initdb.d
+      - postgres18-data:/var/lib/postgresql
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME}"]
+      # Connects to report_db, the last database docker/postgres-init/init-db.sh creates, so the
+      # check passes only once that script has run to the end. If the script fails partway, the
+      # entrypoint exits, the restart policy starts the container again, and the entrypoint, now
+      # finding a data directory, skips the init scripts: the server runs without some services'
+      # roles and databases, and this check keeps it unhealthy, so `docker compose up` stops with
+      # "dependency failed to start" rather than starting the services (README.md's Troubleshooting
+      # has the fix).
+      # -h localhost connects over TCP: while the init scripts run, the entrypoint's temporary
+      # server accepts connections on the Unix socket only, so the check can't pass before the
+      # entrypoint has replaced it with the real server. The image's pg_hba.conf trusts TCP
+      # connections from localhost, so no password is needed. The check logs in as POSTGRES_USER,
+      # a role the image creates only when it initializes a new volume, so changing DB_USERNAME in
+      # .env afterwards makes the check fail until it's changed back.
+      test: ["CMD-SHELL", "psql -h localhost -U \"$${POSTGRES_USER}\" -d report_db -Atc 'SELECT 1'"]
+      start_period: 30s
       interval: 5s
       timeout: 5s
       retries: 10
 
   kafka:
+    # The comment above the version in k8s/data-layer/kafka-cluster.yaml lists every place to
+    # change with it.
     image: apache/kafka:4.3.1
+    restart: unless-stopped
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -67,6 +110,7 @@ services:
 
   kafka-ui:
     image: kafbat/kafka-ui:latest
+    restart: unless-stopped
     environment:
       KAFKA_CLUSTERS_0_NAME: cafe
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
@@ -79,6 +123,7 @@ services:
 
   zipkin:
     image: openzipkin/zipkin:latest
+    restart: unless-stopped
     ports:
       - "9411:9411"
     healthcheck:
@@ -249,4 +294,4 @@ services:
       start_period: 40s
 
 volumes:
-  postgres-data:
+  postgres18-data:
