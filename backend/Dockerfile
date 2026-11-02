@@ -1,13 +1,19 @@
 # One image recipe for every backend service; SERVICE names the module directory to build, e.g.
 #   docker build --build-arg SERVICE=order-service -t cafe-order-service backend
 # The build context is backend/, so the parent pom and every module are in reach.
+# A multi-stage build: the deps and build stages are based on the Maven image, and by default
+# only the last stage, which copies the build's output onto a JRE base image, becomes the image.
 
 # Dependency cache: only the poms are copied, the parent's and one for each <module> it lists, so
 # this stage's go-offline layer is rebuilt only when a pom, the Maven image or this stage itself
-# changes; a code change reuses it and reruns the build stage below.
-# go-offline fetches the reactor's third-party dependencies and plugins, but not the compiler's
-# annotationProcessorPaths (mapstruct-processor, lombok-mapstruct-binding), which the build stage
-# downloads each time it runs, nor the reactor's own modules (common-lib), which it builds itself.
+# changes; a code change reuses it and reruns the build stage below. A new <module> needs its own
+# COPY line here, or Maven stops at once, unable to find that module's pom.
+# go-offline fetches the reactor's third-party dependencies and plugins, but neither the reactor's
+# own modules (common-lib), which the build stage builds itself, nor the compiler's
+# annotationProcessorPaths. Lombok, the only processor, is cached anyway: the modules whose code
+# uses Lombok also declare it as a dependency, at the processor's version, since both take it from
+# the Spring Boot BOM; a processor no module declares would be downloaded on every run of the build
+# stage.
 FROM maven:3.9-eclipse-temurin-21 AS deps
 WORKDIR /build
 COPY pom.xml .
@@ -29,7 +35,7 @@ RUN mvn -B -q dependency:go-offline
 FROM deps AS build
 ARG SERVICE
 # Gives a clear message on a missing SERVICE, but only once the deps stage above is done (normally
-# a cache hit); a misspelt one fails at the COPY below instead, whose source BuildKit checks
+# a cache hit); a misspelled one fails at the COPY below instead, whose source BuildKit checks
 # before this step has run ("/<name>": not found).
 RUN test -n "$SERVICE" && test -d "$SERVICE" \
  || { echo "SERVICE must name a module directory under backend/, e.g. order-service" >&2; exit 1; }

@@ -9,7 +9,7 @@
 # the script is capped by `timeout`, so a runaway loop fails its case rather than hanging. Then
 # reads the Deployment template to check it hands the script the libpq variables its bare `psql`
 # relies on. What isn't tested is real psql/libpq behavior against a live server, or the script
-# inside its postgres:16-alpine initContainer.
+# inside its initContainer's Alpine-based postgres image.
 set -euo pipefail
 
 # An inherited CDPATH would make the relative `cd` below resolve against it instead of here.
@@ -32,7 +32,8 @@ check() {
   fi
 }
 
-# The trap goes in before any mktemp, so a failure part-way through still removes what exists.
+# Everything the suite writes lives under $work. The trap is set before the mktemp, so it is
+# already in place once work is assigned; until then work is empty and the trap removes nothing.
 work=""
 cleanup() {
   rm -rf -- "$work"

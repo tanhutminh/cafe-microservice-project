@@ -15,6 +15,7 @@ import com.cafe.orderservice.order.OrderService;
 import com.cafe.orderservice.outbox.OutboxMessageRepository;
 import com.cafe.orderservice.outbox.OutboxMessageType;
 import com.cafe.orderservice.table.DiningTable;
+import com.cafe.orderservice.testsupport.ContainerImages;
 import java.time.Instant;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -46,9 +47,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * {@code @Header(KafkaHeaders.CORRELATION_ID)} extraction, and topic-to-method dispatch - none of
  * which a mock can exercise. This is a full {@link SpringBootTest} (not a narrower slice)
  * specifically so the real {@code application.yml} Kafka autoconfiguration and {@code
- * KafkaErrorHandlingConfig} are the ones under test, not a hand-assembled substitute. The Kafka
- * image ({@code apache/kafka:4.3.1}) matches {@code docker-compose.yml}'s real deployment image
- * exactly, not just the version.
+ * KafkaErrorHandlingConfig} are the ones under test, not a hand-assembled substitute.
  *
  * <p>{@code OrderService}, {@code OrderSagaStateService}, and {@code OutboxMessageRepository} are
  * mocked: {@code OrderSaga}'s own state-transition decision logic (which branch to take, what to
@@ -118,10 +117,10 @@ class OrderSagaKafkaListenerIntegrationTest {
   private static final long TIMEOUT_MS = 10_000L;
 
   @Container @ServiceConnection
-  static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
+  static final PostgreSQLContainer postgres = new PostgreSQLContainer(ContainerImages.POSTGRES);
 
   @Container @ServiceConnection
-  static final KafkaContainer kafka = new KafkaContainer("apache/kafka:4.3.1");
+  static final KafkaContainer kafka = new KafkaContainer(ContainerImages.KAFKA);
 
   @Autowired private KafkaTemplate<Object, Object> kafkaTemplate;
 

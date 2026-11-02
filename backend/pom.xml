@@ -12,29 +12,40 @@
 
   <properties>
     <java.version>21</java.version>
-    <maven.compiler.source>21</maven.compiler.source>
-    <maven.compiler.target>21</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- One fixed timestamp for the entries of every jar the build writes, Spring Boot's
+         repackaged jar included, instead of the build time, so the same sources built with the
+         same JDK and plugins give byte-identical jars (a reproducible build). maven-jar-plugin
+         accepts a fixed date from 1980-01-01T00:00:02Z to the end of 2099; this one is a month
+         later, so it falls after the zip format's 1980 start in every time zone. -->
+    <project.build.outputTimestamp>1980-02-01T00:00:00Z</project.build.outputTimestamp>
 
     <spring-boot.version>4.1.0</spring-boot.version>
     <spring-cloud.version>2025.1.2</spring-cloud.version>
 
-    <mapstruct.version>1.6.3</mapstruct.version>
     <jjwt.version>0.13.0</jjwt.version>
-    <lombok.version>1.18.46</lombok.version>
     <resilience4j.version>2.3.0</resilience4j.version>
     <springdoc.version>2.8.6</springdoc.version>
+    <!-- The OpenAPI annotations version to compile against where springdoc doesn't supply it. A
+         module with springdoc runs with the version springdoc's swagger-core depends on instead
+         (swagger-api.version in springdoc's parent pom, org.springdoc:springdoc-openapi), so keep
+         this one no newer than that: at runtime the JVM silently drops an annotation or attribute
+         that version lacks, and an attribute set to an enum constant it lacks throws when read. -->
+    <swagger-annotations.version>2.2.29</swagger-annotations.version>
     <mockwebserver.version>4.12.0</mockwebserver.version>
     <jacoco.version>0.8.12</jacoco.version>
     <!-- Minimum LINE coverage enforced by `mvn jacoco:check`: the project's 70% target. A module
          still below it overrides this in its own <properties> with its current floor (a ratchet:
          raise it as coverage improves, never lower it); modules at or above it inherit it. -->
     <jacoco.line.coverage.minimum>0.70</jacoco.line.coverage.minimum>
+    <!-- Empty default for the @{argLine} that maven-surefire-plugin's argLine below extends:
+         jacoco's prepare-agent sets argLine only in the modules that run it, and in the others,
+         without this default, the test JVM would get a literal "@{argLine}" and fail to start. -->
+    <argLine/>
     <spotless.version>2.44.3</spotless.version>
-    <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
+    <maven-compiler-plugin.version>3.15.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.5.6</maven-surefire-plugin.version>
     <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
-    <testcontainers-bom.version>2.0.5</testcontainers-bom.version>
     <google-java-format.version>1.25.2</google-java-format.version>
   </properties>
 
@@ -102,17 +113,6 @@
       </dependency>
 
       <dependency>
-        <groupId>org.mapstruct</groupId>
-        <artifactId>mapstruct</artifactId>
-        <version>${mapstruct.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.mapstruct</groupId>
-        <artifactId>mapstruct-processor</artifactId>
-        <version>${mapstruct.version}</version>
-      </dependency>
-
-      <dependency>
         <groupId>com.squareup.okhttp3</groupId>
         <artifactId>mockwebserver</artifactId>
         <version>${mockwebserver.version}</version>
@@ -149,14 +149,21 @@
     </resources>
     <pluginManagement>
       <plugins>
-        <!-- repackage copies provided-scope dependencies into the jar's BOOT-INF/lib too, but
-             leaves optional ones out (includeOptional defaults to false). A compile-only
-             dependency such as lombok is therefore also marked <optional>true</optional> in each
-             module that declares it, which keeps it out of the jar and so out of the image. -->
+        <!-- repackage copies provided-scope dependencies into the jar's BOOT-INF/lib too, so
+             lombok, which only the compiler needs, is excluded here. That keeps it out of the jar
+             and so out of the image of every module that declares it. -->
         <plugin>
           <groupId>org.springframework.boot</groupId>
           <artifactId>spring-boot-maven-plugin</artifactId>
           <version>${spring-boot.version}</version>
+          <configuration>
+            <excludes>
+              <exclude>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+              </exclude>
+            </excludes>
+          </configuration>
           <executions>
             <execution>
               <goals>
@@ -165,6 +172,11 @@
             </execution>
           </executions>
         </plugin>
+        <!-- Pinned because, left unpinned, compile and testCompile would run the version named
+             by the default lifecycle bindings of the Maven running the build, which can differ
+             between Maven releases. Building this parent pom itself, whose pom packaging binds
+             no compiler, would also look up the newest release for this versionless entry,
+             warning about each Maven 4 beta it skips. -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
@@ -173,20 +185,12 @@
             <release>${java.version}</release>
             <parameters>true</parameters>
             <annotationProcessorPaths>
-              <path>
-                <groupId>org.mapstruct</groupId>
-                <artifactId>mapstruct-processor</artifactId>
-                <version>${mapstruct.version}</version>
-              </path>
+              <!-- No <version>: maven-compiler-plugin 3.12.0 and later take it from
+                   dependencyManagement, here the Spring Boot BOM, so the processor matches the
+                   lombok the modules compile against. -->
               <path>
                 <groupId>org.projectlombok</groupId>
                 <artifactId>lombok</artifactId>
-                <version>${lombok.version}</version>
-              </path>
-              <path>
-                <groupId>org.projectlombok</groupId>
-                <artifactId>lombok-mapstruct-binding</artifactId>
-                <version>0.2.0</version>
               </path>
             </annotationProcessorPaths>
           </configuration>
@@ -227,10 +231,25 @@
             </execution>
           </executions>
         </plugin>
+        <!-- The argLine below extends @{argLine}, which is resolved only when the tests start, so
+             it keeps the -javaagent flag that jacoco's prepare-agent puts in argLine. A value
+             without @{argLine} would replace that flag, and so would ${argLine}: Maven resolves
+             it while building the project model, before prepare-agent runs, to the empty
+             default in <properties>. -Duser.timezone=UTC, which every module's tests get, is there
+             for the ones that start Postgres: the Postgres JDBC driver sends the JVM's default
+             time zone as the TimeZone parameter of each connection, and a Postgres server started
+             by Testcontainers rejects a time zone name its OS's time zone database lacks. The
+             Debian-based postgres image the tests use ships without the tzdata-legacy package, so
+             on a machine whose OS reports an old IANA alias such as Asia/Saigon (now
+             Asia/Ho_Chi_Minh), every connection would fail. Pinned for the same reason as
+             maven-compiler-plugin. -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>${maven-surefire-plugin.version}</version>
+          <configuration>
+            <argLine>@{argLine} -Duser.timezone=UTC</argLine>
+          </configuration>
         </plugin>
         <!-- Bound to no lifecycle phase, so it runs only when one of its goals is invoked
              directly, e.g. `mvn dependency:go-offline`. Pinned because, left unpinned, it would

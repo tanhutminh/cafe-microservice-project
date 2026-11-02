@@ -34,14 +34,17 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      # The pod spec leaves terminationGracePeriodSeconds at Kubernetes' default, 30s, which
+      # docker-compose.yml's stop_grace_period mirrors.
       serviceAccountName: {{ .Values.appName }}
       {{- if .Values.db.enabled }}
       initContainers:
         - name: wait-for-db
-          # Just a psql client for connectivity checks - version-tolerant, doesn't need to
-          # match the actual CNPG-managed server version (see k8s/data-layer/postgres-cluster.yaml,
-          # which is where that version is pinned, via imageName).
-          image: postgres:16-alpine
+          # Provides the shell (BusyBox ash) that runs the script below and the psql it connects
+          # with. psql works across server versions, so this image needn't match the CNPG-managed
+          # server; it is still kept at the same Postgres version that imageName pins in
+          # k8s/data-layer/postgres-cluster.yaml.
+          image: postgres:18.4-alpine
           command: ["/bin/sh", "-c"]
           args:
             # The script lives in files/wait-for-db.sh; `required` fails the render if it's missing.
@@ -97,9 +100,10 @@ spec:
           # Spring Boot auto-activates the /liveness and /readiness health groups when it
           # detects it's running in Kubernetes (via KUBERNETES_SERVICE_HOST) - no extra config
           # needed beyond exposing the base "health" endpoint, already done in each service's
-          # own application.yml. Splitting them matters: readiness (which includes the db
-          # check) can fail transiently on a DB blip without that also failing liveness and
-          # triggering an unnecessary pod restart.
+          # own application.yml. The liveness group holds only livenessState and the readiness
+          # group only readinessState, the application's own availability states, not checks of
+          # external systems such as the database, so a database outage neither restarts the pod
+          # nor takes it out of its Service; requests that need the database fail until it is back.
           startupProbe:
             httpGet: {path: /actuator/health/liveness, port: {{ .Values.port }}}
             periodSeconds: 10

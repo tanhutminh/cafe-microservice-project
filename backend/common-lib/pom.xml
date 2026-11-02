@@ -40,22 +40,18 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-databind</artifactId>
-    </dependency>
-    <dependency>
       <groupId>jakarta.validation</groupId>
       <artifactId>jakarta.validation-api</artifactId>
     </dependency>
+    <!-- Provided: common-lib needs the annotations only to compile and doesn't pass them on. At
+         runtime only springdoc reads them, and it brings this same artifact itself. The version
+         is set here because a dependencyManagement entry would also override the one springdoc
+         brings. -->
     <dependency>
-      <groupId>org.springdoc</groupId>
-      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.projectlombok</groupId>
-      <artifactId>lombok</artifactId>
+      <groupId>io.swagger.core.v3</groupId>
+      <artifactId>swagger-annotations-jakarta</artifactId>
+      <version>${swagger-annotations.version}</version>
       <scope>provided</scope>
-      <optional>true</optional>
     </dependency>
 
     <dependency>

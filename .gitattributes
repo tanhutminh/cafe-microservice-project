@@ -1,5 +1,14 @@
-# Shell scripts run inside Linux containers (Docker init/entrypoint scripts) - a CRLF-converted
-# shebang line (`#!/bin/bash\r`) makes the interpreter path unresolvable ("cannot execute:
-# required file not found"), so these must stay LF regardless of core.autocrlf on any checkout
-# machine.
+# Shell scripts: Git writes them with LF on checkout, whatever core.autocrlf says. A Windows
+# checkout's copies also run or get read under Linux: Docker mounts the Postgres init script into
+# its container, Helm inlines the chart's wait-for-db.sh into the pod, and the runbook's
+# shellcheck command lints the scripts in scripts/ and the charts' files/ in a container.
+# Under Linux each line of a CRLF copy ends in a stray CR. A shebang line (`#!/bin/bash\r`)
+# then names an interpreter that doesn't exist, so the kernel can't run the script (bash reports
+# "cannot execute: required file not found"). A shell that runs the script's text keeps each CR
+# as part of the line's last word.
 *.sh text eol=lf
+# Dockerfile and .dockerignore: Git writes them with LF on checkout, whatever core.autocrlf says,
+# so a build from a Windows checkout reads the same bytes as CI's. A heredoc in a RUN step of a
+# CRLF Dockerfile would hand each of its lines to the Linux shell with a trailing CR.
+Dockerfile text eol=lf
+.dockerignore text eol=lf

@@ -8,8 +8,8 @@
 #
 # psql's error is logged the first time and then only when it changes (not on every 3s retry),
 # and the timeout message repeats the last one, so `kubectl logs <pod> -c wait-for-db` shows why
-# it is still waiting. The clock is `date +%s`, not `$SECONDS`: BusyBox ash (the
-# postgres:16-alpine image's shell) expands `$SECONDS` to an empty string.
+# it is still waiting. The clock is `date +%s`, not `$SECONDS`: BusyBox ash (the shell of the
+# initContainer's Alpine-based postgres image) expands `$SECONDS` to an empty string.
 #
 # Tested by wait-for-db.test.sh.
 start=$(date +%s)

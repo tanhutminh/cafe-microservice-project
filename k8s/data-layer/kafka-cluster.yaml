@@ -51,9 +51,11 @@ metadata:
   # starting 0.48) — harmless to include, not required, left in only for clarity.
 spec:
   kafka:
-    # Pinned to 4.3.1 so upgrading the Strimzi operator cannot silently change the Kafka version
-    # (unset, Strimzi uses the operator's own default). metadataVersion is the KRaft metadata
-    # format; keep it at the level matching `version` until deliberately raised after an upgrade.
+    # Pinned so upgrading the Strimzi operator cannot silently change the Kafka version (unset,
+    # Strimzi uses the operator's own default). metadataVersion is the KRaft metadata format; keep
+    # it at the level matching `version` until deliberately raised after an upgrade.
+    # Change `version` together with docker-compose.yml's Kafka image, order-service's
+    # testsupport/ContainerImages and the version docs/gke-cicd-runbook.md names for this file.
     version: 4.3.1
     metadataVersion: 4.3-IV0
     listeners: [{name: plain, port: 9092, type: internal, tls: false}]   # `type` is the enum value (`internal`); `plain` only names this listener

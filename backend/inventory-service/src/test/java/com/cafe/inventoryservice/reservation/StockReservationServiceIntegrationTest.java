@@ -10,6 +10,7 @@ import com.cafe.inventoryservice.ingredient.Ingredient;
 import com.cafe.inventoryservice.ingredient.IngredientRepository;
 import com.cafe.inventoryservice.recipe.MenuItemIngredient;
 import com.cafe.inventoryservice.recipe.MenuItemIngredientRepository;
+import com.cafe.inventoryservice.testsupport.ContainerImages;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -74,7 +75,7 @@ class StockReservationServiceIntegrationTest {
   private static final long AWAIT_SECONDS = 5;
 
   @Container @ServiceConnection
-  static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16");
+  static final PostgreSQLContainer postgres = new PostgreSQLContainer(ContainerImages.POSTGRES);
 
   @Autowired private IngredientRepository ingredientRepository;
   @Autowired private MenuItemIngredientRepository menuItemIngredientRepository;
