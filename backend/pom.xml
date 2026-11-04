@@ -15,9 +15,10 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!-- One fixed timestamp for the entries of every jar the build writes, Spring Boot's
          repackaged jar included, instead of the build time, so the same sources built with the
-         same JDK and plugins give byte-identical jars (a reproducible build). maven-jar-plugin
-         accepts a fixed date from 1980-01-01T00:00:02Z to the end of 2099; this one is a month
-         later, so it falls after the zip format's 1980 start in every time zone. -->
+         same JDK and plugins give byte-identical jars (a reproducible build).
+         spring-boot-maven-plugin's repackage goal accepts a fixed date from
+         1980-01-01T00:00:02Z to the end of 2099. This one is a month after that lower bound, so
+         it falls after the zip format's 1980 start in every time zone. -->
     <project.build.outputTimestamp>1980-02-01T00:00:00Z</project.build.outputTimestamp>
 
     <spring-boot.version>4.1.0</spring-boot.version>
@@ -45,7 +46,15 @@
     <spotless.version>2.44.3</spotless.version>
     <maven-compiler-plugin.version>3.15.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.5.6</maven-surefire-plugin.version>
-    <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
+    <maven-dependency-plugin.version>3.10.0</maven-dependency-plugin.version>
+    <maven-clean-plugin.version>3.5.0</maven-clean-plugin.version>
+    <maven-resources-plugin.version>3.5.0</maven-resources-plugin.version>
+    <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
+    <maven-install-plugin.version>3.1.4</maven-install-plugin.version>
+    <maven-deploy-plugin.version>3.1.4</maven-deploy-plugin.version>
+    <maven-site-plugin.version>3.22.0</maven-site-plugin.version>
+    <maven-project-info-reports-plugin.version>3.9.0</maven-project-info-reports-plugin.version>
+    <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
     <google-java-format.version>1.25.2</google-java-format.version>
   </properties>
 
@@ -149,9 +158,10 @@
     </resources>
     <pluginManagement>
       <plugins>
-        <!-- repackage copies provided-scope dependencies into the jar's BOOT-INF/lib too, so
-             lombok, which only the compiler needs, is excluded here. That keeps it out of the jar
-             and so out of the image of every module that declares it. -->
+        <!-- Repackages the jar of each module that declares this plugin into an executable one
+             (`java -jar`). The plugin's repackage goal copies provided-scope dependencies into
+             the jar's BOOT-INF/lib too, so lombok, which only the compiler needs, is excluded
+             here. That keeps lombok out of the jar and so out of the module's image. -->
         <plugin>
           <groupId>org.springframework.boot</groupId>
           <artifactId>spring-boot-maven-plugin</artifactId>
@@ -172,11 +182,10 @@
             </execution>
           </executions>
         </plugin>
-        <!-- Pinned because, left unpinned, compile and testCompile would run the version named
-             by the default lifecycle bindings of the Maven running the build, which can differ
-             between Maven releases. Building this parent pom itself, whose pom packaging binds
-             no compiler, would also look up the newest release for this versionless entry,
-             warning about each Maven 4 beta it skips. -->
+        <!-- Compiles each module's main and test sources for the java.version release, running
+             lombok as an annotation processor. <parameters> (javac -parameters) records method
+             parameter names where reflection can read them, so Spring can, e.g., bind a
+             @PathVariable or @RequestParam declared without a name. -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
@@ -231,18 +240,17 @@
             </execution>
           </executions>
         </plugin>
-        <!-- The argLine below extends @{argLine}, which is resolved only when the tests start, so
-             it keeps the -javaagent flag that jacoco's prepare-agent puts in argLine. A value
-             without @{argLine} would replace that flag, and so would ${argLine}: Maven resolves
-             it while building the project model, before prepare-agent runs, to the empty
-             default in <properties>. -Duser.timezone=UTC, which every module's tests get, is there
-             for the ones that start Postgres: the Postgres JDBC driver sends the JVM's default
-             time zone as the TimeZone parameter of each connection, and a Postgres server started
-             by Testcontainers rejects a time zone name its OS's time zone database lacks. The
-             Debian-based postgres image the tests use ships without the tzdata-legacy package, so
-             on a machine whose OS reports an old IANA alias such as Asia/Saigon (now
-             Asia/Ho_Chi_Minh), every connection would fail. Pinned for the same reason as
-             maven-compiler-plugin. -->
+        <!-- Runs each module's tests in a forked JVM. The argLine below extends @{argLine}, which
+             is resolved only when the tests start, so it keeps the -javaagent flag that jacoco's
+             prepare-agent puts in argLine. A value without @{argLine} would replace that flag,
+             and so would ${argLine}: Maven resolves it while building the project model, before
+             prepare-agent runs, to the empty default in <properties>. -Duser.timezone=UTC, which
+             every module's tests get, is there for the ones that start Postgres: the Postgres
+             JDBC driver sends the JVM's default time zone as the TimeZone parameter of each
+             connection, and a Postgres server started by Testcontainers rejects a time zone name
+             its OS's time zone database lacks. The Debian-based postgres image the tests use
+             ships without the tzdata-legacy package, so on a machine whose OS reports an old IANA
+             alias such as Asia/Saigon (now Asia/Ho_Chi_Minh), every connection would fail. -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
@@ -251,22 +259,97 @@
             <argLine>@{argLine} -Duser.timezone=UTC</argLine>
           </configuration>
         </plugin>
-        <!-- Bound to no lifecycle phase, so it runs only when one of its goals is invoked
-             directly, e.g. `mvn dependency:go-offline`. Pinned because, left unpinned, it would
-             get its version from the super POM of the Maven running the build, which can differ
-             between Maven releases. -->
+        <!-- Resolves, copies and analyzes dependencies. Bound to no lifecycle phase, so its goals
+             run only when called directly. For example, `mvn dependency:go-offline` fetches the
+             reactor's third-party dependencies and plugins into the local repository
+             (~/.m2/repository). -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-dependency-plugin</artifactId>
           <version>${maven-dependency-plugin.version}</version>
         </plugin>
+        <!-- Deletes target/ in this parent and in each module (`mvn clean`). -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-clean-plugin</artifactId>
+          <version>${maven-clean-plugin.version}</version>
+        </plugin>
+        <!-- Copies any src/main/resources of a module, minus the excludes in <resources> above,
+             into its target/classes, and any src/test/resources into its target/test-classes. -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-resources-plugin</artifactId>
+          <version>${maven-resources-plugin.version}</version>
+        </plugin>
+        <!-- Packages each module's compiled classes and resources into its jar. -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>${maven-jar-plugin.version}</version>
+        </plugin>
+        <!-- Copies this parent's and each module's built artifacts into the local repository. -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-install-plugin</artifactId>
+          <version>${maven-install-plugin.version}</version>
+        </plugin>
+        <!-- Uploads this parent's and each module's built artifacts to a remote repository. This
+             build configures none. -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-deploy-plugin</artifactId>
+          <version>${maven-deploy-plugin.version}</version>
+        </plugin>
+        <!-- Generates the project site (`mvn site`). -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-site-plugin</artifactId>
+          <version>${maven-site-plugin.version}</version>
+        </plugin>
+        <!-- Generates the project-information reports of `mvn site`, e.g. the pages listing
+             the modules, dependencies and plugins. -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-project-info-reports-plugin</artifactId>
+          <version>${maven-project-info-reports-plugin.version}</version>
+        </plugin>
       </plugins>
     </pluginManagement>
-    <!-- Active (not just managed) so every module inherits it automatically with no
-         per-module opt-in - unlike jacoco above, a formatter should apply uniformly to all
-         Java code, not be selectively enabled. `mvn spotless:check` (read-only, what the
-         pre-commit hook runs) / `mvn spotless:apply` (rewrites files in place). -->
     <plugins>
+      <!-- Checks three rules at validate, the default lifecycle's first phase. They therefore
+           run in every build that runs a phase of that lifecycle (e.g. `mvn test`).
+           requirePluginVersions fails the build when a plugin of the build has no fixed version
+           in this parent's or a module's pom. requireMavenVersion fails the build when Maven is
+           older than 3.9, and requireJavaVersion when the JDK is older than the java.version
+           property. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <version>${maven-enforcer-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>enforce-build-rules</id>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <requirePluginVersions/>
+                <requireMavenVersion>
+                  <version>[3.9,)</version>
+                </requireMavenVersion>
+                <requireJavaVersion>
+                  <version>[${java.version},)</version>
+                </requireJavaVersion>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- Active (not just managed) so every module inherits it automatically with no
+           per-module opt-in - unlike jacoco above, a formatter should apply uniformly to all
+           Java code, not be selectively enabled. `mvn spotless:check` (read-only, what the
+           pre-commit hook runs) / `mvn spotless:apply` (rewrites files in place). -->
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
