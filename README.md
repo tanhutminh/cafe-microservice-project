@@ -330,6 +330,9 @@ Each service's operational config lives directly in that service's own `src/main
 ## Prerequisites
 
 - Java 21
+- Maven 3.9+ — to build, test and format-check the backend outside a Docker image build, as the
+  local git hooks do (see [Testing](#testing) and [Code formatting](#code-formatting));
+  `backend/pom.xml` enforces this floor and Java's on builds and test runs
 - Node.js 20+ (Angular 21 / npm 11)
 - Docker & Docker Compose
 - Helm 4.1.1+, kubectl and gcloud, and access to the GKE cluster — only needed for the
@@ -804,6 +807,10 @@ Config vận hành của mỗi service nằm thẳng trong `src/main/resources/a
 ## Yêu cầu môi trường
 
 - Java 21
+- Maven 3.9+ — để build, chạy test và kiểm tra định dạng backend ngoài bước build Docker image,
+  như cách các git hook ở máy local làm (xem mục [Kiểm thử](#kiểm-thử-testing) và
+  [Định dạng code](#định-dạng-code-code-formatting)); `backend/pom.xml` bắt buộc mức tối thiểu
+  này và cả mức tối thiểu của Java khi build và chạy test
 - Node.js 20+ (Angular 21 / npm 11)
 - Docker & Docker Compose
 - Helm 4.1.1+, kubectl và gcloud, và quyền truy cập cluster GKE — chỉ cần cho việc deploy
