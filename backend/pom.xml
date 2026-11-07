@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.cafe</groupId>
@@ -9,6 +7,16 @@
   <version>0.1.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>cafe-backend</name>
+
+  <modules>
+    <module>common-lib</module>
+    <module>gateway</module>
+    <module>auth-service</module>
+    <module>menu-service</module>
+    <module>order-service</module>
+    <module>inventory-service</module>
+    <module>report-service</module>
+  </modules>
 
   <properties>
     <java.version>21</java.version>
@@ -56,17 +64,8 @@
     <maven-project-info-reports-plugin.version>3.9.0</maven-project-info-reports-plugin.version>
     <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
     <google-java-format.version>1.25.2</google-java-format.version>
+    <sortpom-sorter.version>4.0.0</sortpom-sorter.version>
   </properties>
-
-  <modules>
-    <module>common-lib</module>
-    <module>gateway</module>
-    <module>auth-service</module>
-    <module>menu-service</module>
-    <module>order-service</module>
-    <module>inventory-service</module>
-    <module>report-service</module>
-  </modules>
 
   <dependencyManagement>
     <dependencies>
@@ -182,10 +181,10 @@
             </execution>
           </executions>
         </plugin>
-        <!-- Compiles each module's main and test sources for the java.version release, running
-             lombok as an annotation processor. <parameters> (javac -parameters) records method
-             parameter names where reflection can read them, so Spring can, e.g., bind a
-             @PathVariable or @RequestParam declared without a name. -->
+        <!-- Compiles each module's main and test sources for the Java release in the java.version
+             property, running lombok as an annotation processor. <parameters> (javac -parameters)
+             records method parameter names where reflection can read them, so Spring can bind,
+             for example, a @PathVariable or @RequestParam declared without a name. -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
@@ -233,10 +232,10 @@
             </execution>
             <execution>
               <id>jacoco-report</id>
-              <phase>test</phase>
               <goals>
                 <goal>report</goal>
               </goals>
+              <phase>test</phase>
             </execution>
           </executions>
         </plugin>
@@ -259,10 +258,11 @@
             <argLine>@{argLine} -Duser.timezone=UTC</argLine>
           </configuration>
         </plugin>
-        <!-- Resolves, copies and analyzes dependencies. Bound to no lifecycle phase, so its goals
-             run only when called directly. For example, `mvn dependency:go-offline` fetches the
-             reactor's third-party dependencies and plugins into the local repository
-             (~/.m2/repository). -->
+        <!-- Resolves, copies and analyzes dependencies. This build binds none of this plugin's
+             goals to a lifecycle phase, so they run only when called directly. For example,
+             `mvn dependency:go-offline` fetches the reactor's third-party dependencies into the
+             local repository (~/.m2/repository). It also fetches every plugin with a goal bound to
+             a lifecycle phase in this parent or a module. -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-dependency-plugin</artifactId>
@@ -313,15 +313,52 @@
           <artifactId>maven-project-info-reports-plugin</artifactId>
           <version>${maven-project-info-reports-plugin.version}</version>
         </plugin>
+        <!-- Checks (`mvn spotless:check`) or fixes (`mvn spotless:apply`) the format of each
+             module's Java sources and of this parent's and each module's pom.xml. Java sources
+             follow google-java-format, and sortpom formats each pom.xml. This build binds none of
+             Spotless's goals to a lifecycle phase, so they run only when called directly. -->
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>${spotless.version}</version>
+          <configuration>
+            <!-- Limits both goals to the files changed since the current branch forked from
+                 origin/master. A file nobody touches keeps its current format, so no single
+                 reformat-everything diff buries real changes. -->
+            <ratchetFrom>origin/master</ratchetFrom>
+            <java>
+              <googleJavaFormat>
+                <version>${google-java-format.version}</version>
+                <style>GOOGLE</style>
+              </googleJavaFormat>
+            </java>
+            <!-- sortpom sorts the elements of each pom.xml by the predefined sort order
+                 recommended_2008_06. That order follows Maven's POM code convention for the
+                 top-level elements and sortpom's own order for nested ones. Repeated elements,
+                 such as each <dependency>, keep their order. sortpom also re-indents the file.
+                 It writes each empty element in short form, as in <argLine/>. It writes the
+                 <project> start tag on one line. The <quiet> setting hides sortpom's info logs. -->
+            <pom>
+              <sortPom>
+                <version>${sortpom-sorter.version}</version>
+                <predefinedSortOrder>recommended_2008_06</predefinedSortOrder>
+                <expandEmptyElements>false</expandEmptyElements>
+                <quiet>true</quiet>
+              </sortPom>
+            </pom>
+          </configuration>
+        </plugin>
       </plugins>
     </pluginManagement>
     <plugins>
       <!-- Checks three rules at validate, the default lifecycle's first phase. They therefore
            run in every build that runs a phase of that lifecycle (e.g. `mvn test`).
            requirePluginVersions fails the build when a plugin of the build has no fixed version
-           in this parent's or a module's pom. requireMavenVersion fails the build when Maven is
-           older than 3.9, and requireJavaVersion when the JDK is older than the java.version
-           property. -->
+           in this parent's or a module's pom. It skips a plugin that only <pluginManagement>
+           declares and whose goals this build binds to no lifecycle phase. Its
+           <additionalPlugins> list therefore names each such plugin. requireMavenVersion fails
+           the build when Maven is older than 3.9, and requireJavaVersion when the JDK is older
+           than the java.version property. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-enforcer-plugin</artifactId>
@@ -334,7 +371,13 @@
             </goals>
             <configuration>
               <rules>
-                <requirePluginVersions/>
+                <requirePluginVersions>
+                  <additionalPlugins>
+                    <additionalPlugin>com.diffplug.spotless:spotless-maven-plugin</additionalPlugin>
+                    <additionalPlugin>org.apache.maven.plugins:maven-dependency-plugin</additionalPlugin>
+                    <additionalPlugin>org.apache.maven.plugins:maven-project-info-reports-plugin</additionalPlugin>
+                  </additionalPlugins>
+                </requirePluginVersions>
                 <requireMavenVersion>
                   <version>[3.9,)</version>
                 </requireMavenVersion>
@@ -345,27 +388,6 @@
             </configuration>
           </execution>
         </executions>
-      </plugin>
-      <!-- Active (not just managed) so every module inherits it automatically with no
-           per-module opt-in - unlike jacoco above, a formatter should apply uniformly to all
-           Java code, not be selectively enabled. `mvn spotless:check` (read-only, what the
-           pre-commit hook runs) / `mvn spotless:apply` (rewrites files in place). -->
-      <plugin>
-        <groupId>com.diffplug.spotless</groupId>
-        <artifactId>spotless-maven-plugin</artifactId>
-        <version>${spotless.version}</version>
-        <configuration>
-          <!-- Only enforces format on files that differ from master - the pre-existing
-               codebase keeps its current formatting until a file is touched again, instead
-               of one big reformat-everything diff burying real changes in noise. -->
-          <ratchetFrom>origin/master</ratchetFrom>
-          <java>
-            <googleJavaFormat>
-              <version>${google-java-format.version}</version>
-              <style>GOOGLE</style>
-            </googleJavaFormat>
-          </java>
-        </configuration>
       </plugin>
     </plugins>
   </build>

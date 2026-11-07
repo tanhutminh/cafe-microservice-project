@@ -433,7 +433,7 @@ Modules that opt into the `jacoco-maven-plugin` (declared once in the parent pom
 
 ## Code formatting
 
-Backend uses [Spotless](https://github.com/diffplug/spotless) with Google Java Format, declared once (as an active plugin, not just `pluginManagement`) in the parent `backend/pom.xml` — every module inherits it automatically, no per-module opt-in needed:
+Backend uses [Spotless](https://github.com/diffplug/spotless) to format the Java sources with [Google Java Format](https://github.com/google/google-java-format) and each `pom.xml` with [sortpom](https://github.com/Ekryd/sortpom). Spotless is configured once, in the `pluginManagement` of the parent `backend/pom.xml`, and no module declares the plugin. No lifecycle phase runs its goals, so `mvn test` doesn't check formatting. A goal called directly takes the plugin's version and configuration from that `pluginManagement` entry. Run from `backend/`, the goals below cover the parent pom and every module:
 
 ```bash
 cd backend
@@ -442,6 +442,8 @@ mvn spotless:apply   # rewrites files in place to fix it
 ```
 
 Spotless's `ratchetFrom` setting (`origin/master`) limits both goals to files changed since the current branch forked from `origin/master` — committed, staged or unstaged — plus new untracked files.
+
+For a `pom.xml`, sortpom applies the predefined sort order `recommended_2008_06`. Top-level elements follow [Maven's POM code convention](https://maven.apache.org/developers/conventions/code.html#POM_Code_Convention), and nested elements follow sortpom's own order. Repeated elements, such as each `<dependency>`, keep their order. sortpom also re-indents the file. It writes each empty element in short form, as in `<argLine/>`. It puts the `<project>` start tag on one line.
 
 Frontend uses [Prettier](https://prettier.io/), configured via `frontend/.prettierrc`. Prettier has no equivalent of Spotless's `ratchetFrom`, so the commands below apply the same rule themselves, passing Prettier only the files changed since the current branch forked from `origin/master`, plus new untracked ones:
 
@@ -911,7 +913,7 @@ Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement
 
 ## Định dạng code (Code formatting)
 
-Backend dùng [Spotless](https://github.com/diffplug/spotless) với Google Java Format, khai báo 1 lần (dạng plugin chủ động, không chỉ `pluginManagement`) ở pom cha `backend/pom.xml` — mọi module con tự động kế thừa, không cần opt-in riêng từng module:
+Backend dùng [Spotless](https://github.com/diffplug/spotless) để định dạng mã nguồn Java theo [Google Java Format](https://github.com/google/google-java-format) và từng file `pom.xml` bằng [sortpom](https://github.com/Ekryd/sortpom). Spotless được cấu hình 1 lần, trong `pluginManagement` của pom cha `backend/pom.xml`, và không module nào khai báo plugin này. Không lifecycle phase nào chạy các goal của nó, nên `mvn test` không kiểm tra định dạng. Một goal được gọi trực tiếp lấy version và cấu hình của plugin từ entry đó trong `pluginManagement`. Chạy từ `backend/`, các goal dưới đây bao quát pom cha và mọi module:
 
 ```bash
 cd backend
@@ -920,6 +922,8 @@ mvn spotless:apply   # tự viết lại file cho đúng định dạng
 ```
 
 Cấu hình `ratchetFrom` của Spotless (`origin/master`) giới hạn cả 2 goal vào các file đã thay đổi kể từ khi nhánh hiện tại tách ra từ `origin/master` — dù đã commit, đã stage hay chưa stage — cộng các file mới chưa được track.
+
+Với `pom.xml`, sortpom dùng thứ tự định sẵn (predefined sort order) `recommended_2008_06`. Các phần tử cấp cao nhất tuân theo [quy ước code POM của Maven](https://maven.apache.org/developers/conventions/code.html#POM_Code_Convention), còn các phần tử lồng bên trong theo thứ tự riêng của sortpom. Các phần tử lặp lại, như từng `<dependency>`, vẫn giữ nguyên thứ tự. sortpom cũng thụt lề lại file. Nó viết mỗi phần tử rỗng ở dạng rút gọn, như `<argLine/>`. Thẻ mở `<project>` được đưa về 1 dòng.
 
 Frontend dùng [Prettier](https://prettier.io/), cấu hình tại `frontend/.prettierrc`. Prettier không có tính năng tương đương `ratchetFrom` của Spotless, nên các lệnh dưới đây tự áp dụng cùng quy tắc đó, chỉ đưa cho Prettier các file đã thay đổi kể từ khi nhánh hiện tại tách ra từ `origin/master`, cộng các file mới chưa được track:
 
