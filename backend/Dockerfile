@@ -8,12 +8,14 @@
 # this stage's go-offline layer is rebuilt only when a pom, the Maven image or this stage itself
 # changes; a code change reuses it and reruns the build stage below. A new <module> needs its own
 # COPY line here, or Maven stops at once, unable to find that module's pom.
-# go-offline fetches the reactor's third-party dependencies and plugins, but neither the reactor's
-# own modules (common-lib), which the build stage builds itself, nor the compiler's
-# annotationProcessorPaths. Lombok, the only processor, is cached anyway: the modules whose code
-# uses Lombok also declare it as a dependency, at the processor's version, since both take it from
-# the Spring Boot BOM; a processor no module declares would be downloaded on every run of the build
-# stage.
+#
+# go-offline fetches the reactor's third-party dependencies and every plugin with a goal bound to a
+# lifecycle phase in the parent or a module. It fetches neither the reactor's own modules
+# (common-lib), which the build stage builds itself, nor the compiler's annotationProcessorPaths.
+# Lombok, the only processor, is cached anyway, because the modules whose code uses Lombok also
+# declare it as a dependency. That dependency and the processor path both take Lombok's version
+# from the Spring Boot BOM, so they match. A processor that no module declares would be downloaded
+# on every run of the build stage.
 FROM maven:3.9-eclipse-temurin-21 AS deps
 WORKDIR /build
 COPY pom.xml .
