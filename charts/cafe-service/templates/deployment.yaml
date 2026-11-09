@@ -44,7 +44,7 @@ spec:
           # with. psql works across server versions, so this image needn't match the CNPG-managed
           # server; it is still kept at the same Postgres version that imageName pins in
           # k8s/data-layer/postgres-cluster.yaml.
-          image: postgres:18.4-alpine
+          image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
           command: ["/bin/sh", "-c"]
           args:
             # The script lives in files/wait-for-db.sh; `required` fails the render if it's missing.

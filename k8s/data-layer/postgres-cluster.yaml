@@ -6,17 +6,20 @@ metadata:
   labels: {app.kubernetes.io/managed-by: kubectl}
 spec:
   instances: 1
-  # Pins the Postgres image by its immutable tag (`<version>-<YYYYMMDDHHMM>-<flavor>-<os>`), so
-  # neither a CNPG operator upgrade (unset, CNPG uses the operator's own default) nor a CVE
-  # rebuild of upstream's rolling tag (`<version>-standard-trixie`) can change what runs. The
-  # `standard` flavor is the one upstream recommends together with the Barman Cloud plugin this
-  # cluster uses (see `plugins` below); the older `system` flavor is deprecated. To take a newer
-  # build or minor version, pick a tag from ghcr.io/cloudnative-pg/postgresql and change this.
-  # Change it together with the same Postgres version in docker-compose.yml (for a new major
-  # version, also its postgres<major>-data volume name and README.md's mentions of the volumes),
-  # in charts/cafe-service/templates/deployment.yaml (wait-for-db) and in order-service's and
-  # inventory-service's testsupport/ContainerImages, and with the version
-  # docs/gke-cicd-runbook.md names for this file.
+  # Pins the Postgres image by digest, after its dated build tag
+  # (`<version>-<YYYYMMDDHHMM>-<flavor>-<os>`), so neither a CNPG operator upgrade (unset, CNPG
+  # uses the operator's own default) nor a CVE rebuild of upstream's rolling tag
+  # (`<version>-standard-trixie`) can change what runs. The `standard` flavor is the one upstream
+  # recommends together with the Barman Cloud plugin this cluster uses (see `plugins` below); the
+  # older `system` flavor is deprecated. To take a newer build or minor version, pick a tag from
+  # ghcr.io/cloudnative-pg/postgresql and change both the tag and its digest.
+  # Change `imageName` together with these, each kept at the same Postgres version:
+  # - docker-compose.yml's postgres image: its tag and digest. For a new major version, also the
+  #   postgres<major>-data volume name and README.md's mentions of the volumes.
+  # - charts/cafe-service/values.yaml's initContainer.image.tag (wait-for-db): the -alpine tag
+  #   and its own digest.
+  # - order-service's and inventory-service's testsupport/ContainerImages: compose's digest.
+  # - the version docs/gke-cicd-runbook.md names for this file.
   # A new build or minor version triggers a rolling update, but with `instances: 1` there is
   # nothing to roll: no replica to upgrade first and no switchover target, so CNPG restarts the
   # single primary pod in place (`primaryUpdateMethod` defaults to `restart` rather than
@@ -35,7 +38,7 @@ spec:
   # name's prefix, so delete the old prefix once the retention window has passed since the
   # upgrade. Step 6 of docs/gke-cicd-runbook.md has the scheme for the new name and the delete
   # command.
-  imageName: ghcr.io/cloudnative-pg/postgresql:18.4-202608130737-standard-trixie
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.4-202608130737-standard-trixie@sha256:ebf3919504d7523a63e8e2fee9b051211de714644b36469275558c624afd50ec
   # Sized above a typical app service's defaults (charts/cafe-service/values.yaml: 100m/500m cpu,
   # 256Mi/512Mi memory) since this one Postgres instance is the real backbone for all 5 service
   # DBs under actual load, not a single stateless service. CNPG does not derive shared_buffers or

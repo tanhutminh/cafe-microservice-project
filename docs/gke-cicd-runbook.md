@@ -59,9 +59,10 @@ are written as plain bash. On Git Bash for Windows, `gcloud` needs `CLOUDSDK_PYT
 - `gitleaks` (only needed if you ever move the dev JWT keypair, or another `.gitleaksignore`-listed
   credential, to a different file/line and must regenerate fingerprints — see `.gitleaksignore`
   below; CI itself runs it via `gitleaks/gitleaks-action`, no local install needed for the pipeline).
-- `docker` with Docker Compose (only needed locally, for Step 9: to run the pinned shellcheck
-  lint, whose image CI runs itself, and to build all 6 images with `docker compose build`, which
-  no PR check does).
+- `docker` with Docker Compose and Buildx (only needed locally, for Step 9: to run the pinned
+  shellcheck lint, whose image CI runs itself, and to build all 6 images with
+  `docker compose build`, which no PR check does). It also reads a new image's digest when a pin
+  is bumped (`docker buildx imagetools inspect`, see "Pinned images").
 - `gke-gcloud-auth-plugin` on your `PATH` (check with `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` and `cmctl` all need it to talk to a GKE cluster. Install it with
   `gcloud components install gke-gcloud-auth-plugin` (standalone SDK / Windows installer) or, with
@@ -530,8 +531,8 @@ Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
     driver's `secretObjects` mapping (enabled in Step 3; defined in Step 7's
     `secretproviderclass.yaml`);
   - `imageName` pins the Postgres image (18.4, `standard` flavor, the one upstream recommends
-    with the Barman Cloud Plugin) by an immutable timestamped tag, so neither upgrading the CNPG
-    operator nor a CVE rebuild of upstream's rolling tag can silently change what runs. With
+    with the Barman Cloud Plugin) by digest, after its dated build tag, so neither upgrading the
+    CNPG operator nor a CVE rebuild of upstream's rolling tag can silently change what runs. With
     `instances: 1`, a new build or minor version restarts the single instance (a short outage),
     while a new major version runs CNPG's offline in-place major upgrade, which keeps Postgres
     down until `pg_upgrade` ends. A major upgrade needs a backup first (the backup block in
@@ -592,6 +593,10 @@ Key values (full schema: [values.yaml](https://github.com/tanhutminh/cafe-micros
   `latest` tag, only content-hash ones, so a deploy that forgets to override it fails loudly
   instead of silently trying to pull a tag that doesn't exist. Step 8 sets it per service via
   `--set-string <alias>.image.tag=<content-hash-tag>`.
+- `initContainer.image` — the `wait-for-db` initContainer's `postgres` image from Docker Hub,
+  pinned by digest inside `tag` (`<version>-alpine@sha256:…`). Unlike `image`, it doesn't use
+  `global.imageRegistry`. Change it together with the Postgres version in
+  `k8s/data-layer/postgres-cluster.yaml`, whose comment above `imageName` lists every place.
 - `resources.limits.memory` (`512Mi`) also sizes the JVM heap: `backend/Dockerfile` sets
   `-XX:MaxRAMPercentage=50.0`, so the heap is half of this limit (about 256 MiB) and grows with
   it. `docker-compose.yml`'s `mem_limit` and `memswap_limit` mirror it, so change them together.
@@ -1090,22 +1095,23 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   `common-lib`, the parent pom and `backend/Dockerfile`, the one recipe all 6 images are built from
   with `--build-arg SERVICE=<service>`; see the script's own header comment for what that
   deliberately excludes and for the `salt` constant — bump it to force every service's tag to
-  change when nothing in those hashed inputs did, e.g. after a base-image tag moved), check
-  whether Artifact Registry already has an image at that tag (`docker manifest inspect`), and only
-  build+push if not. This makes the job idempotent: a `workflow_dispatch` run on `master`, or any
-  later push to `master` on which `test` runs, builds whatever is missing once that run's own Maven
-  checks pass, regardless of what did or didn't get rebuilt on any prior run — including content
-  left unbuilt because an earlier run's `test` job failed, which a plain "did this commit touch this
-  service" check would otherwise permanently miss. A push on which `test` doesn't run (say, docs
-  only) builds nothing, so after a failed run, trigger `workflow_dispatch` on `master` if the images
-  are needed before the next backend change. The repository's immutable tags (GCP setup above)
-  refuse any push that would move an existing tag, so if `docker manifest inspect` fails transiently
-  for an image that does exist, the rebuilt image (with a different digest) is refused and the job
-  fails — rerun the failed job. Two runs of this job never work on the same service at once (a
-  per-service `concurrency` group), so two `master` runs close together don't both rebuild an
-  unchanged service and have the second push refused. With `queue: max`, runs of this job for one
-  service wait in the group rather than replacing each other, so whichever runs second checks only
-  after the first has finished, and skips the build if the first pushed the image.
+  change when nothing in those hashed inputs did, e.g. after a change to the build arguments or
+  labels the workflow passes), check whether Artifact Registry already has an image at that tag
+  (`docker manifest inspect`), and only build+push if not. This makes the job idempotent: a
+  `workflow_dispatch` run on `master`, or any later push to `master` on which `test` runs, builds
+  whatever is missing once that run's own Maven checks pass, regardless of what did or didn't get
+  rebuilt on any prior run — including content left unbuilt because an earlier run's `test` job
+  failed, which a plain "did this commit touch this service" check would otherwise permanently
+  miss. A push on which `test` doesn't run (say, docs only) builds nothing, so after a failed run,
+  trigger `workflow_dispatch` on `master` if the images are needed before the next backend change.
+  The repository's immutable tags (GCP setup above) refuse any push that would move an existing
+  tag, so if `docker manifest inspect` fails transiently for an image that does exist, the rebuilt
+  image (with a different digest) is refused and the job fails — rerun the failed job. Two runs of
+  this job never work on the same service at once (a per-service `concurrency` group), so two
+  `master` runs close together don't both rebuild an unchanged service and have the second push
+  refused. With `queue: max`, runs of this job for one service wait in the group rather than
+  replacing each other, so whichever runs second checks only after the first has finished, and
+  skips the build if the first pushed the image.
 
 Every job sets `timeout-minutes` (5 to 20 minutes, against GitHub's 360-minute default), so a hung
 image pull or push fails the check instead of holding a required status pending for hours; the
@@ -1126,6 +1132,49 @@ full history rather than just the pushed commits) would fail on a secret the pro
 decided to keep public. Regenerate its fingerprints with `gitleaks detect --report-format json`
 if that keypair, or any other already-accepted dev credential, is ever moved to a different file
 or line.
+
+### Pinned images
+
+Every third-party container image in the repo's own files is pinned by digest. The digest follows
+a version tag in `backend/Dockerfile`'s Maven and JRE images, the four images in
+`docker-compose.yml`, the chart's `initContainer.image`, CNPG's `imageName` and the workflow's
+shellcheck image. With both a tag and a digest, Docker and Kubernetes use the digest alone, so a
+tag changed without its digest still runs the old image. Each digest is the one the registry
+reported for its tag at pinning time. For a multi-platform image that is its index, so Docker and
+Kubernetes still pick the variant for the machine's own platform.
+
+By its publisher's convention, a CNPG dated build tag never moves to a different image. Nothing in
+the registry enforces that, though, so `imageName` still carries a digest. Unlike Docker and
+Kubernetes, CNPG reads that tag. It takes the Postgres major version from it to decide on a major
+upgrade. Its webhook refuses an `imageName` without a tag. The pod still runs the image the digest
+names, so the tag and the digest must always name the same image.
+
+The Testcontainers tests' `ContainerImages` classes hold the same Postgres and Kafka digests as
+`docker-compose.yml`, without a tag, because Testcontainers rejects a tag and a digest together.
+
+No tool updates these pins, so a fix in a newer image arrives only when the image is bumped by
+hand. Besides new versions, Docker Official Images (here `postgres`, `maven` and
+`eclipse-temurin`) are rebuilt under an unchanged version tag, for example when their base image
+is updated. To take such a rebuild, read the same tag's digest again. To move to a newer version,
+pick its tag first, then read its digest, here for Postgres 18.5:
+
+```bash
+docker buildx imagetools inspect postgres:18.5 | grep -m1 '^Digest:'
+```
+
+Never change a tag without its digest. Postgres and Kafka appear in several files: the comment
+above `imageName` in `k8s/data-layer/postgres-cluster.yaml` and the one above `version` in
+`k8s/data-layer/kafka-cluster.yaml` list them all. The shellcheck image appears in the workflow and
+in the local lint command under "What the workflow does". Bumping the Maven or JRE image changes
+`backend/Dockerfile`, so all six services' image tags change and the next `build-and-push`
+rebuilds all six.
+
+Not pinned by digest in this repo: what Step 3 installs. Each chart or manifest version chooses
+its images, mostly by tag. Those components also choose the images they start themselves, such as
+Strimzi's Kafka broker image, which Strimzi picks for `version`, and the Barman Cloud Plugin's
+sidecar. Also not pinned by digest: Testcontainers' own Ryuk container (it follows the
+Testcontainers version), the GitHub runner (`ubuntu-latest`) and the BuildKit builder that
+`build-and-push` sets up.
 
 ### Branch protection
 
@@ -1859,9 +1908,10 @@ mục "Yêu cầu môi trường").
 - `gitleaks` (chỉ cần khi bạn di chuyển cặp khoá JWT dev, hay bất kỳ credential nào khác nằm trong
   `.gitleaksignore`, sang file/dòng khác và phải tạo lại fingerprint — xem `.gitleaksignore` bên
   dưới; bản thân CI chạy nó qua `gitleaks/gitleaks-action`, không cần cài local cho pipeline).
-- `docker` cùng Docker Compose (chỉ cần ở local, cho Bước 9: để chạy lint shellcheck đã pin bằng
-  đúng image mà CI tự chạy, và để build cả 6 image bằng `docker compose build`, việc mà không
-  kiểm tra nào của PR làm).
+- `docker` cùng Docker Compose và Buildx (chỉ cần ở local, cho Bước 9: để chạy lint shellcheck đã
+  pin bằng đúng image mà CI tự chạy, và để build cả 6 image bằng `docker compose build`, việc mà
+  không kiểm tra nào của PR làm). Nó cũng được dùng để lấy digest của image mới khi nâng 1 image
+  đã pin (`docker buildx imagetools inspect`, xem "Các image được pin").
 - `gke-gcloud-auth-plugin` nằm trong `PATH` (kiểm tra bằng `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` và `cmctl` đều cần nó để nói chuyện với cluster GKE. Cài bằng
   `gcloud components install gke-gcloud-auth-plugin` (SDK độc lập / bộ cài Windows) hoặc, nếu
@@ -2329,14 +2379,14 @@ và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-pr
     service, đồng bộ từ 2 secret GSM `{service}-db-username`/`-db-password` ở Bước 4 qua cơ chế
     map `secretObjects` của CSI driver (bật ở Bước 3; định nghĩa ở `secretproviderclass.yaml`
     của Bước 7);
-  - `imageName` ghim image Postgres (18.4, flavor `standard` — flavor upstream khuyên dùng cùng
-    Barman Cloud Plugin) bằng 1 tag bất biến có timestamp, nên cả việc nâng cấp operator CNPG lẫn
-    việc rebuild vá CVE của tag rolling upstream đều không thể âm thầm đổi thứ đang chạy. Với
-    `instances: 1`, 1 bản build hoặc minor version mới sẽ restart instance duy nhất (gián đoạn
-    ngắn), còn 1 major version mới sẽ chạy offline in-place major upgrade của CNPG: Postgres ngừng
-    cho tới khi `pg_upgrade` chạy xong. 1 major upgrade cần backup trước (block backup trong "Tạm
-    dừng") cùng 1 `serverName` mới trong `parameters` của plugin, đặt trong cùng lần sửa
-    `imageName`: tên `cafe-postgres-rN` đầu tiên (`cafe-postgres-r1`, `-r2`, …) mà
+  - `imageName` pin image Postgres (18.4, flavor `standard` — flavor upstream khuyên dùng cùng
+    Barman Cloud Plugin) theo digest, đi kèm tag build có ghi ngày, nên dù nâng cấp operator CNPG
+    hay upstream build lại tag rolling để vá CVE, image Postgres đang chạy cũng không bị âm thầm
+    thay đổi. Với `instances: 1`, 1 bản build hoặc minor version mới sẽ restart instance duy nhất
+    (gián đoạn ngắn), còn 1 major version mới sẽ chạy offline in-place major upgrade của CNPG:
+    Postgres ngừng cho tới khi `pg_upgrade` chạy xong. 1 major upgrade cần backup trước (block
+    backup trong "Tạm dừng") cùng 1 `serverName` mới trong `parameters` của plugin, đặt trong cùng
+    lần sửa `imageName`: tên `cafe-postgres-rN` đầu tiên (`cafe-postgres-r1`, `-r2`, …) mà
     `gcloud storage ls gs://cafe-microservices-cafe-pg-backups/` không liệt kê (comment phía trên
     `imageName` trong file giải thích lý do). 1 backup tạo trước lần upgrade không khôi phục được
     tới thời điểm nào sau đó, nên ngay khi upgrade xong, hãy chạy lại block backup, rồi mở lại lịch
@@ -2358,7 +2408,7 @@ và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-pr
   1 broker, ghim vào `stateful-pool` qua node affinity/toleration. Cố tình dùng StorageClass
   `standard` dựng sẵn của GKE (reclaim `Delete`), khác với Postgres — Kafka ở đây chỉ chứa
   message saga đang chuyển giữa các service, không phải dữ liệu gốc. Giống Postgres, phiên bản
-  Kafka (4.3.1) được ghim, nên nâng cấp operator Strimzi không thể âm thầm đổi nó.
+  Kafka (4.3.1) được pin, nên nâng cấp operator Strimzi không thể âm thầm đổi nó.
 
 ```bash
 kubectl apply -f k8s/data-layer/postgres-storageclass.yaml
@@ -2391,6 +2441,11 @@ Các value chính (schema đầy đủ: [values.yaml](https://github.com/tanhutm
   tag `latest`, chỉ push tag content-hash, nên 1 lần deploy quên override nó sẽ báo lỗi ngay lập
   tức thay vì âm thầm cố pull 1 tag không tồn tại. Bước 8 set nó cho từng service qua
   `--set-string <alias>.image.tag=<content-hash-tag>`.
+- `initContainer.image` — image `postgres` (lấy từ Docker Hub) mà initContainer `wait-for-db`
+  dùng, được pin theo digest ghi luôn trong `tag` (`<version>-alpine@sha256:…`). Khác với
+  `image`, giá trị này không đi qua `global.imageRegistry`. Khi đổi phiên bản Postgres trong
+  `k8s/data-layer/postgres-cluster.yaml`, hãy đổi giá trị này cùng lúc; comment phía trên
+  `imageName` trong file đó liệt kê đủ mọi chỗ cần đổi.
 - `resources.limits.memory` (`512Mi`) cũng quyết định kích thước heap của JVM: `backend/Dockerfile`
   đặt `-XX:MaxRAMPercentage=50.0`, nên heap bằng 1 nửa limit này (khoảng 256 MiB) và tăng theo
   nó. `mem_limit` và `memswap_limit` trong `docker-compose.yml` lấy cùng giá trị, nên hãy đổi
@@ -2895,23 +2950,23 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   `common-lib`, pom cha và `backend/Dockerfile`, công thức chung mà cả 6 image được build từ đó với
   `--build-arg SERVICE=<service>`; xem comment ở đầu file script để biết những gì cố tình bị loại
   ra, và về hằng số `salt` — tăng giá trị này để buộc tag của mọi service đổi ngay cả khi không
-  input nào trong số đó thay đổi, ví dụ sau khi 1 tag base image trỏ sang image khác), kiểm tra
-  xem Artifact Registry đã có image ở tag đó chưa (`docker manifest inspect`), và chỉ build+push nếu
-  chưa có. Điều này làm job trở nên idempotent: 1 lần chạy `workflow_dispatch` trên `master`,
-  hoặc bất kỳ lần push nào sau đó lên `master` mà `test` có chạy, sẽ build những gì còn thiếu sau
-  khi các kiểm tra Maven của chính lần chạy đó pass, bất kể lần chạy trước đã build hay chưa build
-  gì — kể cả nội dung còn chưa được build vì job `test` của 1 lần chạy trước thất bại, thứ mà 1 kiểm
-  tra kiểu "commit này có đụng tới service này không" đơn thuần sẽ bỏ sót vĩnh viễn. Push nào mà
-  `test` không chạy (ví dụ chỉ sửa docs) thì không build gì, nên sau 1 lần chạy thất bại, hãy kích
-  hoạt `workflow_dispatch` trên `master` nếu cần image trước lần đổi backend kế tiếp. Immutable tags
-  của repository (phần thiết lập GCP ở trên) từ chối mọi lần push làm 1 tag đã có trỏ sang image
-  khác, nên nếu `docker manifest inspect` lỗi tạm thời với 1 image thật ra đã có, image build lại
-  (với digest khác) bị từ chối và job fail — hãy chạy lại job bị fail. 2 lần chạy của job này không
-  bao giờ làm cùng 1 service cùng lúc (1 nhóm `concurrency` cho mỗi service), nên 2 lần chạy trên
-  `master` sát nhau không cùng build lại 1 service không đổi rồi bị từ chối lần push thứ 2. Với
-  `queue: max`, các lần chạy job này cho cùng 1 service chờ trong nhóm thay vì thay thế nhau, nên
-  lần nào chạy sau chỉ kiểm tra khi lần trước đã xong, và bỏ qua bước build nếu lần trước đã push
-  image.
+  input nào trong số đó thay đổi, ví dụ khi đổi build argument hoặc label do workflow truyền vào),
+  kiểm tra xem Artifact Registry đã có image ở tag đó chưa (`docker manifest inspect`), và chỉ
+  build+push nếu chưa có. Điều này làm job trở nên idempotent: 1 lần chạy `workflow_dispatch`
+  trên `master`, hoặc bất kỳ lần push nào sau đó lên `master` mà `test` có chạy, sẽ build những
+  gì còn thiếu sau khi các kiểm tra Maven của chính lần chạy đó pass, bất kể lần chạy trước đã
+  build hay chưa build gì — kể cả nội dung còn chưa được build vì job `test` của 1 lần chạy trước
+  thất bại, thứ mà 1 kiểm tra kiểu "commit này có đụng tới service này không" đơn thuần sẽ bỏ sót
+  vĩnh viễn. Push nào mà `test` không chạy (ví dụ chỉ sửa docs) thì không build gì, nên sau 1 lần
+  chạy thất bại, hãy kích hoạt `workflow_dispatch` trên `master` nếu cần image trước lần đổi
+  backend kế tiếp. Immutable tags của repository (phần thiết lập GCP ở trên) từ chối mọi lần push
+  làm 1 tag đã có trỏ sang image khác, nên nếu `docker manifest inspect` lỗi tạm thời với 1 image
+  thật ra đã có, image build lại (với digest khác) bị từ chối và job fail — hãy chạy lại job bị
+  fail. 2 lần chạy của job này không bao giờ làm cùng 1 service cùng lúc (1 nhóm `concurrency` cho
+  mỗi service), nên 2 lần chạy trên `master` sát nhau không cùng build lại 1 service không đổi rồi
+  bị từ chối lần push thứ 2. Với `queue: max`, các lần chạy job này cho cùng 1 service chờ trong
+  nhóm thay vì thay thế nhau, nên lần nào chạy sau chỉ kiểm tra khi lần trước đã xong, và bỏ qua
+  bước build nếu lần trước đã push image.
 
 Mọi job đều đặt `timeout-minutes` (từ 5 đến 20 phút, thay cho mặc định 360 phút của GitHub), nên
 1 lần pull/push image bị treo sẽ làm check fail thay vì giữ 1 required status ở trạng thái chờ
@@ -2931,6 +2986,52 @@ không chỉ bỏ qua 1 lần kiểm tra lại thừa.
 thay vì chỉ các commit vừa push) sẽ fail vì 1 secret mà dự án đã quyết định giữ công khai. Tạo
 lại fingerprint bằng `gitleaks detect --report-format json` nếu cặp khoá đó, hay bất kỳ credential
 dev nào khác đã được chấp nhận, bị chuyển sang file hoặc dòng khác.
+
+### Các image được pin
+
+Mọi image container của bên thứ ba khai báo trong repo đều được pin theo digest. Digest được ghi
+ngay sau 1 tag có ghi phiên bản ở các image sau: image Maven và image JRE trong
+`backend/Dockerfile`, 4 image trong `docker-compose.yml`, `initContainer.image` của chart,
+`imageName` của CNPG và image shellcheck của workflow. Khi có cả tag lẫn digest, Docker và
+Kubernetes chỉ dựa vào digest, nên nếu đổi tag mà quên đổi digest thì vẫn chạy image cũ. Mỗi
+digest là digest mà registry trả về cho tag đó vào lúc pin. Với 1 image đa nền tảng, đó là digest
+của index (multi-platform index), nên Docker và Kubernetes vẫn tự chọn đúng bản cho nền tảng của
+từng máy.
+
+Theo quy ước của bên phát hành image CNPG, 1 tag build có ghi ngày không bao giờ bị trỏ sang image
+khác. Tuy nhiên, registry không có cơ chế nào bảo đảm điều đó, nên `imageName` vẫn cần kèm digest.
+Khác với Docker và Kubernetes, CNPG có đọc tag này. CNPG lấy major version của Postgres từ tag để
+quyết định có chạy major upgrade hay không. Webhook của CNPG từ chối 1 `imageName` không có tag.
+Pod thì vẫn chạy image mà digest chỉ tới, nên tag và digest luôn phải chỉ cùng 1 image.
+
+Các class `ContainerImages` trong test Testcontainers ghi đúng digest Postgres và Kafka của
+`docker-compose.yml` nhưng không kèm tag, vì Testcontainers không chấp nhận tag và digest đi cùng
+nhau.
+
+Không có công cụ nào tự cập nhật các pin này, nên bản vá có trong 1 image mới hơn chỉ được áp dụng
+khi có người nâng image đó bằng tay. Ngoài các phiên bản mới, các Docker Official Image (ở đây
+là `postgres`, `maven` và `eclipse-temurin`) còn được build lại mà vẫn giữ nguyên tag có ghi
+phiên bản, ví dụ khi base image của chúng được cập nhật. Để dùng bản build lại đó, hãy lấy lại
+digest của chính tag đó. Để chuyển sang phiên bản mới hơn, hãy chọn tag của phiên bản đó trước,
+rồi lấy digest của nó, ví dụ với Postgres 18.5:
+
+```bash
+docker buildx imagetools inspect postgres:18.5 | grep -m1 '^Digest:'
+```
+
+Không bao giờ đổi tag mà không đổi digest đi kèm. Postgres và Kafka được khai báo ở nhiều file;
+comment phía trên `imageName` trong `k8s/data-layer/postgres-cluster.yaml` và comment phía trên
+`version` trong `k8s/data-layer/kafka-cluster.yaml` liệt kê đủ các chỗ đó. Image shellcheck xuất
+hiện trong workflow và trong lệnh lint ở local của mục "Workflow làm gì". Nâng image Maven hoặc
+image JRE là sửa `backend/Dockerfile`, nên tag image của cả 6 service đều đổi và lần chạy
+`build-and-push` kế tiếp sẽ build lại cả 6.
+
+Những thứ repo này không pin theo digest: những gì Bước 3 cài. Mỗi chart hoặc manifest, ở phiên
+bản đã pin, tự chọn image của nó, phần lớn theo tag. Các thành phần đó cũng tự chọn image mà chúng
+khởi chạy, như image broker Kafka mà Strimzi chọn theo `version`, và sidecar của Barman Cloud
+Plugin. Cũng không được pin theo digest: container Ryuk của chính Testcontainers (đi theo phiên
+bản của Testcontainers), runner của GitHub (`ubuntu-latest`) và BuildKit builder mà job
+`build-and-push` tạo ra.
 
 ### Branch protection
 
