@@ -3,13 +3,12 @@
 # from git's own hashes of the inputs that shape it - the service's directory, backend/common-lib,
 # the parent pom and backend/Dockerfile, the recipe every service's image is built from. Not
 # covered: the other modules' poms (the build copies them so Maven can load the whole reactor and
-# pre-fetch its dependencies; they can affect whether the build succeeds, not the jar),
+# pre-fetch its dependencies; they can affect whether the build succeeds, not the jar) and
 # backend/.dockerignore (each entry is either gitignored, so absent from the clean checkout CI
-# builds from, or, like src/test, never reaches the image anyway), and a base-image update behind
-# an unchanged tag, which git cannot see (an edited FROM line is covered, as it changes
-# backend/Dockerfile). backend/<service> and backend/common-lib are each hashed as one whole git
-# tree, src/test included: a test-only change gives a new tag and a rebuild although nothing that
-# reaches the image changed (backend/.dockerignore keeps src/test out of the build context).
+# builds from, or, like src/test, never reaches the image anyway). backend/<service> and
+# backend/common-lib are each hashed as one whole git tree, src/test included: a test-only change
+# gives a new tag and a rebuild although nothing that reaches the image changed
+# (backend/.dockerignore keeps src/test out of the build context).
 # The same source content always yields the same tag, so CI can skip building an image that
 # already exists, and a deploy can recompute the tag from any checkout.
 #
@@ -17,9 +16,8 @@
 set -euo pipefail
 
 # Bump to give every service a new tag when the images change for a reason none of the hashed
-# inputs show: a base-image update behind an unchanged tag, or a change to how CI builds them
-# (e.g. its build arguments, labels or attestations, set in the workflow rather than in
-# backend/Dockerfile).
+# inputs show: a change to how CI builds them (e.g. its build arguments, labels or attestations,
+# set in the workflow rather than in backend/Dockerfile).
 salt=1
 
 service="${1:?usage: image-tag.sh <service> [git-ref]}"

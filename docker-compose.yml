@@ -26,7 +26,7 @@ services:
   postgres:
     # The comment above the version in k8s/data-layer/postgres-cluster.yaml lists every place to
     # change with it.
-    image: postgres:18.4
+    image: postgres:18.4@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USERNAME}
@@ -80,7 +80,7 @@ services:
   kafka:
     # The comment above the version in k8s/data-layer/kafka-cluster.yaml lists every place to
     # change with it.
-    image: apache/kafka:4.3.1
+    image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
     restart: unless-stopped
     environment:
       KAFKA_NODE_ID: 1
@@ -109,7 +109,7 @@ services:
       start_period: 20s
 
   kafka-ui:
-    image: kafbat/kafka-ui:latest
+    image: kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1
     restart: unless-stopped
     environment:
       KAFKA_CLUSTERS_0_NAME: cafe
@@ -122,7 +122,7 @@ services:
         condition: service_healthy
 
   zipkin:
-    image: openzipkin/zipkin:latest
+    image: openzipkin/zipkin:3.6.1@sha256:d17e856dcbba7ffeefbbfc252f89ab78a4ab6faed47e646d46daad78f91b5ee2
     restart: unless-stopped
     ports:
       - "9411:9411"

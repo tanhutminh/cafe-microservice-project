@@ -16,7 +16,7 @@
 # declare it as a dependency. That dependency and the processor path both take Lombok's version
 # from the Spring Boot BOM, so they match. A processor that no module declares would be downloaded
 # on every run of the build stage.
-FROM maven:3.9-eclipse-temurin-21 AS deps
+FROM maven:3.9.16-eclipse-temurin-21@sha256:99e61abcff91a9b1333463bd8451fb18495d6eba9250ac66a338b518f8278320 AS deps
 WORKDIR /build
 COPY pom.xml .
 COPY common-lib/pom.xml common-lib/
@@ -48,7 +48,7 @@ RUN mvn -B -q -pl "$SERVICE" -am -Dmaven.test.skip=true package \
  && java -Djarmode=tools -jar application.jar extract --layers --destination /extracted
 
 # Runtime: a JRE only, no JDK or Maven.
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:21.0.13_9-jre-alpine@sha256:ac05c3c42b7c2f1a52c9bd52f01041fa1958231b15ebeae7420429cbc5baf474
 # A fixed, numeric non-root user: Kubernetes' runAsNonRoot can only verify a numeric UID.
 RUN addgroup -S -g 10001 app \
  && adduser -S -D -H -u 10001 -G app -h /app -s /sbin/nologin app
