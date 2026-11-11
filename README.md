@@ -313,10 +313,15 @@ charts/     Helm charts for the real GKE deployment: cafe-service (reusable per-
 k8s/        Plain K8s/CNPG/Strimzi manifests for the data layer (Postgres cluster +
             storage class + backups, Kafka cluster) and Helm values overrides for
             cluster-wide operators (currently just Strimzi's)
-scripts/    Standalone shell scripts: image-tag.sh (computes a backend service's
-            content-hash image tag; used by CI and by local deploys) and deploy.sh (deploys
-            the 6 backend services' images for the checked-out commit to the real GKE
-            cluster from a local shell), each tested by a sibling *.test.sh suite that CI runs
+scripts/    Standalone shell scripts; each one below has a sibling *.test.sh suite that CI runs:
+            - image-tag.sh: computes a backend service's content-hash image tag; used by
+              CI and by local deploys
+            - deploy.sh: deploys the 6 backend services' images for the checked-out
+              commit to the real GKE cluster from a local shell
+            - check-consistency.sh: fails when the copies of a pin (the Postgres, Kafka
+              or Java version, the Postgres or Kafka digest, the shellcheck image)
+              differ, or when an image in docker-compose.yml or a base image in
+              backend/Dockerfile has no digest; run by CI
 .github/    GitHub Actions workflows (currently: backend-ci.yml, see Testing below and
             docs/gke-cicd-runbook.md's Step 9)
 docs/       Step-by-step setup runbooks (currently: the GKE/CI-CD build, see
@@ -367,7 +372,7 @@ There's no self-registration flow — staff accounts are provisioned by an ADMIN
 
 Every container has `restart: unless-stopped`: Docker restarts a container whenever it exits, and starts it again whenever the Docker daemon restarts (e.g. when Docker Desktop starts at sign-in), so the whole stack comes back by itself. Neither happens to a container you stopped with `docker compose stop` or `docker compose kill`, or removed with `docker compose down`.
 
-Each backend service runs with the Helm chart's limits, 512 MiB of memory (`mem_limit`) and half a CPU (`cpus`), so its JVM gets the same 256 MiB heap and sees the same single processor as on GKE. With half a CPU, a service starts more slowly than it would without the limit.
+Each backend service runs with the same memory limit (`mem_limit`, 512 MiB) and CPU limit (`cpus`) as in the Helm chart. Its JVM therefore gets the same heap as on GKE, half of the memory limit, and counts the same number of processors. The CPU limit makes a service start more slowly than it would without one.
 
 ### Moving to a new Postgres major version
 
@@ -422,9 +427,9 @@ Modules that opt into the `jacoco-maven-plugin` (declared once in the parent pom
 
 [`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) runs these jobs:
 
-- `changes`: computes which parts of the repo changed (backend, scripts, charts, k8s, the workflow file); `test` and `validate-manifests` gate on its outputs.
+- `changes`: computes which parts of the repo changed (backend, scripts, charts, k8s, the workflow file, the files `scripts/check-consistency.sh` reads); `test` and `validate-manifests` gate on its outputs.
 - `gitleaks`: a secret scan on every push to `master`, every pull request update and every manual `workflow_dispatch` run.
-- `test`, script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`, plus the three test suites `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`.
+- `test`, script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`, then `scripts/check-consistency.sh` and the four test suites `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`. `check-consistency.sh` fails when the copies of a pin differ: the Postgres, Kafka or Java version, the Postgres or Kafka digest, or the shellcheck image. It also fails when an image in `docker-compose.yml` or a base image in `backend/Dockerfile` has no digest.
 - `test`, Maven checks: `spotless:check`, the full `mvn test` reactor and `mvn jacoco:check` against the per-module floors above; they run when `backend/` or the workflow file changed, on `workflow_dispatch`, and on every push to `master` on which `test` runs.
 - `validate-manifests`: a guard that no data-layer resource (CNPG, Strimzi or Barman resources, or a StorageClass) is added under `charts/*/templates/`, then a check that no test suite leaks into the packaged subchart, `helm lint`, a per-service render check of the charts, and `kubeconform` validation of the `k8s/data-layer/` manifests against their schemas; `kubeconform` runs only when `k8s/` or the workflow file changed, or on `workflow_dispatch`.
 - `build-and-push`: on `master`, once `test` and `gitleaks` pass, builds (packaging only; the tests already ran in `test`) and pushes each service's image not already in Artifact Registry, tagged by content hash (see [`scripts/image-tag.sh`](scripts/image-tag.sh)); a push on which `test` doesn't run builds nothing.
@@ -792,10 +797,15 @@ charts/     Helm chart cho deploy thật lên GKE: cafe-service (chart tái sử
 k8s/        Manifest K8s/CNPG/Strimzi thuần cho tầng dữ liệu (Postgres cluster +
             storage class + backup, Kafka cluster) và các file values override Helm
             cho operator dùng chung toàn cluster (hiện chỉ có của Strimzi)
-scripts/    Shell script độc lập: image-tag.sh (tính tag content-hash cho image của 1 backend
-            service; dùng bởi cả CI lẫn deploy local) và deploy.sh (deploy image của 6 backend
-            service ứng với commit đang checkout lên cluster GKE thật từ shell local), mỗi
-            script được kiểm thử bởi 1 bộ *.test.sh đi kèm do CI chạy
+scripts/    Shell script độc lập; mỗi script dưới đây có 1 bộ *.test.sh đi kèm do CI chạy:
+            - image-tag.sh: tính tag content-hash cho image của 1 backend service; dùng bởi
+              cả CI lẫn deploy local
+            - deploy.sh: deploy image của 6 backend service ứng với commit đang checkout lên
+              cluster GKE thật từ shell local
+            - check-consistency.sh: fail khi các bản sao của 1 pin (phiên bản Postgres,
+              Kafka hay Java, digest của Postgres hay Kafka, image shellcheck) bị lệch
+              nhau, hoặc khi 1 image trong docker-compose.yml hay 1 base image trong
+              backend/Dockerfile không có digest; do CI chạy
 .github/    Workflow GitHub Actions (hiện có: backend-ci.yml, xem mục Kiểm thử bên dưới
             và Bước 9 của docs/gke-cicd-runbook.md)
 docs/       Tài liệu hướng dẫn từng bước (hiện có: quá trình build GKE/CI-CD, xem
@@ -847,7 +857,7 @@ Không có flow tự đăng ký — tài khoản nhân viên chỉ được tạ
 
 Mọi container đều có `restart: unless-stopped`: Docker khởi động lại 1 container mỗi khi nó thoát, và bật lại nó mỗi khi Docker daemon khởi động lại (vd khi Docker Desktop khởi động lúc đăng nhập), nên cả stack tự chạy lại. Cả 2 việc đó đều không xảy ra với 1 container mà bạn đã dừng bằng `docker compose stop` hoặc `docker compose kill`, hay đã xoá bằng `docker compose down`.
 
-Mỗi service backend chạy với các limit của Helm chart, 512 MiB bộ nhớ (`mem_limit`) và nửa CPU (`cpus`), nên JVM của nó có cùng heap 256 MiB và cũng chỉ thấy 1 processor như trên GKE. Với nửa CPU, 1 service khởi động chậm hơn so với khi không có limit.
+Mỗi service backend chạy với cùng memory limit (`mem_limit`, 512 MiB) và CPU limit (`cpus`) như trong Helm chart. Vì vậy JVM của nó có cùng heap như trên GKE, bằng 1 nửa memory limit, và đếm được cùng số processor. CPU limit làm 1 service khởi động chậm hơn so với khi không có limit.
 
 ### Chuyển sang 1 major version mới của Postgres
 
@@ -902,9 +912,9 @@ Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement
 
 [`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) gồm các job sau:
 
-- `changes`: xác định những phần nào của repo có thay đổi (backend, scripts, charts, k8s, chính file workflow); `test` và `validate-manifests` dựa vào output của job này để quyết định có chạy hay không.
+- `changes`: xác định những phần nào của repo có thay đổi (backend, scripts, charts, k8s, chính file workflow, các file mà `scripts/check-consistency.sh` đọc); `test` và `validate-manifests` dựa vào output của job này để quyết định có chạy hay không.
 - `gitleaks`: quét secret ở mọi lần push lên `master`, mỗi lần cập nhật pull request và mọi lần chạy `workflow_dispatch` thủ công.
-- `test`, phần kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các chart, cùng 3 bộ test `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`.
+- `test`, phần kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các chart, rồi `scripts/check-consistency.sh` và 4 bộ test `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`. `check-consistency.sh` fail khi các bản sao của 1 pin bị lệch nhau: phiên bản Postgres, Kafka hay Java, digest của Postgres hay Kafka, hoặc image shellcheck. Nó cũng fail khi 1 image trong `docker-compose.yml` hay 1 base image trong `backend/Dockerfile` không có digest.
 - `test`, các kiểm tra Maven: `spotless:check`, toàn bộ reactor `mvn test` và `mvn jacoco:check` với các sàn coverage theo từng module ở trên; chúng chạy khi `backend/` hoặc file workflow có thay đổi, khi chạy `workflow_dispatch`, và ở mọi lần push lên `master` mà `test` có chạy.
 - `validate-manifests`: kiểm tra không có resource tầng dữ liệu nào (resource CNPG, Strimzi hoặc Barman, hay 1 StorageClass) bị thêm vào `charts/*/templates/`, rồi kiểm tra không có bộ test nào lọt vào subchart đã đóng gói, `helm lint`, kiểm tra render chart cho từng service, và dùng `kubeconform` kiểm tra các manifest trong `k8s/data-layer/` theo schema của chúng; `kubeconform` chỉ chạy khi `k8s/` hoặc file workflow có thay đổi, hoặc khi chạy `workflow_dispatch`.
 - `build-and-push`: trên `master`, sau khi `test` và `gitleaks` pass, build (chỉ đóng gói; test đã chạy trong `test`) và push image của từng service chưa có sẵn trên Artifact Registry, gắn tag theo content hash (xem [`scripts/image-tag.sh`](scripts/image-tag.sh)); 1 lần push mà `test` không chạy thì không build gì.

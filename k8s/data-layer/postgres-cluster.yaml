@@ -6,20 +6,25 @@ metadata:
   labels: {app.kubernetes.io/managed-by: kubectl}
 spec:
   instances: 1
-  # Pins the Postgres image by digest, after its dated build tag
-  # (`<version>-<YYYYMMDDHHMM>-<flavor>-<os>`), so neither a CNPG operator upgrade (unset, CNPG
-  # uses the operator's own default) nor a CVE rebuild of upstream's rolling tag
-  # (`<version>-standard-trixie`) can change what runs. The `standard` flavor is the one upstream
-  # recommends together with the Barman Cloud plugin this cluster uses (see `plugins` below); the
-  # older `system` flavor is deprecated. To take a newer build or minor version, pick a tag from
-  # ghcr.io/cloudnative-pg/postgresql and change both the tag and its digest.
+  # Pins the Postgres image by a dated build tag (`<version>-<YYYYMMDDHHMM>-<flavor>-<os>`)
+  # plus its digest, so a CNPG operator upgrade (unset, CNPG uses the operator's own default)
+  # can't change what runs. The "Pinned images" section of docs/gke-cicd-runbook.md (Step 9)
+  # explains why the image needs both.
+  # The `standard` flavor is the one upstream recommends together with the Barman Cloud plugin
+  # this cluster uses (see `plugins` below); the older `system` flavor is deprecated. To take a
+  # newer build or minor version, pick a tag from ghcr.io/cloudnative-pg/postgresql and change
+  # both the tag and its digest.
   # Change `imageName` together with these, each kept at the same Postgres version:
-  # - docker-compose.yml's postgres image: its tag and digest. For a new major version, also the
-  #   postgres<major>-data volume name and README.md's mentions of the volumes.
+  # - docker-compose.yml's postgres image: its tag and digest.
   # - charts/cafe-service/values.yaml's initContainer.image.tag (wait-for-db): the -alpine tag
   #   and its own digest.
   # - order-service's and inventory-service's testsupport/ContainerImages: compose's digest.
-  # - the version docs/gke-cicd-runbook.md names for this file.
+  # For a new major version, also change:
+  # - the postgres<major>-data volume name in docker-compose.yml.
+  # - README.md's mentions of that volume.
+  # - README.md's "Moving to a new Postgres major version" section and its Vietnamese
+  #   counterpart: the previous version and the previous volume they name.
+  # - the Postgres major version docs/gke-cicd-runbook.md names for this file.
   # A new build or minor version triggers a rolling update, but with `instances: 1` there is
   # nothing to roll: no replica to upgrade first and no switchover target, so CNPG restarts the
   # single primary pod in place (`primaryUpdateMethod` defaults to `restart` rather than

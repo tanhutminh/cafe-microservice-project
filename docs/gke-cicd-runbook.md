@@ -530,9 +530,9 @@ Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
     Secret, synced from Step 4's `{service}-db-username`/`-db-password` GSM secrets via the CSI
     driver's `secretObjects` mapping (enabled in Step 3; defined in Step 7's
     `secretproviderclass.yaml`);
-  - `imageName` pins the Postgres image (18.4, `standard` flavor, the one upstream recommends
-    with the Barman Cloud Plugin) by digest, after its dated build tag, so neither upgrading the
-    CNPG operator nor a CVE rebuild of upstream's rolling tag can silently change what runs. With
+  - `imageName` pins the Postgres image (18, `standard` flavor, the one upstream recommends
+    with the Barman Cloud Plugin) by its dated build tag and digest (see "Pinned images" in
+    Step 9), so upgrading the CNPG operator cannot silently change what runs. With
     `instances: 1`, a new build or minor version restarts the single instance (a short outage),
     while a new major version runs CNPG's offline in-place major upgrade, which keeps Postgres
     down until `pg_upgrade` ends. A major upgrade needs a backup first (the backup block in
@@ -560,7 +560,7 @@ Four files, applied directly with `kubectl` — never wrapped into a Helm chart:
   `KafkaNodePool` + `Kafka`, pinned to `stateful-pool` via node affinity/toleration. Uses GKE's
   built-in `standard` StorageClass (`Delete` reclaim) deliberately, unlike Postgres — Kafka here
   only carries saga messages in transit, not source-of-truth data. Like Postgres, the Kafka
-  version (4.3.1) is pinned, so upgrading the Strimzi operator cannot silently change it.
+  version (4.3) is pinned, so upgrading the Strimzi operator cannot silently change it.
 
 ```bash
 kubectl apply -f k8s/data-layer/postgres-storageclass.yaml
@@ -598,8 +598,8 @@ Key values (full schema: [values.yaml](https://github.com/tanhutminh/cafe-micros
   `global.imageRegistry`. Change it together with the Postgres version in
   `k8s/data-layer/postgres-cluster.yaml`, whose comment above `imageName` lists every place.
 - `resources.limits.memory` (`512Mi`) also sizes the JVM heap: `backend/Dockerfile` sets
-  `-XX:MaxRAMPercentage=50.0`, so the heap is half of this limit (about 256 MiB) and grows with
-  it. `docker-compose.yml`'s `mem_limit` and `memswap_limit` mirror it, so change them together.
+  `-XX:MaxRAMPercentage=50.0`, so the heap is half of this limit and grows with it.
+  `docker-compose.yml`'s `mem_limit` and `memswap_limit` mirror it, so change them together.
   To override it for one service, add `resources: {limits: {memory: 768Mi}}` inside that
   service's existing block in `charts/cafe/values.yaml` (e.g. under `order-service:`); Helm
   merges this with the defaults, so the other `resources` values stay. In compose, set
@@ -988,9 +988,9 @@ to store or leak in the first place.
 
 Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
 
-- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) computes five
-  separate outputs, so the other jobs can skip when they're not relevant (this is the one place
-  that lists the paths; the bullets below refer to the outputs by name):
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) computes six
+  separate outputs, so the other jobs can skip when they're not relevant (this is the one place in
+  the workflow that lists the paths; the bullets below refer to the outputs by name):
   - `backend` — `backend/**`;
   - `scripts` — `scripts/**` or the root `.gitignore`, whose patterns `deploy.sh`'s repo-state
     check and `deploy.test.sh`'s cases rely on;
@@ -998,7 +998,9 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   - `k8s` — `k8s/**`;
   - `workflow` — the workflow file itself. Every job and step gated on the other outputs also
     runs when it is true, so a PR editing any step exercises that step before merging (and
-    `deploy.test.sh`, which reads the workflow file, reruns).
+    `deploy.test.sh`, which reads the workflow file, reruns);
+  - `pins` — every file `scripts/check-consistency.sh` reads (the `files` list at its top), among
+    them `README.md` and this runbook.
 
   On a PR the filter compares against the base branch; on a push to `master`, against the branch
   tip before that push (so a multi-commit push is judged as a whole). Deliberately has **no path
@@ -1012,13 +1014,15 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   land in any file type (a pasted credential in a doc, a stray key in a YAML manifest), not just
   backend Java source, so it isn't gated behind `changes` the way `test`/`validate-manifests`
   are.
-- **`test`** — only runs when the `backend`, `scripts`, `charts`, `k8s` or `workflow` output is true
-  (or on `workflow_dispatch`); `charts` and `k8s` because `deploy.test.sh` checks `deploy.sh`
-  against files under `charts/` and `k8s/data-layer/`, and `charts` also because this job lints and
-  tests the chart's own `wait-for-db` initContainer script. It runs two independent groups of
+- **`test`** — only runs when the `backend`, `scripts`, `charts`, `k8s`, `workflow` or `pins` output
+  is true (or on `workflow_dispatch`). `charts` and `k8s` count because `deploy.test.sh` checks
+  `deploy.sh` against files under `charts/` and `k8s/data-layer/`, and `charts` also because this
+  job lints and tests the chart's own `wait-for-db` initContainer script. `pins` counts because
+  `check-consistency.sh` reads every file `pins` lists. The job runs two independent groups of
   checks; each runs even when the other failed, so one failure never hides the other's result:
   - the script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`,
-    then the three test suites, `scripts/image-tag.test.sh`,
+    then `scripts/check-consistency.sh`, then the four test suites,
+    `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`,
     `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`. shellcheck runs
     from an image pinned by digest; the same command lints locally:
 
@@ -1026,14 +1030,37 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
     docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d -x scripts/*.sh charts/*/files/*.sh
     ```
 
-    (on Git Bash, prefix it with `MSYS_NO_PATHCONV=1`). `wait-for-db.test.sh` runs the real
-    `wait-for-db.sh` under `sh` with fake `psql`, `date` and `sleep` executables: what it logs
-    and when, the 600s boundary, that `psql` gets no connection flags and that the clock is only
-    read as `date +%s`. Each run of the script is capped at 10s by `timeout`, so a loop that never
-    ends fails its case instead of hanging CI. It also checks that the Deployment template gives
-    the initContainer `PGHOST`, `PGUSER`, `PGPASSWORD` and `PGDATABASE` (the user and password
-    from the credentials Secret's `username`/`password` keys, the host and database from the
-    chart's `db.host`/`db.name`) and a positive `PGCONNECT_TIMEOUT`.
+    On Git Bash, prefix the command with `MSYS_NO_PATHCONV=1`.
+
+    `check-consistency.sh` fails when the copies of a pin differ: the Postgres, Kafka or Java
+    version, the Postgres or Kafka digest, or the shellcheck image. It also fails when it cannot
+    find a copy, for example after a README sentence that names the Postgres volume is reworded.
+    An image in `docker-compose.yml` or a base image in `backend/Dockerfile` without a digest
+    makes it fail too. Each error names the check that failed and the file, with the line where
+    there is one. Run it locally with `bash scripts/check-consistency.sh`.
+
+    `check-consistency.test.sh` runs the script on fixtures made from the files the script reads,
+    each edited for one case. For each edit it requires exactly the expected errors, or none when
+    the edit breaks no check. It also fails unless the `pins` filter lists exactly the files the
+    script reads.
+
+    `image-tag.test.sh` runs `image-tag.sh` on fixture commits in a throwaway git repository,
+    isolated from your git config and environment. The tag must be 16 lowercase hex characters and
+    stay the same for the same content. It must change when the service's own directory,
+    `common-lib`, the parent pom, `backend/Dockerfile` or the script's `salt` constant changes. It
+    must stay the same when another service changes or `backend/.dockerignore` is added. Without a
+    git ref, the script uses `HEAD`. An unknown service or ref, a ref without one of the hashed
+    paths, or a missing argument must fail with nothing on stdout; a missing argument also prints
+    the usage.
+
+    `wait-for-db.test.sh` runs the real `wait-for-db.sh` under `sh` with fake `psql`, `date` and
+    `sleep` executables: what it logs and when, the 600s boundary, that `psql` gets no connection
+    flags and that the clock is only read as `date +%s`. Each run of the script is capped at 10s by
+    `timeout`, so a loop that never ends fails its case instead of hanging CI. It also checks that
+    the Deployment template gives the initContainer `PGHOST`, `PGUSER`, `PGPASSWORD` and
+    `PGDATABASE` (the user and password from the credentials Secret's `username`/`password` keys,
+    the host and database from the chart's `db.host`/`db.name`) and a positive `PGCONNECT_TIMEOUT`.
+
     `deploy.test.sh` unit-tests `deploy.sh`'s functions (image-reference and `--set-string`
     assembly, tags computed at the git ref it is given, the bash-version, tool, Helm-version and
     gcloud-startup checks, and that `main` runs every check in the documented order, before building
@@ -1066,17 +1093,19 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   two-minute Maven run, while `test` stays a single required check either way. On `master` the Maven
   checks run whenever `test` does, because that is where `build-and-push` runs: every image it
   pushes comes from a run that tested the backend tree it was built from, even when the push itself
-  only touched scripts, chart files, manifests under `k8s/` or the root `.gitignore` (which holds
-  ignore patterns for the whole repo, so an edit made for another part of it, e.g. the frontend,
-  costs that Maven run too; `build-and-push` then finds every image already present).
+  only touched scripts, chart files, manifests under `k8s/`, the root `.gitignore` or a file
+  outside `backend/` that `pins` lists. A push that only edits `README.md` or this runbook
+  therefore costs that Maven run too. So does a `.gitignore` edit made for another part of the
+  repo, e.g. the frontend, since that file holds ignore patterns for the whole repo.
+  `build-and-push` then finds every image already present.
 - **`validate-manifests`** — guards against a CNPG/Strimzi/Barman resource or a StorageClass ever
   being added under `charts/*/templates/` (that data layer stays outside any Helm release, see
   "Architecture at a glance"), then `helm dependency build --skip-refresh` (`build` rather than
   `update`, so an out-of-sync `Chart.lock` fails the check instead of being silently regenerated in
   the runner), a check that no test suite (`*.test.sh`) leaked into the packaged `cafe-service`
   subchart (its `.helmignore` keeps them out), and `helm lint`/`helm template` (one render per
-  service, each checking that the service's ConfigMap turns Zipkin span export off), with Helm
-  pinned to v4.3.0 for reproducible results (these run whenever the `charts`, `k8s` or `workflow`
+  service, each checking that the service's ConfigMap turns Zipkin span export off), with the Helm
+  version pinned for reproducible results (these run whenever the `charts`, `k8s` or `workflow`
   output is true, or on `workflow_dispatch`), then — only when the `k8s` or `workflow` output is
   true, or on `workflow_dispatch` — `kubeconform` against `k8s/data-layer/*.yaml`. kubeconform
   bundles no schemas; it fetches the built-in kinds' from
@@ -1102,16 +1131,16 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   whatever is missing once that run's own Maven checks pass, regardless of what did or didn't get
   rebuilt on any prior run — including content left unbuilt because an earlier run's `test` job
   failed, which a plain "did this commit touch this service" check would otherwise permanently
-  miss. A push on which `test` doesn't run (say, docs only) builds nothing, so after a failed run,
-  trigger `workflow_dispatch` on `master` if the images are needed before the next backend change.
-  The repository's immutable tags (GCP setup above) refuse any push that would move an existing
-  tag, so if `docker manifest inspect` fails transiently for an image that does exist, the rebuilt
-  image (with a different digest) is refused and the job fails — rerun the failed job. Two runs of
-  this job never work on the same service at once (a per-service `concurrency` group), so two
-  `master` runs close together don't both rebuild an unchanged service and have the second push
-  refused. With `queue: max`, runs of this job for one service wait in the group rather than
-  replacing each other, so whichever runs second checks only after the first has finished, and
-  skips the build if the first pushed the image.
+  miss. A push on which `test` doesn't run (say, frontend only) builds nothing, so after a failed
+  run, trigger `workflow_dispatch` on `master` if the images are needed before the next backend
+  change. The repository's immutable tags (GCP setup above) refuse any push that would move an
+  existing tag, so if `docker manifest inspect` fails transiently for an image that does exist,
+  the rebuilt image (with a different digest) is refused and the job fails — rerun the failed
+  job. Two runs of this job never work on the same service at once (a per-service `concurrency`
+  group), so two `master` runs close together don't both rebuild an unchanged service and have
+  the second push refused. With `queue: max`, runs of this job for one service wait in the group
+  rather than replacing each other, so whichever runs second checks only after the first has
+  finished, and skips the build if the first pushed the image.
 
 Every job sets `timeout-minutes` (5 to 20 minutes, against GitHub's 360-minute default), so a hung
 image pull or push fails the check instead of holding a required status pending for hours; the
@@ -1168,6 +1197,15 @@ above `imageName` in `k8s/data-layer/postgres-cluster.yaml` and the one above `v
 in the local lint command under "What the workflow does". Bumping the Maven or JRE image changes
 `backend/Dockerfile`, so all six services' image tags change and the next `build-and-push`
 rebuilds all six.
+
+`scripts/check-consistency.sh`, which `test` runs (see "What the workflow does"), fails when the
+copies of a pin differ. The tags of the Postgres and Kafka images, and Strimzi's `version`, must
+repeat the Postgres and Kafka versions in full. The `postgres<major>-data` volume name in
+`docker-compose.yml` and `README.md`, and this runbook's Postgres copies, carry only the major
+version. This runbook's Kafka copies carry only the major.minor version. So a Postgres minor bump
+or a Kafka patch bump leaves these copies as they are. Java is compared by its major version
+everywhere. The script also fails when an image in `docker-compose.yml` or a base image in
+`backend/Dockerfile` has no digest. It cannot tell whether a digest belongs to its tag.
 
 Not pinned by digest in this repo: what Step 3 installs. Each chart or manifest version chooses
 its images, mostly by tag. Those components also choose the images they start themselves, such as
@@ -2379,10 +2417,10 @@ và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-pr
     service, đồng bộ từ 2 secret GSM `{service}-db-username`/`-db-password` ở Bước 4 qua cơ chế
     map `secretObjects` của CSI driver (bật ở Bước 3; định nghĩa ở `secretproviderclass.yaml`
     của Bước 7);
-  - `imageName` pin image Postgres (18.4, flavor `standard` — flavor upstream khuyên dùng cùng
-    Barman Cloud Plugin) theo digest, đi kèm tag build có ghi ngày, nên dù nâng cấp operator CNPG
-    hay upstream build lại tag rolling để vá CVE, image Postgres đang chạy cũng không bị âm thầm
-    thay đổi. Với `instances: 1`, 1 bản build hoặc minor version mới sẽ restart instance duy nhất
+  - `imageName` pin image Postgres (18, flavor `standard` — flavor upstream khuyên dùng cùng
+    Barman Cloud Plugin) bằng tag build có ghi ngày kèm digest (xem "Các image được pin" ở Bước
+    9), nên nâng cấp operator CNPG không thể âm thầm đổi image Postgres đang chạy. Với
+    `instances: 1`, 1 bản build hoặc minor version mới sẽ restart instance duy nhất
     (gián đoạn ngắn), còn 1 major version mới sẽ chạy offline in-place major upgrade của CNPG:
     Postgres ngừng cho tới khi `pg_upgrade` chạy xong. 1 major upgrade cần backup trước (block
     backup trong "Tạm dừng") cùng 1 `serverName` mới trong `parameters` của plugin, đặt trong cùng
@@ -2408,7 +2446,7 @@ và [gateway/application.yml](https://github.com/tanhutminh/cafe-microservice-pr
   1 broker, ghim vào `stateful-pool` qua node affinity/toleration. Cố tình dùng StorageClass
   `standard` dựng sẵn của GKE (reclaim `Delete`), khác với Postgres — Kafka ở đây chỉ chứa
   message saga đang chuyển giữa các service, không phải dữ liệu gốc. Giống Postgres, phiên bản
-  Kafka (4.3.1) được pin, nên nâng cấp operator Strimzi không thể âm thầm đổi nó.
+  Kafka (4.3) được pin, nên nâng cấp operator Strimzi không thể âm thầm đổi nó.
 
 ```bash
 kubectl apply -f k8s/data-layer/postgres-storageclass.yaml
@@ -2447,13 +2485,13 @@ Các value chính (schema đầy đủ: [values.yaml](https://github.com/tanhutm
   `k8s/data-layer/postgres-cluster.yaml`, hãy đổi giá trị này cùng lúc; comment phía trên
   `imageName` trong file đó liệt kê đủ mọi chỗ cần đổi.
 - `resources.limits.memory` (`512Mi`) cũng quyết định kích thước heap của JVM: `backend/Dockerfile`
-  đặt `-XX:MaxRAMPercentage=50.0`, nên heap bằng 1 nửa limit này (khoảng 256 MiB) và tăng theo
-  nó. `mem_limit` và `memswap_limit` trong `docker-compose.yml` lấy cùng giá trị, nên hãy đổi
-  chúng cùng lúc. Để override cho 1 service, thêm `resources: {limits: {memory: 768Mi}}` vào
-  trong block sẵn có của service đó trong `charts/cafe/values.yaml` (vd dưới `order-service:`);
-  Helm merge giá trị này với giá trị mặc định, nên các value `resources` khác vẫn giữ nguyên.
-  Trong compose, đặt `mem_limit` và `memswap_limit`, cùng 1 giá trị, trong mục riêng của service
-  đó thay vì trong block chung `x-backend-service` mà mọi service backend đều merge vào.
+  đặt `-XX:MaxRAMPercentage=50.0`, nên heap bằng 1 nửa limit này và tăng theo nó. `mem_limit` và
+  `memswap_limit` trong `docker-compose.yml` lấy cùng giá trị, nên hãy đổi chúng cùng lúc. Để
+  override cho 1 service, thêm `resources: {limits: {memory: 768Mi}}` vào trong block sẵn có của
+  service đó trong `charts/cafe/values.yaml` (vd dưới `order-service:`); Helm merge giá trị này
+  với giá trị mặc định, nên các value `resources` khác vẫn giữ nguyên. Trong compose, đặt
+  `mem_limit` và `memswap_limit`, cùng 1 giá trị, trong mục riêng của service đó thay vì trong
+  block chung `x-backend-service` mà mọi service backend đều merge vào.
 - `resources.limits.cpu` (`500m`) và `cpus: 0.5` trong `docker-compose.yml` có cùng giá trị, nên
   hãy đổi chúng cùng lúc: với limit nào trong 2 limit đó, JVM cũng đếm được 1 processor khả dụng,
   nên nó đặt kích thước thread pool như nhau trên GKE và trong compose. Để override cho 1
@@ -2845,9 +2883,9 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
 
 5 job, đều nằm trong [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
 
-- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) tính ra 5 output
-  riêng biệt, để các job còn lại có thể bỏ qua khi không liên quan (đây là nơi duy nhất liệt kê
-  các path; các mục bên dưới chỉ gọi output theo tên):
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) tính ra 6 output
+  riêng biệt, để các job còn lại có thể bỏ qua khi không liên quan (đây là nơi duy nhất trong
+  workflow liệt kê các path; các mục bên dưới chỉ gọi output theo tên):
   - `backend` — `backend/**`;
   - `scripts` — `scripts/**` hoặc `.gitignore` ở gốc repo, vì cơ chế kiểm tra trạng thái repo của
     `deploy.sh` và các case của `deploy.test.sh` dựa vào các pattern trong đó;
@@ -2855,7 +2893,9 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   - `k8s` — `k8s/**`;
   - `workflow` — chính file workflow. Mọi job và step được gate theo các output kia cũng chạy khi
     output này là true, nên 1 PR sửa step nào thì step đó được chạy thử trước khi merge (và
-    `deploy.test.sh`, vốn đọc file workflow, cũng chạy lại).
+    `deploy.test.sh`, vốn đọc file workflow, cũng chạy lại);
+  - `pins` — mọi file mà `scripts/check-consistency.sh` đọc (danh sách `files` ở đầu script),
+    trong đó có `README.md` và runbook này.
 
   Trên PR, filter so với nhánh base; trên 1 lần push lên `master`, so với đỉnh nhánh ngay trước
   lần push đó (nên 1 lần push nhiều commit được xét như 1 khối). Cố tình **không đặt path filter
@@ -2868,28 +2908,53 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   workflow (push lên `master`, PR hay `workflow_dispatch`), không có path filter nào — secret có
   thể lọt vào bất kỳ loại file nào (1 credential dán nhầm vào doc, 1 key lạc vào manifest YAML),
   không riêng gì Java backend, nên không bị gate theo `changes` như `test`/`validate-manifests`.
-- **`test`** — chỉ chạy khi output `backend`, `scripts`, `charts`, `k8s` hoặc `workflow` là true
-  (hoặc khi `workflow_dispatch`); có `charts` và `k8s` vì `deploy.test.sh` đối chiếu `deploy.sh` với
-  các file trong `charts/` và `k8s/data-layer/`, và có `charts` còn vì job này lint và test script
-  initContainer `wait-for-db` của chính chart. Job chạy 2 nhóm kiểm tra độc lập; mỗi nhóm vẫn chạy
-  khi nhóm kia fail, nên 1 lỗi không bao giờ che mất kết quả của nhóm còn lại:
+- **`test`** — chỉ chạy khi output `backend`, `scripts`, `charts`, `k8s`, `workflow` hoặc `pins` là
+  true (hoặc khi `workflow_dispatch`). Có `charts` và `k8s` vì `deploy.test.sh` đối chiếu
+  `deploy.sh` với các file trong `charts/` và `k8s/data-layer/`, và có `charts` còn vì job này lint
+  và test script initContainer `wait-for-db` của chính chart. Có `pins` vì `check-consistency.sh`
+  đọc mọi file mà `pins` liệt kê. Job chạy 2 nhóm kiểm tra độc lập; mỗi nhóm vẫn chạy khi nhóm
+  kia fail, nên 1 lỗi không bao giờ che mất kết quả của nhóm còn lại:
   - các kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các
-    chart, rồi 3 bộ test `scripts/image-tag.test.sh`,
-    `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`. shellcheck chạy từ
-    1 image được pin theo digest; cùng lệnh đó dùng để lint ở local:
+    chart, rồi `scripts/check-consistency.sh`, rồi 4 bộ test `scripts/check-consistency.test.sh`,
+    `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` và
+    `scripts/deploy.test.sh`. shellcheck chạy từ 1 image được pin theo digest; cùng lệnh đó dùng
+    để lint ở local:
 
     ```bash
     docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d -x scripts/*.sh charts/*/files/*.sh
     ```
 
-    (trên Git Bash, thêm `MSYS_NO_PATHCONV=1` ở đầu lệnh). `wait-for-db.test.sh` chạy chính
-    `wait-for-db.sh` bằng `sh` với các file thực thi giả `psql`, `date` và `sleep`: kiểm tra nó ghi
-    log gì và khi nào, mốc 600s, việc `psql` không nhận cờ kết nối nào, và việc đồng hồ chỉ được
-    đọc bằng `date +%s`. Mỗi lần chạy script bị `timeout` giới hạn ở 10s, nên 1 vòng lặp không bao
-    giờ kết thúc sẽ làm fail test case đó thay vì treo CI. Nó cũng kiểm tra template Deployment cung
-    cấp cho initContainer các biến `PGHOST`, `PGUSER`, `PGPASSWORD` và `PGDATABASE` (user và
-    password lấy từ key `username`/`password` của Secret credentials, host và database lấy từ
-    `db.host`/`db.name` của chart) cùng 1 giá trị `PGCONNECT_TIMEOUT` dương.
+    Trên Git Bash, thêm `MSYS_NO_PATHCONV=1` ở đầu lệnh.
+
+    `check-consistency.sh` fail khi các bản sao của 1 pin bị lệch nhau: phiên bản Postgres, Kafka
+    hay Java, digest của Postgres hay Kafka, hoặc image shellcheck. Nó cũng fail khi không tìm thấy
+    1 bản sao, ví dụ khi 1 câu trong README ghi tên volume Postgres bị viết lại. 1 image trong
+    `docker-compose.yml` hoặc 1 base image trong `backend/Dockerfile` không có digest cũng làm nó
+    fail. Mỗi lỗi ghi tên kiểm tra bị fail và file, kèm số dòng nếu có. Chạy nó ở local bằng
+    `bash scripts/check-consistency.sh`.
+
+    `check-consistency.test.sh` chạy script trên các fixture tạo từ những file mà script đọc, mỗi
+    fixture được sửa cho 1 case. Với mỗi chỗ sửa, nó đòi đúng các lỗi mong đợi, hoặc không lỗi
+    nào khi chỗ sửa không làm fail kiểm tra nào. Nó cũng fail nếu filter `pins` không liệt kê đúng
+    các file mà script đọc.
+
+    `image-tag.test.sh` chạy `image-tag.sh` trên các commit fixture trong 1 git repo tạm, cô lập
+    khỏi config và môi trường git của bạn. Tag phải gồm 16 ký tự hex chữ thường và giữ nguyên khi
+    nội dung giữ nguyên. Tag phải đổi khi thư mục của chính service đó, `common-lib`, pom cha,
+    `backend/Dockerfile` hoặc hằng số `salt` của script đổi. Tag phải giữ nguyên khi 1 service khác
+    đổi hoặc khi thêm `backend/.dockerignore`. Khi không truyền git ref, script dùng `HEAD`. 1
+    service hoặc ref không tồn tại, 1 ref thiếu 1 trong các path được hash, hoặc thiếu đối số đều
+    phải fail mà không in gì ra stdout; khi thiếu đối số, script còn in ra cách dùng.
+
+    `wait-for-db.test.sh` chạy chính `wait-for-db.sh` bằng `sh` với các file thực thi giả `psql`,
+    `date` và `sleep`: kiểm tra nó ghi log gì và khi nào, mốc 600s, việc `psql` không nhận cờ kết
+    nối nào, và việc đồng hồ chỉ được đọc bằng `date +%s`. Mỗi lần chạy script bị `timeout` giới hạn
+    ở 10s, nên 1 vòng lặp không bao giờ kết thúc sẽ làm fail test case đó thay vì treo CI. Nó cũng
+    kiểm tra template Deployment cung cấp cho initContainer các biến `PGHOST`, `PGUSER`,
+    `PGPASSWORD` và `PGDATABASE` (user và password lấy từ key `username`/`password` của Secret
+    credentials, host và database lấy từ `db.host`/`db.name` của chart) cùng 1 giá trị
+    `PGCONNECT_TIMEOUT` dương.
+
     `deploy.test.sh` unit-test các hàm của `deploy.sh` (cách ráp image reference và các đối số
     `--set-string`, việc tag được tính tại đúng git ref được truyền vào, kiểm tra phiên bản bash,
     tool, phiên bản Helm và việc `gcloud` khởi động được, và việc `main` chạy mọi kiểm tra theo đúng
@@ -2922,16 +2987,18 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   2 phút, trong khi `test` vẫn là 1 required check duy nhất. Trên `master` các kiểm tra Maven chạy
   mỗi khi `test` chạy, vì đó là nơi `build-and-push` chạy: mọi image nó push đều đến từ 1 lần chạy
   đã test đúng cây backend mà image đó được build ra, kể cả khi bản thân lần push chỉ đụng tới
-  script, file chart, manifest trong `k8s/` hay `.gitignore` ở gốc repo (file này chứa pattern
-  ignore cho toàn bộ repo, nên 1 thay đổi trong đó dành cho phần khác của repo, ví dụ frontend, cũng
-  tốn lần chạy Maven đó; `build-and-push` sau đó thấy mọi image đã có sẵn).
+  script, file chart, manifest trong `k8s/`, `.gitignore` ở gốc repo hay 1 file nằm ngoài
+  `backend/` mà `pins` liệt kê. Vì vậy 1 lần push chỉ sửa `README.md` hoặc runbook này cũng tốn
+  lần chạy Maven đó. 1 thay đổi trong `.gitignore` dành cho phần khác của repo, ví dụ frontend,
+  cũng vậy, vì file này chứa pattern ignore cho toàn bộ repo. `build-and-push` sau đó thấy mọi
+  image đã có sẵn.
 - **`validate-manifests`** — chặn việc 1 resource CNPG/Strimzi/Barman hoặc 1 StorageClass bị thêm
   nhầm vào `charts/*/templates/` (tầng data layer đó nằm ngoài mọi Helm release, xem "Kiến trúc tổng
   quan"), sau đó `helm dependency build --skip-refresh` (dùng `build` thay vì `update`, để 1
   `Chart.lock` bị lệch làm check fail thay vì được tạo lại âm thầm trên runner), 1 bước kiểm tra
   không có bộ test nào (`*.test.sh`) lọt vào subchart `cafe-service` đã đóng gói (`.helmignore` của
   nó loại chúng ra), và `helm lint`/`helm template` (render 1 lần cho mỗi service, mỗi lần kiểm tra
-  ConfigMap của service đó có tắt export span sang Zipkin), với Helm được pin ở v4.3.0 để kết quả
+  ConfigMap của service đó có tắt export span sang Zipkin), với phiên bản Helm được pin để kết quả
   tái lập được (các bước này chạy khi output `charts`, `k8s` hoặc `workflow` là true, hoặc khi
   `workflow_dispatch`), rồi — chỉ khi output `k8s` hoặc `workflow` là true, hoặc khi
   `workflow_dispatch` — `kubeconform` với `k8s/data-layer/*.yaml`. kubeconform không đi kèm schema
@@ -2957,8 +3024,8 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   gì còn thiếu sau khi các kiểm tra Maven của chính lần chạy đó pass, bất kể lần chạy trước đã
   build hay chưa build gì — kể cả nội dung còn chưa được build vì job `test` của 1 lần chạy trước
   thất bại, thứ mà 1 kiểm tra kiểu "commit này có đụng tới service này không" đơn thuần sẽ bỏ sót
-  vĩnh viễn. Push nào mà `test` không chạy (ví dụ chỉ sửa docs) thì không build gì, nên sau 1 lần
-  chạy thất bại, hãy kích hoạt `workflow_dispatch` trên `master` nếu cần image trước lần đổi
+  vĩnh viễn. Push nào mà `test` không chạy (ví dụ chỉ sửa frontend) thì không build gì, nên sau 1
+  lần chạy thất bại, hãy kích hoạt `workflow_dispatch` trên `master` nếu cần image trước lần đổi
   backend kế tiếp. Immutable tags của repository (phần thiết lập GCP ở trên) từ chối mọi lần push
   làm 1 tag đã có trỏ sang image khác, nên nếu `docker manifest inspect` lỗi tạm thời với 1 image
   thật ra đã có, image build lại (với digest khác) bị từ chối và job fail — hãy chạy lại job bị
@@ -3025,6 +3092,15 @@ comment phía trên `imageName` trong `k8s/data-layer/postgres-cluster.yaml` và
 hiện trong workflow và trong lệnh lint ở local của mục "Workflow làm gì". Nâng image Maven hoặc
 image JRE là sửa `backend/Dockerfile`, nên tag image của cả 6 service đều đổi và lần chạy
 `build-and-push` kế tiếp sẽ build lại cả 6.
+
+`scripts/check-consistency.sh`, do `test` chạy (xem "Workflow làm gì"), fail khi các bản sao của 1
+pin bị lệch nhau. Tag của các image Postgres và Kafka, và `version` của Strimzi, phải ghi đầy đủ
+phiên bản Postgres và Kafka. Tên volume `postgres<major>-data` trong `docker-compose.yml` và
+`README.md`, cùng các bản sao phiên bản Postgres trong runbook này, chỉ ghi major version. Các bản
+sao phiên bản Kafka trong runbook này chỉ ghi major.minor. Vì vậy 1 lần nâng minor version của
+Postgres hay patch version của Kafka không làm các bản sao đó phải đổi. Java được so theo major
+version ở mọi nơi. Script cũng fail khi 1 image trong `docker-compose.yml` hoặc 1 base image trong
+`backend/Dockerfile` không có digest. Nó không biết được 1 digest có thuộc về tag của nó hay không.
 
 Những thứ repo này không pin theo digest: những gì Bước 3 cài. Mỗi chart hoặc manifest, ở phiên
 bản đã pin, tự chọn image của nó, phần lớn theo tag. Các thành phần đó cũng tự chọn image mà chúng
