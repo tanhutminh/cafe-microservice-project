@@ -20,6 +20,7 @@ jobs:
       charts: ${{ steps.filter.outputs.charts }}
       k8s: ${{ steps.filter.outputs.k8s }}
       workflow: ${{ steps.filter.outputs.workflow }}
+      pins: ${{ steps.filter.outputs.pins }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -42,6 +43,18 @@ jobs:
             # which reads this file, reruns).
             workflow:
               - '.github/workflows/backend-ci.yml'
+            pins:
+              - 'docker-compose.yml'
+              - 'README.md'
+              - 'docs/gke-cicd-runbook.md'
+              - 'backend/pom.xml'
+              - 'backend/Dockerfile'
+              - 'backend/order-service/src/test/java/com/cafe/orderservice/testsupport/ContainerImages.java'
+              - 'backend/inventory-service/src/test/java/com/cafe/inventoryservice/testsupport/ContainerImages.java'
+              - 'charts/cafe-service/values.yaml'
+              - 'k8s/data-layer/postgres-cluster.yaml'
+              - 'k8s/data-layer/kafka-cluster.yaml'
+              - '.github/workflows/backend-ci.yml'
 
   gitleaks:
     runs-on: ubuntu-latest
@@ -61,7 +74,7 @@ jobs:
     needs: changes
     # `charts` and `k8s` too: deploy.test.sh checks deploy.sh against files under charts/ and
     # k8s/data-layer/, and this job lints and tests the chart's own wait-for-db initContainer script
-    # (charts/*/files/).
+    # (charts/*/files/). `pins` too: check-consistency.sh reads every file `pins` lists.
     if: >-
       success() && (
         needs.changes.outputs.backend == 'true' ||
@@ -69,6 +82,7 @@ jobs:
         needs.changes.outputs.charts == 'true' ||
         needs.changes.outputs.k8s == 'true' ||
         needs.changes.outputs.workflow == 'true' ||
+        needs.changes.outputs.pins == 'true' ||
         github.event_name == 'workflow_dispatch'
       )
     runs-on: ubuntu-latest
@@ -103,6 +117,16 @@ jobs:
           docker run --rm -v "$PWD:/mnt:ro" -w /mnt
           koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
           -x scripts/*.sh charts/*/files/*.sh
+
+      - name: Check consistency
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        run: bash scripts/check-consistency.sh
+
+      - name: Test the check-consistency script
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        run: bash scripts/check-consistency.test.sh
 
       - name: Test the image-tag script
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
