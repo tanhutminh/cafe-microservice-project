@@ -322,8 +322,13 @@ scripts/    Standalone shell scripts; each one below has a sibling *.test.sh sui
               or Java version, the Postgres or Kafka digest, the shellcheck image)
               differ, or when an image in docker-compose.yml or a base image in
               backend/Dockerfile has no digest; run by CI
-.github/    GitHub Actions workflows (currently: backend-ci.yml, see Testing below and
-            docs/gke-cicd-runbook.md's Step 9)
+.github/    GitHub configuration (see Testing below and docs/gke-cicd-runbook.md's
+            Step 9):
+            - workflows/backend-ci.yml: the CI workflow
+            - dependabot.yml: configures Dependabot to open pull requests for newer
+              versions of the workflow's actions, the backend's Maven dependencies
+              and the container images in backend/Dockerfile, docker-compose.yml
+              and the cafe-service chart
 docs/       Step-by-step setup runbooks (currently: the GKE/CI-CD build, see
             docs/gke-cicd-runbook.md)
 ```
@@ -427,14 +432,16 @@ Modules that opt into the `jacoco-maven-plugin` (declared once in the parent pom
 
 [`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) runs these jobs:
 
-- `changes`: computes which parts of the repo changed (backend, scripts, charts, k8s, the workflow file, the files `scripts/check-consistency.sh` reads); `test` and `validate-manifests` gate on its outputs.
+- `changes`: computes which parts of the repo changed (backend, scripts, charts, k8s, the Dependabot config, the workflow file, the files `scripts/check-consistency.sh` reads); `test` and `validate-manifests` gate on its outputs.
 - `gitleaks`: a secret scan on every push to `master`, every pull request update and every manual `workflow_dispatch` run.
-- `test`, script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`, then `scripts/check-consistency.sh` and the four test suites `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`. `check-consistency.sh` fails when the copies of a pin differ: the Postgres, Kafka or Java version, the Postgres or Kafka digest, or the shellcheck image. It also fails when an image in `docker-compose.yml` or a base image in `backend/Dockerfile` has no digest.
+- `test`, script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`, then `scripts/check-consistency.sh`, a check of `.github/dependabot.yml` against its schema, and the four test suites `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`. `check-consistency.sh` fails when the copies of a pin differ: the Postgres, Kafka or Java version, the Postgres or Kafka digest, or the shellcheck image. It also fails when an image in `docker-compose.yml` or a base image in `backend/Dockerfile` has no digest. The Dependabot config check runs only when `.github/dependabot.yml` or the workflow file changed, or on `workflow_dispatch`.
 - `test`, Maven checks: `spotless:check`, the full `mvn test` reactor and `mvn jacoco:check` against the per-module floors above; they run when `backend/` or the workflow file changed, on `workflow_dispatch`, and on every push to `master` on which `test` runs.
 - `validate-manifests`: a guard that no data-layer resource (CNPG, Strimzi or Barman resources, or a StorageClass) is added under `charts/*/templates/`, then a check that no test suite leaks into the packaged subchart, `helm lint`, a per-service render check of the charts, and `kubeconform` validation of the `k8s/data-layer/` manifests against their schemas; `kubeconform` runs only when `k8s/` or the workflow file changed, or on `workflow_dispatch`.
 - `build-and-push`: on `master`, once `test` and `gitleaks` pass, builds (packaging only; the tests already ran in `test`) and pushes each service's image not already in Artifact Registry, tagged by content hash (see [`scripts/image-tag.sh`](scripts/image-tag.sh)); a push on which `test` doesn't run builds nothing.
 
 `test` and `validate-manifests` run only when the paths they cover change (as computed by `changes`), or on `workflow_dispatch`; see `docs/gke-cicd-runbook.md`'s Step 9 for the full pipeline, its exact path-based job gating, and the one-time GCP setup it depends on.
+
+[`.github/dependabot.yml`](.github/dependabot.yml) configures Dependabot to open pull requests once a month for newer versions of the actions `backend-ci.yml` uses, the backend's Maven dependencies and the pinned container images in `backend/Dockerfile`, `docker-compose.yml` and the `cafe-service` chart. Major versions are ignored, except for the actions. The "Dependabot" section of `docs/gke-cicd-runbook.md`'s Step 9 lists what else is ignored, what Dependabot does not update, and which of its pull requests need more edits or a local check before merging.
 
 ## Code formatting
 
@@ -806,8 +813,13 @@ scripts/    Shell script độc lập; mỗi script dưới đây có 1 bộ *.t
               Kafka hay Java, digest của Postgres hay Kafka, image shellcheck) bị lệch
               nhau, hoặc khi 1 image trong docker-compose.yml hay 1 base image trong
               backend/Dockerfile không có digest; do CI chạy
-.github/    Workflow GitHub Actions (hiện có: backend-ci.yml, xem mục Kiểm thử bên dưới
-            và Bước 9 của docs/gke-cicd-runbook.md)
+.github/    Cấu hình GitHub (xem mục Kiểm thử bên dưới và Bước 9 của
+            docs/gke-cicd-runbook.md):
+            - workflows/backend-ci.yml: workflow CI
+            - dependabot.yml: cấu hình cho Dependabot mở pull request cho phiên bản
+              mới hơn của các action trong workflow, các dependency Maven của backend
+              và các image container trong backend/Dockerfile, docker-compose.yml và
+              chart cafe-service
 docs/       Tài liệu hướng dẫn từng bước (hiện có: quá trình build GKE/CI-CD, xem
             docs/gke-cicd-runbook.md)
 ```
@@ -912,14 +924,16 @@ Module nào bật `jacoco-maven-plugin` (khai báo 1 lần ở `pluginManagement
 
 [`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) gồm các job sau:
 
-- `changes`: xác định những phần nào của repo có thay đổi (backend, scripts, charts, k8s, chính file workflow, các file mà `scripts/check-consistency.sh` đọc); `test` và `validate-manifests` dựa vào output của job này để quyết định có chạy hay không.
+- `changes`: xác định những phần nào của repo có thay đổi (backend, scripts, charts, k8s, config Dependabot, chính file workflow, các file mà `scripts/check-consistency.sh` đọc); `test` và `validate-manifests` dựa vào output của job này để quyết định có chạy hay không.
 - `gitleaks`: quét secret ở mọi lần push lên `master`, mỗi lần cập nhật pull request và mọi lần chạy `workflow_dispatch` thủ công.
-- `test`, phần kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các chart, rồi `scripts/check-consistency.sh` và 4 bộ test `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`. `check-consistency.sh` fail khi các bản sao của 1 pin bị lệch nhau: phiên bản Postgres, Kafka hay Java, digest của Postgres hay Kafka, hoặc image shellcheck. Nó cũng fail khi 1 image trong `docker-compose.yml` hay 1 base image trong `backend/Dockerfile` không có digest.
+- `test`, phần kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các chart, rồi `scripts/check-consistency.sh`, bước kiểm tra `.github/dependabot.yml` theo schema của nó, và 4 bộ test `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`. `check-consistency.sh` fail khi các bản sao của 1 pin bị lệch nhau: phiên bản Postgres, Kafka hay Java, digest của Postgres hay Kafka, hoặc image shellcheck. Nó cũng fail khi 1 image trong `docker-compose.yml` hay 1 base image trong `backend/Dockerfile` không có digest. Bước kiểm tra config Dependabot chỉ chạy khi `.github/dependabot.yml` hoặc file workflow có thay đổi, hoặc khi chạy `workflow_dispatch`.
 - `test`, các kiểm tra Maven: `spotless:check`, toàn bộ reactor `mvn test` và `mvn jacoco:check` với các sàn coverage theo từng module ở trên; chúng chạy khi `backend/` hoặc file workflow có thay đổi, khi chạy `workflow_dispatch`, và ở mọi lần push lên `master` mà `test` có chạy.
 - `validate-manifests`: kiểm tra không có resource tầng dữ liệu nào (resource CNPG, Strimzi hoặc Barman, hay 1 StorageClass) bị thêm vào `charts/*/templates/`, rồi kiểm tra không có bộ test nào lọt vào subchart đã đóng gói, `helm lint`, kiểm tra render chart cho từng service, và dùng `kubeconform` kiểm tra các manifest trong `k8s/data-layer/` theo schema của chúng; `kubeconform` chỉ chạy khi `k8s/` hoặc file workflow có thay đổi, hoặc khi chạy `workflow_dispatch`.
 - `build-and-push`: trên `master`, sau khi `test` và `gitleaks` pass, build (chỉ đóng gói; test đã chạy trong `test`) và push image của từng service chưa có sẵn trên Artifact Registry, gắn tag theo content hash (xem [`scripts/image-tag.sh`](scripts/image-tag.sh)); 1 lần push mà `test` không chạy thì không build gì.
 
 `test` và `validate-manifests` chỉ chạy khi các path mà mỗi job phụ trách có thay đổi (theo kết quả của `changes`), hoặc khi chạy `workflow_dispatch`; xem Bước 9 của `docs/gke-cicd-runbook.md` để biết toàn bộ pipeline, cách gating theo path chi tiết, và phần cấu hình GCP 1 lần mà nó cần.
+
+[`.github/dependabot.yml`](.github/dependabot.yml) cấu hình cho Dependabot mỗi tháng 1 lần mở pull request cho phiên bản mới hơn của các action mà `backend-ci.yml` dùng, các dependency Maven của backend và các image container được pin trong `backend/Dockerfile`, `docker-compose.yml` và chart `cafe-service`. Các bản major bị bỏ qua, trừ ở các action. Mục "Dependabot" ở Bước 9 của `docs/gke-cicd-runbook.md` liệt kê những gì khác bị bỏ qua, những gì Dependabot không cập nhật, và pull request nào của nó cần sửa thêm hoặc kiểm tra ở máy trước khi merge.
 
 ## Định dạng code (Code formatting)
 

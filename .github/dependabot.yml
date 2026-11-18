@@ -1,0 +1,97 @@
+version: 2
+
+multi-ecosystem-groups:
+  infra-images:
+    schedule:
+      interval: "monthly"
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "maven"
+    directory: "/backend"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.springframework.boot:*"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "org.springframework.cloud:*"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "io.swagger.core.v3:swagger-annotations-jakarta"
+      - dependency-name: "org.apache.maven.plugins:maven-clean-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-compiler-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-dependency-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-deploy-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-enforcer-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-install-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-jar-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-resources-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-surefire-plugin"
+    groups:
+      spring:
+        patterns:
+          - "org.springframework.boot:*"
+          - "org.springframework.cloud:*"
+      maven-dependencies:
+        patterns: ["*"]
+        exclude-patterns:
+          - "org.springframework.boot:*"
+          - "org.springframework.cloud:*"
+
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "maven"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    multi-ecosystem-group: "infra-images"
+    patterns: ["*"]
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "apache/kafka"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "docker"
+    directory: "/charts/cafe-service"
+    multi-ecosystem-group: "infra-images"
+    patterns: ["postgres"]
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

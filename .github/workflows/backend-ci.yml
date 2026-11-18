@@ -19,6 +19,7 @@ jobs:
       scripts: ${{ steps.filter.outputs.scripts }}
       charts: ${{ steps.filter.outputs.charts }}
       k8s: ${{ steps.filter.outputs.k8s }}
+      dependabot: ${{ steps.filter.outputs.dependabot }}
       workflow: ${{ steps.filter.outputs.workflow }}
       pins: ${{ steps.filter.outputs.pins }}
     steps:
@@ -38,6 +39,8 @@ jobs:
               - 'charts/**'
             k8s:
               - 'k8s/**'
+            dependabot:
+              - '.github/dependabot.yml'
             # This file itself: every job and step gated on the outputs above also runs when it
             # changes, so an edit to any step is exercised on the same PR (and deploy.test.sh,
             # which reads this file, reruns).
@@ -74,13 +77,15 @@ jobs:
     needs: changes
     # `charts` and `k8s` too: deploy.test.sh checks deploy.sh against files under charts/ and
     # k8s/data-layer/, and this job lints and tests the chart's own wait-for-db initContainer script
-    # (charts/*/files/). `pins` too: check-consistency.sh reads every file `pins` lists.
+    # (charts/*/files/). `dependabot` too: this job validates .github/dependabot.yml against its
+    # schema. `pins` too: check-consistency.sh reads every file `pins` lists.
     if: >-
       success() && (
         needs.changes.outputs.backend == 'true' ||
         needs.changes.outputs.scripts == 'true' ||
         needs.changes.outputs.charts == 'true' ||
         needs.changes.outputs.k8s == 'true' ||
+        needs.changes.outputs.dependabot == 'true' ||
         needs.changes.outputs.workflow == 'true' ||
         needs.changes.outputs.pins == 'true' ||
         github.event_name == 'workflow_dispatch'
@@ -97,6 +102,12 @@ jobs:
           needs.changes.outputs.workflow == 'true' ||
           github.event_name == 'workflow_dispatch' ||
           github.ref == 'refs/heads/master'
+        }}
+      RUN_DEPENDABOT_CHECK: >-
+        ${{
+          needs.changes.outputs.dependabot == 'true' ||
+          needs.changes.outputs.workflow == 'true' ||
+          github.event_name == 'workflow_dispatch'
         }}
     # The script checks and the Maven checks are two independent groups: each runs even if the
     # other failed (`!cancelled()` instead of the default `success()`), so a failure in one group
@@ -122,6 +133,16 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 2
         run: bash scripts/check-consistency.sh
+
+      - name: Validate the Dependabot config
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && env.RUN_DEPENDABOT_CHECK == 'true' }}
+        timeout-minutes: 2
+        run: |
+          curl -sSfL https://github.com/santhosh-tekuri/jsonschema/releases/download/v6.0.3/jv-v6.0.3-linux-amd64.tar.gz -o "$RUNNER_TEMP/jv.tar.gz"
+          echo "36e9ab8481cc8e2cb27c8336decc9abdcbd606b05792ca88d6188e01ec28766b  $RUNNER_TEMP/jv.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/jv.tar.gz" -C "$RUNNER_TEMP" jv
+          curl -sSfL https://raw.githubusercontent.com/SchemaStore/schemastore/d227d9f54eaf1a805de6c00e94c939f526a3da2f/src/schemas/json/dependabot-2.0.json -o "$RUNNER_TEMP/dependabot-2.0.json"
+          "$RUNNER_TEMP/jv" "$RUNNER_TEMP/dependabot-2.0.json" .github/dependabot.yml
 
       - name: Test the check-consistency script
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -243,7 +264,7 @@ jobs:
       - name: Install kubeconform
         if: env.RUN_KUBECONFORM == 'true'
         run: |
-          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz -o kubeconform.tar.gz
+          curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz -o kubeconform.tar.gz
           echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  kubeconform.tar.gz" | sha256sum -c -
           tar xzf kubeconform.tar.gz kubeconform
           sudo mv kubeconform /usr/local/bin/
@@ -251,8 +272,8 @@ jobs:
       # Both schema sources are pinned to a commit (the first is kubeconform's own default location,
       # which otherwise tracks master). Nothing updates these automatically: refresh with
       # `git ls-remote <repo> HEAD`, and always refresh the CRDs-catalog pin when the CNPG, Strimzi
-      # or barman-cloud version pinned in k8s/ changes, or their manifests are checked against old
-      # CRD schemas.
+      # or barman-cloud chart version in Step 3 of docs/gke-cicd-runbook.md changes; otherwise the
+      # k8s/data-layer manifests are checked against old CRD schemas.
       - name: Validate k8s/data-layer manifests against real CRD schemas
         if: env.RUN_KUBECONFORM == 'true'
         run: |

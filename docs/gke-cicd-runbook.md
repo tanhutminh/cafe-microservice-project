@@ -61,8 +61,9 @@ are written as plain bash. On Git Bash for Windows, `gcloud` needs `CLOUDSDK_PYT
   below; CI itself runs it via `gitleaks/gitleaks-action`, no local install needed for the pipeline).
 - `docker` with Docker Compose and Buildx (only needed locally, for Step 9: to run the pinned
   shellcheck lint, whose image CI runs itself, and to build all 6 images with
-  `docker compose build`, which no PR check does). It also reads a new image's digest when a pin
-  is bumped (`docker buildx imagetools inspect`, see "Pinned images").
+  `docker compose build`, or build them and start the whole stack with
+  `docker compose up -d --build --wait`, which no PR check does). It also reads a new image's
+  digest when a pin is bumped (`docker buildx imagetools inspect`, see "Pinned images").
 - `gke-gcloud-auth-plugin` on your `PATH` (check with `gke-gcloud-auth-plugin --version`).
   `kubectl`, `helm` and `cmctl` all need it to talk to a GKE cluster. Install it with
   `gcloud components install gke-gcloud-auth-plugin` (standalone SDK / Windows installer) or, with
@@ -910,9 +911,10 @@ the `test` job runs (see "What the workflow does" below), or via a manual `workf
 `master` — only after that same run's lint/test/coverage checks and secret scan pass.
 Everything below is already implemented in
 [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml),
+[dependabot.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/dependabot.yml),
 [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
 and [backend/Dockerfile](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/Dockerfile)
-— this section documents the GCP-side setup those files assume, and how the pieces fit together.
+— this section documents the GCP-side setup the workflow assumes, and how the pieces fit together.
 
 ### GCP setup
 
@@ -988,7 +990,7 @@ to store or leak in the first place.
 
 Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
 
-- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) computes six
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) computes seven
   separate outputs, so the other jobs can skip when they're not relevant (this is the one place in
   the workflow that lists the paths; the bullets below refer to the outputs by name):
   - `backend` — `backend/**`;
@@ -996,6 +998,7 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
     check and `deploy.test.sh`'s cases rely on;
   - `charts` — `charts/**`;
   - `k8s` — `k8s/**`;
+  - `dependabot` — `.github/dependabot.yml`;
   - `workflow` — the workflow file itself. Every job and step gated on the other outputs also
     runs when it is true, so a PR editing any step exercises that step before merging (and
     `deploy.test.sh`, which reads the workflow file, reruns);
@@ -1014,14 +1017,16 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   land in any file type (a pasted credential in a doc, a stray key in a YAML manifest), not just
   backend Java source, so it isn't gated behind `changes` the way `test`/`validate-manifests`
   are.
-- **`test`** — only runs when the `backend`, `scripts`, `charts`, `k8s`, `workflow` or `pins` output
-  is true (or on `workflow_dispatch`). `charts` and `k8s` count because `deploy.test.sh` checks
-  `deploy.sh` against files under `charts/` and `k8s/data-layer/`, and `charts` also because this
-  job lints and tests the chart's own `wait-for-db` initContainer script. `pins` counts because
-  `check-consistency.sh` reads every file `pins` lists. The job runs two independent groups of
-  checks; each runs even when the other failed, so one failure never hides the other's result:
+- **`test`** — only runs when the `backend`, `scripts`, `charts`, `k8s`, `dependabot`, `workflow`
+  or `pins` output is true (or on `workflow_dispatch`). `charts` and `k8s` count because
+  `deploy.test.sh` checks `deploy.sh` against files under `charts/` and `k8s/data-layer/`, and
+  `charts` also because this job lints and tests the chart's own `wait-for-db` initContainer
+  script. `dependabot` counts because this job validates `.github/dependabot.yml` against its
+  schema. `pins` counts because `check-consistency.sh` reads every file `pins` lists. The job runs
+  two independent groups of checks; each runs even when the other failed, so one failure never
+  hides the other's result:
   - the script checks: `shellcheck` over every script in `scripts/` and in the charts' `files/`,
-    then `scripts/check-consistency.sh`, then the four test suites,
+    then `scripts/check-consistency.sh` and the Dependabot config check, then the four test suites,
     `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`,
     `charts/cafe-service/files/wait-for-db.test.sh` and `scripts/deploy.test.sh`. shellcheck runs
     from an image pinned by digest; the same command lints locally:
@@ -1039,6 +1044,15 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
     `backend/Dockerfile` without a digest makes it fail too. Each error names the check that
     failed and the file, with the line where there is one. Run it locally with
     `bash scripts/check-consistency.sh`.
+
+    The Dependabot config check validates `.github/dependabot.yml` against SchemaStore's
+    `dependabot-2.0.json` schema with [jv](https://github.com/santhosh-tekuri/jsonschema). The
+    schema catches unknown keys, and values of the wrong type or outside the allowed ones. It does
+    not catch a misspelled dependency name or directory. The step downloads jv and the schema into
+    the runner's temporary directory: jv by version, checked against its sha256, and the schema from
+    a fixed SchemaStore commit. It runs only when the `dependabot` or `workflow` output is true, or
+    on `workflow_dispatch`. GitHub checks the file again once it reaches `master`, so look at
+    `Recent update jobs` under "Dependabot" below after merging a change to it.
 
     `check-consistency.test.sh` runs the script on fixtures made from the files the script reads:
     one fixture left unchanged, each of the others edited for one case. For each edit it requires
@@ -1094,11 +1108,11 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   two-minute Maven run, while `test` stays a single required check either way. On `master` the Maven
   checks run whenever `test` does, because that is where `build-and-push` runs: every image it
   pushes comes from a run that tested the backend tree it was built from, even when the push itself
-  only touched scripts, chart files, manifests under `k8s/`, the root `.gitignore` or a file
-  outside `backend/` that `pins` lists. A push that only edits `README.md` or this runbook
-  therefore costs that Maven run too. So does a `.gitignore` edit made for another part of the
-  repo, e.g. the frontend, since that file holds ignore patterns for the whole repo.
-  `build-and-push` then finds every image already present.
+  only touched scripts, chart files, manifests under `k8s/`, the root `.gitignore`,
+  `.github/dependabot.yml` or a file outside `backend/` that `pins` lists. A push that only edits
+  `README.md` or this runbook therefore costs that Maven run too. So does a `.gitignore` edit made
+  for another part of the repo, e.g. the frontend, since that file holds ignore patterns for the
+  whole repo. `build-and-push` then finds every image already present.
 - **`validate-manifests`** — guards against a CNPG/Strimzi/Barman resource or a StorageClass ever
   being added under `charts/*/templates/` (that data layer stays outside any Helm release, see
   "Architecture at a glance"), then `helm dependency build --skip-refresh` (`build` rather than
@@ -1114,8 +1128,8 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
   CNPG/Strimzi/Barman ones from the community
   [CRDs-catalog](https://github.com/datreeio/CRDs-catalog), both pinned to a commit. Nothing updates
   those pins automatically: refresh them with `git ls-remote <repo> HEAD`, and always refresh the
-  CRDs-catalog one when the CNPG, Strimzi or barman-cloud version in `k8s/` changes, or the
-  manifests are checked against old CRD schemas.
+  CRDs-catalog one when the version of the CNPG, Strimzi or barman-cloud chart in Step 3 changes;
+  otherwise the manifests are checked against old CRD schemas.
 - **`build-and-push`** — needs both `test` and `gitleaks` to succeed, and only runs on a push (or
   manual `workflow_dispatch`) to `master`, never on a PR, so a change that breaks the image build,
   e.g. in `backend/Dockerfile`, passes a PR's checks and fails only on `master`: build all 6
@@ -1182,14 +1196,17 @@ names, so the tag and the digest must always name the same image.
 The Testcontainers tests' `ContainerImages` classes hold the same Postgres and Kafka digests as
 `docker-compose.yml`, without a tag, because Testcontainers rejects a tag and a digest together.
 
-No tool updates these pins, so a fix in a newer image arrives only when the image is bumped by
-hand. Besides new versions, Docker Official Images (here `postgres`, `maven` and
-`eclipse-temurin`) are rebuilt under an unchanged version tag, for example when their base image
-is updated. To take such a rebuild, read the same tag's digest again. To move to a newer version,
-pick its tag first, then read its digest, here for Postgres 18.5:
+Docker Official Images (here `postgres`, `maven` and `eclipse-temurin`) are not only released in new
+versions but also rebuilt under an unchanged version tag, for example when their base image is
+updated. Dependabot covers the images in `backend/Dockerfile`, `docker-compose.yml` and the chart
+(see "Dependabot" below). It proposes their newer versions, except ignored ones, and can propose the
+new digest of a rebuilt tag. Every other image pin changes only by hand. To take a rebuild by hand,
+read the same tag's digest again. To move to a newer version, pick its tag first, then read its
+digest. For Postgres:
 
 ```bash
-docker buildx imagetools inspect postgres:18.5 | grep -m1 '^Digest:'
+image='postgres:<tag>'
+docker buildx imagetools inspect "$image" | grep -m1 '^Digest:'
 ```
 
 Never change a tag without its digest. Postgres and Kafka appear in several files: the comment
@@ -1214,6 +1231,112 @@ Strimzi's Kafka broker image, which Strimzi picks for `version`, and the Barman 
 sidecar. Also not pinned by digest: Testcontainers' own Ryuk container (it follows the
 Testcontainers version), the GitHub runner (`ubuntu-latest`) and the BuildKit builder that
 `build-and-push` sets up.
+
+### Dependabot
+
+[dependabot.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/dependabot.yml)
+configures Dependabot to open pull requests for newer versions of the workflow's actions, the
+backend's Maven dependencies and the container images in `backend/Dockerfile`,
+`docker-compose.yml` and the chart. Dependabot checks on the first day of each month, and also
+when a change to `dependabot.yml` reaches `master`. It proposes a version only once that version
+is 7 days old (`cooldown`). For an image, the 7 days count from the last push of the version's
+tag, so a version whose tag is rebuilt often can wait longer. The file has five entries:
+
+- **`github-actions`**, `/` — the actions `backend-ci.yml` uses. Each is pinned by a commit SHA
+  with its version in a comment, and Dependabot updates both. Minor and patch updates share one
+  PR. Each major update gets its own PR.
+- **`maven`**, `/backend` — the parent pom and every module pom. Spring Boot and Spring Cloud
+  updates share one PR, and all other updates share another. Each of these PRs changes the parent
+  pom, so all six services' image tags change.
+- **`docker`**, `/backend` — the Maven and JRE images in `backend/Dockerfile`, in one PR.
+- **`docker-compose`**, `/` — the four images in `docker-compose.yml`.
+- **`docker`**, `/charts/cafe-service` — the `wait-for-db` image in the chart's `values.yaml`.
+  This entry and the `docker-compose` one share one PR (`multi-ecosystem-groups`), so one PR can
+  carry a Postgres update for both files. The entry uses `docker` because the `helm` ecosystem
+  does not update a digest written inside `tag`.
+
+Some updates are ignored (`ignore`), because the edit Dependabot makes would be wrong or not
+enough:
+
+- **Major versions**, in every entry except `github-actions` — a new major version, for example
+  of Java or Postgres, is planned as its own work. Dependabot opens no version-update PR for an
+  ignored version, so look for new major versions by hand from time to time.
+- **Spring Boot and Spring Cloud minor versions** — a Spring Cloud release train supports only
+  certain Boot minor versions, so the two are bumped together by hand. The trains are numbered
+  `<year>.<n>`. A new train in the same year is a minor version, for example 2025.0 to 2025.1. A new
+  year's train is a major version, which the rule above already ignores.
+- **`swagger-annotations-jakarta`** — it must not be newer than the swagger-core that springdoc
+  brings (see the comment in `backend/pom.xml`), so it changes with springdoc.
+- **Nine Maven plugins** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
+  surefire) — their versions in `backend/pom.xml` are the ones Spring Boot manages.
+- **Version updates of the `maven` image** — its tag ends in the Java major version
+  (`-eclipse-temurin-<major>`). Dependabot reads that number as part of the version, so it would
+  propose a tag for a newer Java version. Look for a newer Maven version by hand from time to time.
+- **Version updates of `apache/kafka`** — Strimzi supports only certain Kafka versions, so the
+  Kafka version changes with a Strimzi upgrade.
+
+For the `maven` and `apache/kafka` images, only a change of version is ignored. When such an
+image is rebuilt under its current tag, Dependabot can still propose the new digest.
+
+An `@dependabot ignore` comment on a PR also creates an ignore rule, but GitHub stores it outside
+the repo, so prefer a rule in `dependabot.yml`.
+
+Dependabot alerts and security updates are off in this repository. Either can be turned on under
+the repository's Settings → Advanced Security. `cooldown` holds back version updates only, not
+security updates. GitHub's docs say the ignore rules apply to security updates too, except for
+`update-types`. Dependabot's source applies only their `versions` to security updates, and no
+rule here sets `versions`.
+
+A Dependabot PR edits only the files of its own entries, so some PRs need more edits or a local
+check before merging. Push any edits to the PR's branch:
+
+- **Spring Boot** — set the nine ignored plugins' version properties to the versions the new Boot
+  version manages. Then run `docker compose build` locally on the PR's branch before merging. No PR
+  check runs the Spring Boot Maven plugin (its version is `spring-boot.version`) or the jar and
+  dependency plugins; only the image build does.
+- **Maven or JRE image** — `build-and-push` never runs on a PR, so run `docker compose build`
+  locally on the PR's branch before merging. For a JRE update, run
+  `docker compose up -d --build --wait` instead; it fails if a container exits or fails its
+  healthcheck.
+- **Postgres or Kafka** — `test` fails until the other copies match, and `check-consistency.sh`
+  names each one. When only one of `docker-compose.yml` and the chart's `values.yaml` has the new
+  Postgres version, give the other file that version too. Use the digest of that file's own tag:
+  `postgres:<version>` in compose, `<version>-alpine` in the chart. A new compose digest goes into
+  the `ContainerImages` classes. A new Postgres version also needs a new `imageName` for CNPG, with
+  its own tag and digest. When CNPG has no image for that version yet, wait for it before pushing
+  any edit to the PR's branch.
+- **A new `wait-for-db` digest alone** — nothing to add.
+
+Four actions run only in `build-and-push`: `google-github-actions/auth`, `docker/login-action`,
+`docker/setup-buildx-action` and `docker/build-push-action`. No PR check runs them. Before merging a
+major update, read its release notes for breaking changes that affect how `backend-ci.yml` uses the
+action. After merging, check that `build-and-push` passed on `master`. That run skips the last two
+actions when every image already exists, which is always the case after a change to the workflow
+alone. A broken update to either of them then first fails on the next push that needs a new image.
+For a major update of either, bump `salt` in `scripts/image-tag.sh` in the same PR, so the run after
+merging builds all six images.
+
+Dependabot stops rebasing a PR once its branch has a commit Dependabot did not make. Do not
+comment `@dependabot recreate` on such a PR, because that command discards those commits. Merge
+it before the next monthly check, because that check can close a grouped PR and open a new one in
+its place.
+
+Each entry's recent update jobs and their logs are under Insights → Dependency graph →
+Dependabot (`Recent update jobs`). That page can also offer `Check for updates`, which starts a
+check at once.
+
+Dependabot does not update everything the repo pins. Besides the ignored updates above, these
+change only by hand:
+
+- CNPG's `imageName`, the digests in the `ContainerImages` classes and Strimzi's `version`;
+- in the workflow: the shellcheck image, the Helm version, setup-java's `java-version`,
+  kubeconform (its version, its checksum and the two schema commits) and jv (its version, its
+  checksum and the Dependabot schema commit);
+- `backend/pom.xml`'s `java.version`, and the google-java-format and sortpom versions in its
+  Spotless configuration;
+- the chart and manifest versions in Step 3.
+
+`frontend/` has no entry, because no CI job checks a frontend change yet.
 
 ### Branch protection
 
@@ -1948,7 +2071,8 @@ mục "Yêu cầu môi trường").
   `.gitleaksignore`, sang file/dòng khác và phải tạo lại fingerprint — xem `.gitleaksignore` bên
   dưới; bản thân CI chạy nó qua `gitleaks/gitleaks-action`, không cần cài local cho pipeline).
 - `docker` cùng Docker Compose và Buildx (chỉ cần ở local, cho Bước 9: để chạy lint shellcheck đã
-  pin bằng đúng image mà CI tự chạy, và để build cả 6 image bằng `docker compose build`, việc mà
+  pin bằng đúng image mà CI tự chạy, và để build cả 6 image bằng `docker compose build`, hoặc
+  build chúng rồi khởi động toàn bộ stack bằng `docker compose up -d --build --wait`, việc mà
   không kiểm tra nào của PR làm). Nó cũng được dùng để lấy digest của image mới khi nâng 1 image
   đã pin (`docker buildx imagetools inspect`, xem "Các image được pin").
 - `gke-gcloud-auth-plugin` nằm trong `PATH` (kiểm tra bằng `gke-gcloud-auth-plugin --version`).
@@ -2805,10 +2929,11 @@ Build và push image của từng service lên Artifact Registry ở mỗi lần
 `master` — chỉ sau khi các kiểm tra lint/test/coverage và bước quét secret của chính lần chạy đó
 pass. Mọi thứ dưới đây đã được implement trong
 [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml),
+[dependabot.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/dependabot.yml),
 [image-tag.sh](https://github.com/tanhutminh/cafe-microservice-project/blob/master/scripts/image-tag.sh)
 và [backend/Dockerfile](https://github.com/tanhutminh/cafe-microservice-project/blob/master/backend/Dockerfile)
-— mục này chỉ ghi lại phần cấu hình phía GCP mà các file đó giả định đã có, và cách các phần
-khớp với nhau.
+— mục này ghi lại phần cấu hình phía GCP mà workflow giả định đã có, và cách các phần khớp với
+nhau.
 
 ### Thiết lập phía GCP
 
@@ -2884,7 +3009,7 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
 
 5 job, đều nằm trong [backend-ci.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/workflows/backend-ci.yml):
 
-- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) tính ra 6 output
+- **`changes`** — [dorny/paths-filter](https://github.com/dorny/paths-filter) tính ra 7 output
   riêng biệt, để các job còn lại có thể bỏ qua khi không liên quan (đây là nơi duy nhất trong
   workflow liệt kê các path; các mục bên dưới chỉ gọi output theo tên):
   - `backend` — `backend/**`;
@@ -2892,6 +3017,7 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
     `deploy.sh` và các case của `deploy.test.sh` dựa vào các pattern trong đó;
   - `charts` — `charts/**`;
   - `k8s` — `k8s/**`;
+  - `dependabot` — `.github/dependabot.yml`;
   - `workflow` — chính file workflow. Mọi job và step được gate theo các output kia cũng chạy khi
     output này là true, nên 1 PR sửa step nào thì step đó được chạy thử trước khi merge (và
     `deploy.test.sh`, vốn đọc file workflow, cũng chạy lại);
@@ -2909,17 +3035,18 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   workflow (push lên `master`, PR hay `workflow_dispatch`), không có path filter nào — secret có
   thể lọt vào bất kỳ loại file nào (1 credential dán nhầm vào doc, 1 key lạc vào manifest YAML),
   không riêng gì Java backend, nên không bị gate theo `changes` như `test`/`validate-manifests`.
-- **`test`** — chỉ chạy khi output `backend`, `scripts`, `charts`, `k8s`, `workflow` hoặc `pins` là
-  true (hoặc khi `workflow_dispatch`). Có `charts` và `k8s` vì `deploy.test.sh` đối chiếu
-  `deploy.sh` với các file trong `charts/` và `k8s/data-layer/`, và có `charts` còn vì job này lint
-  và test script initContainer `wait-for-db` của chính chart. Có `pins` vì `check-consistency.sh`
-  đọc mọi file mà `pins` liệt kê. Job chạy 2 nhóm kiểm tra độc lập; mỗi nhóm vẫn chạy khi nhóm
-  kia fail, nên 1 lỗi không bao giờ che mất kết quả của nhóm còn lại:
+- **`test`** — chỉ chạy khi output `backend`, `scripts`, `charts`, `k8s`, `dependabot`, `workflow`
+  hoặc `pins` là true (hoặc khi `workflow_dispatch`). Có `charts` và `k8s` vì `deploy.test.sh` đối
+  chiếu `deploy.sh` với các file trong `charts/` và `k8s/data-layer/`, và có `charts` còn vì job
+  này lint và test script initContainer `wait-for-db` của chính chart. Có `dependabot` vì job này
+  kiểm tra `.github/dependabot.yml` theo schema của nó. Có `pins` vì `check-consistency.sh` đọc mọi
+  file mà `pins` liệt kê. Job chạy 2 nhóm kiểm tra độc lập; mỗi nhóm vẫn chạy khi nhóm kia fail,
+  nên 1 lỗi không bao giờ che mất kết quả của nhóm còn lại:
   - các kiểm tra script: `shellcheck` trên mọi script trong `scripts/` và trong `files/` của các
-    chart, rồi `scripts/check-consistency.sh`, rồi 4 bộ test `scripts/check-consistency.test.sh`,
-    `scripts/image-tag.test.sh`, `charts/cafe-service/files/wait-for-db.test.sh` và
-    `scripts/deploy.test.sh`. shellcheck chạy từ 1 image được pin theo digest; cùng lệnh đó dùng
-    để lint ở local:
+    chart, rồi `scripts/check-consistency.sh` và bước kiểm tra config Dependabot, rồi 4 bộ test
+    `scripts/check-consistency.test.sh`, `scripts/image-tag.test.sh`,
+    `charts/cafe-service/files/wait-for-db.test.sh` và `scripts/deploy.test.sh`. shellcheck chạy
+    từ 1 image được pin theo digest; cùng lệnh đó dùng để lint ở local:
 
     ```bash
     docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d -x scripts/*.sh charts/*/files/*.sh
@@ -2933,6 +3060,15 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
     lại. 1 image trong `docker-compose.yml` hoặc 1 base image trong `backend/Dockerfile` không có
     digest cũng làm nó fail. Mỗi lỗi ghi tên kiểm tra bị fail và file, kèm số dòng nếu có. Chạy nó
     ở local bằng `bash scripts/check-consistency.sh`.
+
+    Bước kiểm tra config Dependabot đối chiếu `.github/dependabot.yml` với schema
+    `dependabot-2.0.json` của SchemaStore bằng [jv](https://github.com/santhosh-tekuri/jsonschema).
+    Schema bắt được key lạ, và giá trị sai kiểu hoặc không thuộc các giá trị cho phép. Nó không bắt
+    được tên dependency hay directory viết sai. Bước này tải jv và schema về thư mục tạm của runner:
+    jv theo phiên bản, kiểm tra theo sha256 của nó, và schema từ 1 commit cố định của SchemaStore.
+    Nó chỉ chạy khi output `dependabot` hoặc `workflow` là true, hoặc khi `workflow_dispatch`.
+    GitHub kiểm tra lại file này khi nó vào tới `master`, nên sau khi merge 1 thay đổi của file, hãy
+    xem `Recent update jobs` ở mục "Dependabot" bên dưới.
 
     `check-consistency.test.sh` chạy script trên các fixture tạo từ những file mà script đọc: 1
     fixture giữ nguyên, mỗi fixture còn lại được sửa cho 1 case. Với mỗi chỗ sửa, nó đòi đúng các
@@ -2988,11 +3124,11 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   2 phút, trong khi `test` vẫn là 1 required check duy nhất. Trên `master` các kiểm tra Maven chạy
   mỗi khi `test` chạy, vì đó là nơi `build-and-push` chạy: mọi image nó push đều đến từ 1 lần chạy
   đã test đúng cây backend mà image đó được build ra, kể cả khi bản thân lần push chỉ đụng tới
-  script, file chart, manifest trong `k8s/`, `.gitignore` ở gốc repo hay 1 file nằm ngoài
-  `backend/` mà `pins` liệt kê. Vì vậy 1 lần push chỉ sửa `README.md` hoặc runbook này cũng tốn
-  lần chạy Maven đó. 1 thay đổi trong `.gitignore` dành cho phần khác của repo, ví dụ frontend,
-  cũng vậy, vì file này chứa pattern ignore cho toàn bộ repo. `build-and-push` sau đó thấy mọi
-  image đã có sẵn.
+  script, file chart, manifest trong `k8s/`, `.gitignore` ở gốc repo, `.github/dependabot.yml` hay
+  1 file nằm ngoài `backend/` mà `pins` liệt kê. Vì vậy 1 lần push chỉ sửa `README.md` hoặc
+  runbook này cũng tốn lần chạy Maven đó. 1 thay đổi trong `.gitignore` dành cho phần khác của
+  repo, ví dụ frontend, cũng vậy, vì file này chứa pattern ignore cho toàn bộ repo.
+  `build-and-push` sau đó thấy mọi image đã có sẵn.
 - **`validate-manifests`** — chặn việc 1 resource CNPG/Strimzi/Barman hoặc 1 StorageClass bị thêm
   nhầm vào `charts/*/templates/` (tầng data layer đó nằm ngoài mọi Helm release, xem "Kiến trúc tổng
   quan"), sau đó `helm dependency build --skip-refresh` (dùng `build` thay vì `update`, để 1
@@ -3007,8 +3143,8 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
   [yannh/kubernetes-json-schema](https://github.com/yannh/kubernetes-json-schema) và schema
   CNPG/Strimzi/Barman từ [CRDs-catalog](https://github.com/datreeio/CRDs-catalog) của cộng đồng, cả
   2 đều được pin theo 1 commit. Không có gì tự cập nhật các pin đó: làm mới bằng
-  `git ls-remote <repo> HEAD`, và luôn làm mới pin của CRDs-catalog khi phiên bản CNPG, Strimzi hay
-  barman-cloud trong `k8s/` thay đổi, nếu không manifest sẽ bị kiểm theo schema CRD cũ.
+  `git ls-remote <repo> HEAD`, và luôn làm mới pin của CRDs-catalog khi phiên bản chart CNPG,
+  Strimzi hay barman-cloud ở Bước 3 thay đổi, nếu không manifest sẽ bị kiểm theo schema CRD cũ.
 - **`build-and-push`** — cần cả `test` lẫn `gitleaks` cùng thành công, và chỉ chạy khi push (hoặc
   `workflow_dispatch` thủ công) lên `master`, không bao giờ chạy trên PR, nên 1 thay đổi làm hỏng
   bước build image, vd trong `backend/Dockerfile`, vẫn pass các kiểm tra của PR và chỉ fail trên
@@ -3076,15 +3212,17 @@ Các class `ContainerImages` trong test Testcontainers ghi đúng digest Postgre
 `docker-compose.yml` nhưng không kèm tag, vì Testcontainers không chấp nhận tag và digest đi cùng
 nhau.
 
-Không có công cụ nào tự cập nhật các pin này, nên bản vá có trong 1 image mới hơn chỉ được áp dụng
-khi có người nâng image đó bằng tay. Ngoài các phiên bản mới, các Docker Official Image (ở đây
-là `postgres`, `maven` và `eclipse-temurin`) còn được build lại mà vẫn giữ nguyên tag có ghi
-phiên bản, ví dụ khi base image của chúng được cập nhật. Để dùng bản build lại đó, hãy lấy lại
-digest của chính tag đó. Để chuyển sang phiên bản mới hơn, hãy chọn tag của phiên bản đó trước,
-rồi lấy digest của nó, ví dụ với Postgres 18.5:
+Các Docker Official Image (ở đây là `postgres`, `maven` và `eclipse-temurin`) không chỉ ra phiên bản
+mới mà còn được build lại dưới cùng 1 tag có ghi phiên bản, ví dụ khi base image của chúng được cập
+nhật. Dependabot theo dõi các image trong `backend/Dockerfile`, `docker-compose.yml` và chart (xem
+mục "Dependabot" bên dưới). Nó đề xuất phiên bản mới hơn của chúng, trừ các phiên bản bị bỏ qua, và
+có thể đề xuất digest mới của 1 tag được build lại. Mọi pin image còn lại chỉ đổi bằng tay. Để tự
+lấy 1 bản build lại, hãy lấy lại digest của chính tag đó. Để chuyển sang phiên bản mới hơn, hãy chọn
+tag của phiên bản đó trước, rồi lấy digest của nó. Với Postgres:
 
 ```bash
-docker buildx imagetools inspect postgres:18.5 | grep -m1 '^Digest:'
+image='postgres:<tag>'
+docker buildx imagetools inspect "$image" | grep -m1 '^Digest:'
 ```
 
 Không bao giờ đổi tag mà không đổi digest đi kèm. Postgres và Kafka được khai báo ở nhiều file;
@@ -3109,6 +3247,110 @@ khởi chạy, như image broker Kafka mà Strimzi chọn theo `version`, và si
 Plugin. Cũng không được pin theo digest: container Ryuk của chính Testcontainers (đi theo phiên
 bản của Testcontainers), runner của GitHub (`ubuntu-latest`) và BuildKit builder mà job
 `build-and-push` tạo ra.
+
+### Dependabot
+
+[dependabot.yml](https://github.com/tanhutminh/cafe-microservice-project/blob/master/.github/dependabot.yml)
+cấu hình cho Dependabot mở pull request cho phiên bản mới hơn của các action trong workflow, các
+dependency Maven của backend và các image container trong `backend/Dockerfile`,
+`docker-compose.yml` và chart. Dependabot kiểm tra vào ngày đầu tiên của mỗi tháng, và cả khi 1
+thay đổi của `dependabot.yml` vào tới `master`. Nó chỉ đề xuất 1 phiên bản khi phiên bản đó đã ra
+được 7 ngày (`cooldown`). Với 1 image, 7 ngày này tính từ lần push gần nhất của tag của phiên bản
+đó, nên 1 phiên bản có tag được build lại thường xuyên có thể phải chờ lâu hơn. File có 5 entry:
+
+- **`github-actions`**, `/` — các action mà `backend-ci.yml` dùng. Mỗi action được pin theo 1
+  commit SHA, kèm phiên bản trong comment, và Dependabot cập nhật cả 2. Các bản minor và patch đi
+  chung 1 PR. Mỗi bản major có PR riêng.
+- **`maven`**, `/backend` — pom cha và mọi pom của module. Các bản cập nhật Spring Boot và Spring
+  Cloud đi chung 1 PR, mọi bản cập nhật khác đi chung 1 PR khác. Mỗi PR này đều sửa pom cha, nên
+  tag image của cả 6 service đều đổi.
+- **`docker`**, `/backend` — image Maven và image JRE trong `backend/Dockerfile`, trong 1 PR.
+- **`docker-compose`**, `/` — 4 image trong `docker-compose.yml`.
+- **`docker`**, `/charts/cafe-service` — image `wait-for-db` trong `values.yaml` của chart. Entry
+  này và entry `docker-compose` đi chung 1 PR (`multi-ecosystem-groups`), nên 1 PR có thể mang bản
+  cập nhật Postgres cho cả 2 file. Entry này dùng `docker` vì ecosystem `helm` không cập nhật
+  digest được ghi bên trong `tag`.
+
+1 số bản cập nhật bị bỏ qua (`ignore`), vì chỗ sửa mà Dependabot làm sẽ sai hoặc chưa đủ:
+
+- **Các bản major**, ở mọi entry trừ `github-actions` — 1 bản major mới, ví dụ của Java hay
+  Postgres, được lên kế hoạch thành việc riêng. Dependabot không mở PR cập nhật phiên bản lên 1 bản
+  bị bỏ qua, nên thỉnh thoảng hãy tự kiểm tra xem có bản major mới không.
+- **Các bản minor của Spring Boot và Spring Cloud** — 1 release train của Spring Cloud chỉ hỗ trợ 1
+  số bản minor nhất định của Boot, nên cả 2 được nâng cùng nhau bằng tay. Các train được đánh số
+  theo dạng `<year>.<n>`. Train mới trong cùng năm là 1 bản minor, ví dụ 2025.0 lên 2025.1. Train
+  của năm mới là 1 bản major, mà rule ở trên đã bỏ qua.
+- **`swagger-annotations-jakarta`** — nó không được mới hơn swagger-core mà springdoc mang theo
+  (xem comment trong `backend/pom.xml`), nên nó đổi cùng springdoc.
+- **9 plugin Maven** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
+  surefire) — phiên bản của chúng trong `backend/pom.xml` là các phiên bản mà Spring Boot quản lý.
+- **Các bản cập nhật phiên bản của image `maven`** — tag của nó kết thúc bằng major version của
+  Java (`-eclipse-temurin-<major>`). Dependabot đọc số đó như 1 phần của phiên bản, nên nó sẽ đề
+  xuất tag của 1 bản Java mới hơn. Thỉnh thoảng hãy tự kiểm tra xem có bản Maven mới hơn không.
+- **Các bản cập nhật phiên bản của `apache/kafka`** — Strimzi chỉ hỗ trợ 1 số phiên bản Kafka nhất
+  định, nên phiên bản Kafka đổi cùng lần nâng cấp Strimzi.
+
+Với image `maven` và `apache/kafka`, chỉ việc đổi phiên bản bị bỏ qua. Khi 1 image như vậy được
+build lại dưới tag hiện tại, Dependabot vẫn có thể đề xuất digest mới.
+
+1 comment `@dependabot ignore` trên PR cũng tạo 1 rule bỏ qua, nhưng GitHub lưu nó ngoài repo, nên
+hãy ưu tiên ghi rule trong `dependabot.yml`.
+
+Dependabot alerts và security update đều đang tắt ở repo này. Có thể bật từng cái ở Settings →
+Advanced Security của repo. `cooldown` chỉ giữ lại các bản cập nhật phiên bản, không giữ lại
+security update. Tài liệu của GitHub nói các rule bỏ qua cũng áp dụng cho security update, trừ
+`update-types`. Source của Dependabot chỉ áp dụng phần `versions` của chúng cho security update,
+và không rule nào ở đây ghi `versions`.
+
+1 PR của Dependabot chỉ sửa các file thuộc entry của chính nó, nên 1 số PR cần sửa thêm hoặc
+kiểm tra ở máy trước khi merge. Hãy push các chỗ sửa lên nhánh của PR:
+
+- **Spring Boot** — đặt các property phiên bản của 9 plugin bị bỏ qua theo các phiên bản mà bản Boot
+  mới quản lý. Rồi chạy `docker compose build` ở máy, trên nhánh của PR, trước khi merge. Không kiểm
+  tra nào của PR chạy plugin Maven của Spring Boot (phiên bản của nó là `spring-boot.version`) hay
+  plugin jar và dependency; chỉ bước build image chạy chúng.
+- **Image Maven hoặc JRE** — `build-and-push` không bao giờ chạy trên PR, nên hãy chạy
+  `docker compose build` ở máy, trên nhánh của PR, trước khi merge. Với bản cập nhật JRE, hãy chạy
+  `docker compose up -d --build --wait` thay vào đó; lệnh này fail nếu có container thoát ra hoặc
+  không qua được healthcheck.
+- **Postgres hoặc Kafka** — `test` fail cho tới khi các bản sao khác khớp, và `check-consistency.sh`
+  ghi tên từng bản sao. Khi phiên bản Postgres mới chỉ có ở 1 trong 2 file, `docker-compose.yml`
+  hoặc `values.yaml` của chart, hãy ghi phiên bản đó vào file còn lại. Hãy dùng digest của chính tag
+  trong file đó: `postgres:<version>` trong compose, `<version>-alpine` trong chart. Digest mới của
+  compose được ghi vào các class `ContainerImages`. 1 phiên bản Postgres mới còn cần 1 `imageName`
+  mới cho CNPG, với tag và digest riêng của nó. Khi CNPG chưa có image cho phiên bản đó, hãy chờ có
+  image đó rồi mới push bất kỳ chỗ sửa nào lên nhánh của PR.
+- **Chỉ riêng digest `wait-for-db` mới** — không cần sửa thêm gì.
+
+4 action chỉ chạy trong `build-and-push`: `google-github-actions/auth`, `docker/login-action`,
+`docker/setup-buildx-action` và `docker/build-push-action`. Không kiểm tra nào của PR chạy chúng.
+Trước khi merge 1 bản major, hãy đọc release notes của nó để xem có breaking change nào ảnh hưởng
+tới cách `backend-ci.yml` dùng action đó không. Sau khi merge, hãy kiểm tra `build-and-push` đã pass
+trên `master`. Lần chạy đó bỏ qua 2 action cuối khi mọi image đã có sẵn, và điều này luôn đúng sau 1
+thay đổi chỉ ở workflow. Khi đó, 1 bản cập nhật hỏng của 1 trong 2 action đó chỉ fail lần đầu ở lần
+push kế tiếp cần image mới. Với bản major của 1 trong 2 action đó, hãy tăng `salt` trong
+`scripts/image-tag.sh` trong cùng PR, để lần chạy sau khi merge build lại cả 6 image.
+
+Dependabot ngừng rebase 1 PR khi nhánh của PR có commit không do Dependabot tạo. Đừng comment
+`@dependabot recreate` trên PR như vậy, vì lệnh đó bỏ các commit ấy. Hãy merge PR trước lần kiểm
+tra hàng tháng kế tiếp, vì lần kiểm tra đó có thể đóng 1 PR gộp và mở 1 PR mới thay thế.
+
+Các lần cập nhật gần đây của từng entry và log của chúng nằm ở Insights → Dependency graph →
+Dependabot (`Recent update jobs`). Trang đó cũng có thể có nút `Check for updates`, để chạy 1 lần
+kiểm tra ngay.
+
+Dependabot không cập nhật mọi thứ repo đang pin. Ngoài các bản cập nhật bị bỏ qua ở trên, những
+thứ sau chỉ đổi bằng tay:
+
+- `imageName` của CNPG, các digest trong các class `ContainerImages` và `version` của Strimzi;
+- trong workflow: image shellcheck, phiên bản Helm, `java-version` của setup-java, kubeconform
+  (phiên bản, checksum và 2 commit schema) và jv (phiên bản, checksum và commit của schema
+  Dependabot);
+- `java.version` của `backend/pom.xml`, và phiên bản google-java-format và sortpom trong cấu hình
+  Spotless của nó;
+- phiên bản chart và manifest ở Bước 3.
+
+`frontend/` không có entry nào, vì chưa có job CI nào kiểm tra thay đổi ở frontend.
 
 ### Branch protection
 
