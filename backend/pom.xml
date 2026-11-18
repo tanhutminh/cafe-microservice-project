@@ -29,8 +29,8 @@
          it falls after the zip format's 1980 start in every time zone. -->
     <project.build.outputTimestamp>1980-02-01T00:00:00Z</project.build.outputTimestamp>
 
-    <spring-boot.version>4.1.0</spring-boot.version>
-    <spring-cloud.version>2025.1.2</spring-cloud.version>
+    <spring-boot.version>4.1.2</spring-boot.version>
+    <spring-cloud.version>2025.1.4</spring-cloud.version>
 
     <jjwt.version>0.13.0</jjwt.version>
     <resilience4j.version>2.3.0</resilience4j.version>
