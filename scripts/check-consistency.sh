@@ -188,11 +188,12 @@ check_postgres_version() {
 # A compose version with no minor version is reported as unsupported, and the runbook bullets
 # are then not compared.
 check_kafka_version() {
-  local c=kafka-version k d ref minor
+  local c=kafka-version k d line ref minor
   extract $c "$compose" "the apache/kafka image" "^$S+image:$S*apache/kafka:([0-9][0-9.]*)@sha256:($D)\$" 1 || return 0
   k=${ex_cap1[0]}
   d=${ex_cap2[0]}
-  ref="$compose:${ex_line[0]}"
+  line=${ex_line[0]}
+  ref="$compose:$line"
   if extract $c "$kafka_cluster" "the Strimzi Kafka version" "^$S+version:$S*([0-9][0-9.]*)\$" 1; then
     compare $c "$kafka_cluster" "${ex_line[0]}" "${ex_cap1[0]}" "$k" "$ref"
   fi
@@ -200,7 +201,7 @@ check_kafka_version() {
     compare $c "$order_images" "${ex_line[0]}" "${ex_cap1[0]}" "$d" "$ref"
   fi
   if ! minor=$(major_minor "$k"); then
-    fail $c "$compose" "${ref##*:}" "unsupported value $k (no minor version)"
+    fail $c "$compose" "$line" "unsupported value $k (no minor version)"
     return 0
   fi
   if extract $c "$runbook" "the Kafka version of the English Kafka bullet" 'version \(([0-9][0-9.]*)\) is pinned' 1; then

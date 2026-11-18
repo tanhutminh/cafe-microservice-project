@@ -1033,16 +1033,17 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
     On Git Bash, prefix the command with `MSYS_NO_PATHCONV=1`.
 
     `check-consistency.sh` fails when the copies of a pin differ: the Postgres, Kafka or Java
-    version, the Postgres or Kafka digest, or the shellcheck image. It also fails when it cannot
-    find a copy, for example after a README sentence that names the Postgres volume is reworded.
-    An image in `docker-compose.yml` or a base image in `backend/Dockerfile` without a digest
-    makes it fail too. Each error names the check that failed and the file, with the line where
-    there is one. Run it locally with `bash scripts/check-consistency.sh`.
+    version, the Postgres or Kafka digest, or the shellcheck image. It also fails when it finds a
+    different number of copies than it expects, for example after a README sentence that names
+    the Postgres volume is reworded. An image in `docker-compose.yml` or a base image in
+    `backend/Dockerfile` without a digest makes it fail too. Each error names the check that
+    failed and the file, with the line where there is one. Run it locally with
+    `bash scripts/check-consistency.sh`.
 
-    `check-consistency.test.sh` runs the script on fixtures made from the files the script reads,
-    each edited for one case. For each edit it requires exactly the expected errors, or none when
-    the edit breaks no check. It also fails unless the `pins` filter lists exactly the files the
-    script reads.
+    `check-consistency.test.sh` runs the script on fixtures made from the files the script reads:
+    one fixture left unchanged, each of the others edited for one case. For each edit it requires
+    exactly the expected errors, or none when the edit breaks no check. It also fails unless the
+    `pins` filter lists exactly the files the script reads.
 
     `image-tag.test.sh` runs `image-tag.sh` on fixture commits in a throwaway git repository,
     isolated from your git config and environment. The tag must be 16 lowercase hex characters and
@@ -2927,16 +2928,16 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
     Trên Git Bash, thêm `MSYS_NO_PATHCONV=1` ở đầu lệnh.
 
     `check-consistency.sh` fail khi các bản sao của 1 pin bị lệch nhau: phiên bản Postgres, Kafka
-    hay Java, digest của Postgres hay Kafka, hoặc image shellcheck. Nó cũng fail khi không tìm thấy
-    1 bản sao, ví dụ khi 1 câu trong README ghi tên volume Postgres bị viết lại. 1 image trong
-    `docker-compose.yml` hoặc 1 base image trong `backend/Dockerfile` không có digest cũng làm nó
-    fail. Mỗi lỗi ghi tên kiểm tra bị fail và file, kèm số dòng nếu có. Chạy nó ở local bằng
-    `bash scripts/check-consistency.sh`.
+    hay Java, digest của Postgres hay Kafka, hoặc image shellcheck. Nó cũng fail khi tìm thấy số
+    bản sao khác với số nó mong đợi, ví dụ khi 1 câu trong README ghi tên volume Postgres bị viết
+    lại. 1 image trong `docker-compose.yml` hoặc 1 base image trong `backend/Dockerfile` không có
+    digest cũng làm nó fail. Mỗi lỗi ghi tên kiểm tra bị fail và file, kèm số dòng nếu có. Chạy nó
+    ở local bằng `bash scripts/check-consistency.sh`.
 
-    `check-consistency.test.sh` chạy script trên các fixture tạo từ những file mà script đọc, mỗi
-    fixture được sửa cho 1 case. Với mỗi chỗ sửa, nó đòi đúng các lỗi mong đợi, hoặc không lỗi
-    nào khi chỗ sửa không làm fail kiểm tra nào. Nó cũng fail nếu filter `pins` không liệt kê đúng
-    các file mà script đọc.
+    `check-consistency.test.sh` chạy script trên các fixture tạo từ những file mà script đọc: 1
+    fixture giữ nguyên, mỗi fixture còn lại được sửa cho 1 case. Với mỗi chỗ sửa, nó đòi đúng các
+    lỗi mong đợi, hoặc không lỗi nào khi chỗ sửa không làm fail kiểm tra nào. Nó cũng fail nếu
+    filter `pins` không liệt kê đúng các file mà script đọc.
 
     `image-tag.test.sh` chạy `image-tag.sh` trên các commit fixture trong 1 git repo tạm, cô lập
     khỏi config và môi trường git của bạn. Tag phải gồm 16 ký tự hex chữ thường và giữ nguyên khi
