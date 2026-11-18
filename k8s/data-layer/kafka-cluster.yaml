@@ -51,9 +51,10 @@ metadata:
   # starting 0.48) — harmless to include, not required, left in only for clarity.
 spec:
   kafka:
-    # Pinned so upgrading the Strimzi operator cannot silently change the Kafka version (unset,
-    # Strimzi uses the operator's own default). metadataVersion is the KRaft metadata format; keep
-    # it at the level matching `version` until deliberately raised after an upgrade.
+    # Pinned so upgrading the Strimzi operator cannot silently change the Kafka version (without
+    # `version`, Strimzi runs the operator's default Kafka version). metadataVersion is the KRaft
+    # metadata format; keep it at the level matching `version` until deliberately raised after an
+    # upgrade.
     # Change `version` together with docker-compose.yml's Kafka image (tag and digest),
     # order-service's testsupport/ContainerImages (compose's digest) and, for a new major or minor
     # version, the major.minor version docs/gke-cicd-runbook.md names for this file.

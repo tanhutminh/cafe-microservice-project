@@ -248,7 +248,11 @@ expect "each README sentence that names the current volume must carry the Postgr
 
 fresh
 mutate "$readme" "\$a The previous version's volume is ${b}<project>_$old_volume${b}."
-expect "a README mention of the previous major version's volume is allowed"
+expect "a README mention of the previous major version's volume on its own line is allowed"
+
+fresh
+mutate "$readme" "/postgres$pg_major-data/s/\$/ The previous version's volume is ${b}<project>_$old_volume${b}./"
+expect "a README mention of the previous major version's volume is allowed on every line that names the current one"
 
 fresh
 mutate "$runbook" "s/(pins the Postgres image \\()$pg_major,/\\1$pg_version,/"
@@ -432,6 +436,12 @@ expect "a Maven image without its digest is reported once" \
   "ERROR digests-present: $dockerfile:$maven_line: $maven_image has no @sha256 digest"
 
 fresh
+maven_to_scratch="s/^(FROM[[:space:]]+)maven:[^[:space:]]+/\\1scratch/"
+maven_missing="ERROR java-version: $dockerfile: expected exactly 1 line(s) with the Maven image, found 0"
+mutate "$dockerfile" "$maven_to_scratch"
+expect "$dockerfile with 0 line(s) with the Maven image is reported" "$maven_missing"
+
+fresh
 mutate "$dockerfile" "s/eclipse-temurin:$java_major\\.[^@]*@/eclipse-temurin:$java_major@/"
 expect "a JRE tag with only the Java major version is read"
 
@@ -496,6 +506,10 @@ done
 for check_name in postgres-version kafka-version java-version; do
   fresh
   want=()
+  if [ "$check_name" = java-version ]; then
+    mutate "$dockerfile" "$maven_to_scratch"
+    want+=("$maven_missing")
+  fi
   for blank_case in "${blank_cases[@]}"; do
     IFS='|' read -r row_check rel anchor label count unit <<<"$blank_case"
     unit=${unit:-line(s) with}
