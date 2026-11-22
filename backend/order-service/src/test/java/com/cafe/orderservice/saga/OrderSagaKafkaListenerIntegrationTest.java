@@ -32,6 +32,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.testcontainers.junit.jupiter.Container;
@@ -112,6 +113,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 @SpringBootTest
 @TestPropertySource(properties = "app.outbox.poll-enabled=false")
 @Testcontainers
+@DirtiesContext
 class OrderSagaKafkaListenerIntegrationTest {
 
   private static final long TIMEOUT_MS = 10_000L;

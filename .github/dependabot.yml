@@ -32,6 +32,8 @@ updates:
         update-types: ["version-update:semver-minor"]
       - dependency-name: "org.springframework.cloud:*"
         update-types: ["version-update:semver-minor"]
+      - dependency-name: "org.springdoc:*"
+        update-types: ["version-update:semver-minor"]
       - dependency-name: "io.swagger.core.v3:swagger-annotations-jakarta"
       - dependency-name: "org.apache.maven.plugins:maven-clean-plugin"
       - dependency-name: "org.apache.maven.plugins:maven-compiler-plugin"
@@ -47,11 +49,13 @@ updates:
         patterns:
           - "org.springframework.boot:*"
           - "org.springframework.cloud:*"
+          - "org.springdoc:*"
       maven-dependencies:
         patterns: ["*"]
         exclude-patterns:
           - "org.springframework.boot:*"
           - "org.springframework.cloud:*"
+          - "org.springdoc:*"
 
   - package-ecosystem: "docker"
     directory: "/backend"

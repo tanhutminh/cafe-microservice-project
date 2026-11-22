@@ -1051,8 +1051,8 @@ Five jobs, all in [backend-ci.yml](https://github.com/tanhutminh/cafe-microservi
     not catch a misspelled dependency name or directory. The step downloads jv and the schema into
     the runner's temporary directory: jv by version, checked against its sha256, and the schema from
     a fixed SchemaStore commit. It runs only when the `dependabot` or `workflow` output is true, or
-    on `workflow_dispatch`. GitHub checks the file again once it reaches `master`, so look at
-    `Recent update jobs` under "Dependabot" below after merging a change to it.
+    on `workflow_dispatch`. GitHub checks the file again once it reaches `master`, so after merging
+    a change to it, look at `Recent update jobs` (see "Dependabot" below).
 
     `check-consistency.test.sh` runs the script on fixtures made from the files the script reads:
     one fixture left unchanged, each of the others edited for one case. For each edit it requires
@@ -1245,9 +1245,9 @@ tag, so a version whose tag is rebuilt often can wait longer. The file has five 
 - **`github-actions`**, `/` — the actions `backend-ci.yml` uses. Each is pinned by a commit SHA
   with its version in a comment, and Dependabot updates both. Minor and patch updates share one
   PR. Each major update gets its own PR.
-- **`maven`**, `/backend` — the parent pom and every module pom. Spring Boot and Spring Cloud
-  updates share one PR, and all other updates share another. Each of these PRs changes the parent
-  pom, so all six services' image tags change.
+- **`maven`**, `/backend` — the parent pom and every module pom. Spring Boot, Spring Cloud and
+  springdoc updates share one PR, and all other updates share another. Each of these PRs changes the
+  parent pom, so all six services' image tags change.
 - **`docker`**, `/backend` — the Maven and JRE images in `backend/Dockerfile`, in one PR.
 - **`docker-compose`**, `/` — the four images in `docker-compose.yml`.
 - **`docker`**, `/charts/cafe-service` — the `wait-for-db` image in the chart's `values.yaml`.
@@ -1265,6 +1265,10 @@ enough:
   certain Boot minor versions, so the two are bumped together by hand. The trains are numbered
   `<year>.<n>`. A new train in the same year is a minor version, for example 2025.0 to 2025.1. A new
   year's train is a major version, which the rule above already ignores.
+- **springdoc minor versions** — springdoc's compatibility matrix, in its FAQ, lists the springdoc
+  minor versions built for each Boot minor version. When bumping Boot's minor version, also move
+  springdoc to the newest one listed for the new Boot minor version, and set
+  `swagger-annotations.version` as the comment in `backend/pom.xml` says.
 - **`swagger-annotations-jakarta`** — it must not be newer than the swagger-core that springdoc
   brings (see the comment in `backend/pom.xml`), so it changes with springdoc.
 - **Nine Maven plugins** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
@@ -1310,16 +1314,18 @@ check before merging. Push any edits to the PR's branch:
 Four actions run only in `build-and-push`: `google-github-actions/auth`, `docker/login-action`,
 `docker/setup-buildx-action` and `docker/build-push-action`. No PR check runs them. Before merging a
 major update, read its release notes for breaking changes that affect how `backend-ci.yml` uses the
-action. After merging, check that `build-and-push` passed on `master`. That run skips the last two
-actions when every image already exists, which is always the case after a change to the workflow
-alone. A broken update to either of them then first fails on the next push that needs a new image.
-For a major update of either, bump `salt` in `scripts/image-tag.sh` in the same PR, so the run after
-merging builds all six images.
+action.
 
-Dependabot stops rebasing a PR once its branch has a commit Dependabot did not make. Do not
-comment `@dependabot recreate` on such a PR, because that command discards those commits. Merge
-it before the next monthly check, because that check can close a grouped PR and open a new one in
-its place.
+After merging an update of any of the four, check that `build-and-push` passed on `master`. That run
+skips the last two actions when every image already exists, which is always the case after a change
+to the workflow alone. A broken update to either of them then first fails on the next push that
+needs a new image. For a major update of either, bump `salt` in `scripts/image-tag.sh` in the same
+PR, so the run after merging builds all six images.
+
+Dependabot stops rebasing a PR once its branch has a commit Dependabot did not make. Do not comment
+`@dependabot recreate` on such a PR, because that command discards those commits. Merge it before
+the next check (monthly, or when a change to `dependabot.yml` reaches `master`), because that check
+can close a grouped PR and open a new one in its place.
 
 Each entry's recent update jobs and their logs are under Insights → Dependency graph →
 Dependabot (`Recent update jobs`). That page can also offer `Check for updates`, which starts a
@@ -3068,7 +3074,7 @@ có credential tĩnh nào cần lưu hay có thể bị lộ.
     jv theo phiên bản, kiểm tra theo sha256 của nó, và schema từ 1 commit cố định của SchemaStore.
     Nó chỉ chạy khi output `dependabot` hoặc `workflow` là true, hoặc khi `workflow_dispatch`.
     GitHub kiểm tra lại file này khi nó vào tới `master`, nên sau khi merge 1 thay đổi của file, hãy
-    xem `Recent update jobs` ở mục "Dependabot" bên dưới.
+    xem `Recent update jobs` (ở mục "Dependabot" bên dưới).
 
     `check-consistency.test.sh` chạy script trên các fixture tạo từ những file mà script đọc: 1
     fixture giữ nguyên, mỗi fixture còn lại được sửa cho 1 case. Với mỗi chỗ sửa, nó đòi đúng các
@@ -3261,9 +3267,9 @@ thay đổi của `dependabot.yml` vào tới `master`. Nó chỉ đề xuất 1
 - **`github-actions`**, `/` — các action mà `backend-ci.yml` dùng. Mỗi action được pin theo 1
   commit SHA, kèm phiên bản trong comment, và Dependabot cập nhật cả 2. Các bản minor và patch đi
   chung 1 PR. Mỗi bản major có PR riêng.
-- **`maven`**, `/backend` — pom cha và mọi pom của module. Các bản cập nhật Spring Boot và Spring
-  Cloud đi chung 1 PR, mọi bản cập nhật khác đi chung 1 PR khác. Mỗi PR này đều sửa pom cha, nên
-  tag image của cả 6 service đều đổi.
+- **`maven`**, `/backend` — pom cha và mọi pom của module. Các bản cập nhật Spring Boot, Spring
+  Cloud và springdoc đi chung 1 PR, mọi bản cập nhật khác đi chung 1 PR khác. Mỗi PR này đều sửa pom
+  cha, nên tag image của cả 6 service đều đổi.
 - **`docker`**, `/backend` — image Maven và image JRE trong `backend/Dockerfile`, trong 1 PR.
 - **`docker-compose`**, `/` — 4 image trong `docker-compose.yml`.
 - **`docker`**, `/charts/cafe-service` — image `wait-for-db` trong `values.yaml` của chart. Entry
@@ -3280,6 +3286,10 @@ thay đổi của `dependabot.yml` vào tới `master`. Nó chỉ đề xuất 1
   số bản minor nhất định của Boot, nên cả 2 được nâng cùng nhau bằng tay. Các train được đánh số
   theo dạng `<year>.<n>`. Train mới trong cùng năm là 1 bản minor, ví dụ 2025.0 lên 2025.1. Train
   của năm mới là 1 bản major, mà rule ở trên đã bỏ qua.
+- **Các bản minor của springdoc** — bảng tương thích trong FAQ của springdoc ghi các bản minor của
+  springdoc được build cho từng bản minor của Boot. Khi nâng bản minor của Boot, hãy nâng luôn
+  springdoc lên bản minor mới nhất mà bảng đó ghi cho bản minor mới của Boot, và đặt
+  `swagger-annotations.version` theo comment trong `backend/pom.xml`.
 - **`swagger-annotations-jakarta`** — nó không được mới hơn swagger-core mà springdoc mang theo
   (xem comment trong `backend/pom.xml`), nên nó đổi cùng springdoc.
 - **9 plugin Maven** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
@@ -3325,15 +3335,18 @@ kiểm tra ở máy trước khi merge. Hãy push các chỗ sửa lên nhánh c
 4 action chỉ chạy trong `build-and-push`: `google-github-actions/auth`, `docker/login-action`,
 `docker/setup-buildx-action` và `docker/build-push-action`. Không kiểm tra nào của PR chạy chúng.
 Trước khi merge 1 bản major, hãy đọc release notes của nó để xem có breaking change nào ảnh hưởng
-tới cách `backend-ci.yml` dùng action đó không. Sau khi merge, hãy kiểm tra `build-and-push` đã pass
+tới cách `backend-ci.yml` dùng action đó không.
+
+Sau khi merge 1 bản cập nhật của 1 trong 4 action đó, hãy kiểm tra `build-and-push` đã pass
 trên `master`. Lần chạy đó bỏ qua 2 action cuối khi mọi image đã có sẵn, và điều này luôn đúng sau 1
 thay đổi chỉ ở workflow. Khi đó, 1 bản cập nhật hỏng của 1 trong 2 action đó chỉ fail lần đầu ở lần
 push kế tiếp cần image mới. Với bản major của 1 trong 2 action đó, hãy tăng `salt` trong
 `scripts/image-tag.sh` trong cùng PR, để lần chạy sau khi merge build lại cả 6 image.
 
 Dependabot ngừng rebase 1 PR khi nhánh của PR có commit không do Dependabot tạo. Đừng comment
-`@dependabot recreate` trên PR như vậy, vì lệnh đó bỏ các commit ấy. Hãy merge PR trước lần kiểm
-tra hàng tháng kế tiếp, vì lần kiểm tra đó có thể đóng 1 PR gộp và mở 1 PR mới thay thế.
+`@dependabot recreate` trên PR như vậy, vì lệnh đó bỏ các commit ấy. Hãy merge PR trước lần kiểm tra
+kế tiếp (hàng tháng, hoặc khi 1 thay đổi của `dependabot.yml` vào tới `master`), vì lần kiểm tra đó
+có thể đóng 1 PR gộp và mở 1 PR mới thay thế.
 
 Các lần cập nhật gần đây của từng entry và log của chúng nằm ở Insights → Dependency graph →
 Dependabot (`Recent update jobs`). Trang đó cũng có thể có nút `Check for updates`, để chạy 1 lần
