@@ -4,6 +4,7 @@ import com.cafe.common.exception.ResourceNotFoundException;
 import com.cafe.common.exception.ServiceUnavailableException;
 import com.cafe.common.security.HeaderAuthenticationFilter;
 import com.cafe.orderservice.client.dto.MenuItemDetails;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import jakarta.servlet.http.HttpServletRequest;
@@ -14,11 +15,13 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientException;
 import reactor.netty.http.client.HttpClient;
 
 /**
@@ -26,16 +29,18 @@ import reactor.netty.http.client.HttpClient;
  * bypasses the gateway). Forwards the same trusted identity headers the gateway set on the inbound
  * request, since menu-service's security never sees a raw JWT either.
  *
- * <p>Wrapped in the Circuit Breaker pattern (Resilience4j, config under resilience4j.* in
- * application.yml, instance name "menu-service"): a response timeout bounds how long a single call
- * can hang, Retry re-attempts transient failures, and once failures cross the configured threshold
- * the breaker opens and fails fast instead of letting every order-service thread pile up waiting on
- * a struggling menu-service.
+ * <p>Resilience4j guards the call (config under resilience4j.* in application.yml, instance name
+ * "menu-service"). A response timeout bounds how long a sent request waits for each read of its
+ * response. Retry re-attempts transient failures. Once failures cross the configured threshold, the
+ * Circuit Breaker opens and fails fast instead of letting every order-service thread pile up
+ * waiting on a struggling menu-service.
  */
 @Component
 public class MenuServiceClient {
 
   private static final Duration RESPONSE_TIMEOUT = Duration.ofSeconds(3);
+  private static final String SERVICE_UNAVAILABLE_MESSAGE =
+      "menu-service is unavailable, please try again shortly";
 
   private final WebClient webClient;
 
@@ -60,9 +65,13 @@ public class MenuServiceClient {
    * batch endpoint silently omits ids it doesn't find rather than failing the whole request, so
    * this is the one place with both the ids that were asked for and the ones that came back -
    * throws {@link ResourceNotFoundException} for the first requested id missing from the response.
+   *
+   * <p>On a 4xx response it throws {@link MenuServiceContractException}. When Retry gives up on a
+   * network error, timeout or 5xx, or the breaker rejects the call, it throws {@link
+   * ServiceUnavailableException}.
    */
-  @CircuitBreaker(name = "menu-service", fallbackMethod = "findMenuItemsFallback")
-  @Retry(name = "menu-service")
+  @CircuitBreaker(name = "menu-service")
+  @Retry(name = "menu-service", fallbackMethod = "findMenuItemsFallback")
   public Map<Long, MenuItemDetails> findMenuItemsAsMap(List<Long> menuItemIds) {
     List<MenuItemDetails> found =
         webClient
@@ -72,6 +81,15 @@ public class MenuServiceClient {
                     uriBuilder.path("/api/menu-items/batch").queryParam("ids", menuItemIds).build())
             .headers(this::forwardIdentityHeaders)
             .retrieve()
+            .onStatus(
+                HttpStatusCode::is4xxClientError,
+                response ->
+                    response
+                        .createException()
+                        .map(
+                            e ->
+                                new MenuServiceContractException(
+                                    "menu-service rejected the request: " + e.getStatusCode(), e)))
             .bodyToFlux(MenuItemDetails.class)
             .collectList()
             .block();
@@ -86,9 +104,15 @@ public class MenuServiceClient {
   }
 
   @SuppressWarnings("unused")
-  private Map<Long, MenuItemDetails> findMenuItemsFallback(List<Long> menuItemIds, Throwable t) {
-    throw new ServiceUnavailableException(
-        "menu-service is unavailable, please try again shortly", t);
+  private Map<Long, MenuItemDetails> findMenuItemsFallback(
+      List<Long> menuItemIds, WebClientException e) {
+    throw new ServiceUnavailableException(SERVICE_UNAVAILABLE_MESSAGE, e);
+  }
+
+  @SuppressWarnings("unused")
+  private Map<Long, MenuItemDetails> findMenuItemsFallback(
+      List<Long> menuItemIds, CallNotPermittedException e) {
+    throw new ServiceUnavailableException(SERVICE_UNAVAILABLE_MESSAGE, e);
   }
 
   private void forwardIdentityHeaders(HttpHeaders headers) {

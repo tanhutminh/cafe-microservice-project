@@ -1270,7 +1270,8 @@ enough:
   springdoc to the newest one listed for the new Boot minor version, and set
   `swagger-annotations.version` as the comment in `backend/pom.xml` says.
 - **`swagger-annotations-jakarta`** — it must not be newer than the swagger-core that springdoc
-  brings (see the comment in `backend/pom.xml`), so it changes with springdoc.
+  brings (see the comment in `backend/pom.xml`). It changes by hand when springdoc's minor version
+  does (see "springdoc minor versions" above).
 - **Nine Maven plugins** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
   surefire) — their versions in `backend/pom.xml` are the ones Spring Boot manages.
 - **Version updates of the `maven` image** — its tag ends in the Java major version
@@ -1316,10 +1317,10 @@ Four actions run only in `build-and-push`: `google-github-actions/auth`, `docker
 major update, read its release notes for breaking changes that affect how `backend-ci.yml` uses the
 action.
 
-After merging an update of any of the four, check that `build-and-push` passed on `master`. That run
+After merging an update to any of the four, check that `build-and-push` passed on `master`. That run
 skips the last two actions when every image already exists, which is always the case after a change
 to the workflow alone. A broken update to either of them then first fails on the next push that
-needs a new image. For a major update of either, bump `salt` in `scripts/image-tag.sh` in the same
+needs a new image. For a major update to either, bump `salt` in `scripts/image-tag.sh` in the same
 PR, so the run after merging builds all six images.
 
 Dependabot stops rebasing a PR once its branch has a commit Dependabot did not make. Do not comment
@@ -3291,7 +3292,8 @@ thay đổi của `dependabot.yml` vào tới `master`. Nó chỉ đề xuất 1
   springdoc lên bản minor mới nhất mà bảng đó ghi cho bản minor mới của Boot, và đặt
   `swagger-annotations.version` theo comment trong `backend/pom.xml`.
 - **`swagger-annotations-jakarta`** — nó không được mới hơn swagger-core mà springdoc mang theo
-  (xem comment trong `backend/pom.xml`), nên nó đổi cùng springdoc.
+  (xem comment trong `backend/pom.xml`). Nó đổi bằng tay khi bản minor của springdoc đổi
+  (xem "Các bản minor của springdoc" ở trên).
 - **9 plugin Maven** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
   surefire) — phiên bản của chúng trong `backend/pom.xml` là các phiên bản mà Spring Boot quản lý.
 - **Các bản cập nhật phiên bản của image `maven`** — tag của nó kết thúc bằng major version của
