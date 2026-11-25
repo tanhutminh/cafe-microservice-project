@@ -41,8 +41,8 @@
          this one no newer than that: at runtime the JVM silently drops an annotation or attribute
          that version lacks, and an attribute set to an enum constant it lacks throws when read. -->
     <swagger-annotations.version>2.2.55</swagger-annotations.version>
-    <mockwebserver.version>4.12.0</mockwebserver.version>
-    <jacoco.version>0.8.12</jacoco.version>
+    <mockwebserver.version>4.12.1</mockwebserver.version>
+    <jacoco.version>0.8.16</jacoco.version>
     <!-- Minimum LINE coverage enforced by `mvn jacoco:check`: the project's 70% target. A module
          still below it overrides this in its own <properties> with its current floor (a ratchet:
          raise it as coverage improves, never lower it); modules at or above it inherit it. -->
@@ -51,7 +51,7 @@
          jacoco's prepare-agent sets argLine only in the modules that run it, and in the others,
          without this default, the test JVM would get a literal "@{argLine}" and fail to start. -->
     <argLine/>
-    <spotless.version>2.44.3</spotless.version>
+    <spotless.version>2.46.1</spotless.version>
     <maven-compiler-plugin.version>3.15.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.5.6</maven-surefire-plugin.version>
     <maven-dependency-plugin.version>3.10.0</maven-dependency-plugin.version>
