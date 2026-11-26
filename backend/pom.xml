@@ -40,7 +40,7 @@
          (swagger-api.version in springdoc's parent pom, org.springdoc:springdoc-openapi), so keep
          this one no newer than that: at runtime the JVM silently drops an annotation or attribute
          that version lacks, and an attribute set to an enum constant it lacks throws when read. -->
-    <swagger-annotations.version>2.2.55</swagger-annotations.version>
+    <swagger-annotations-jakarta.version>2.2.55</swagger-annotations-jakarta.version>
     <mockwebserver.version>4.12.1</mockwebserver.version>
     <jacoco.version>0.8.16</jacoco.version>
     <!-- Minimum LINE coverage enforced by `mvn jacoco:check`: the project's 70% target. A module

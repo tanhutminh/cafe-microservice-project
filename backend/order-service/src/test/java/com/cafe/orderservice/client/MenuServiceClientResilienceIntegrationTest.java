@@ -216,6 +216,7 @@ class MenuServiceClientResilienceIntegrationTest {
         () -> assertEquals(status, cause.getStatusCode().value()),
         () -> assertEquals(3, requestsSinceSetUp()),
         () -> assertEquals(3, breaker.getMetrics().getNumberOfFailedCalls()),
+        () -> assertEquals(0, breaker.getMetrics().getNumberOfSuccessfulCalls()),
         () -> assertEquals(CircuitBreaker.State.CLOSED, breaker.getState()));
   }
 
@@ -254,6 +255,7 @@ class MenuServiceClientResilienceIntegrationTest {
         () -> assertInstanceOf(WebClientRequestException.class, thrown.getCause()),
         () -> assertEquals(3, requestsSinceSetUp()),
         () -> assertEquals(3, breaker.getMetrics().getNumberOfFailedCalls()),
+        () -> assertEquals(0, breaker.getMetrics().getNumberOfSuccessfulCalls()),
         () -> assertEquals(CircuitBreaker.State.CLOSED, breaker.getState()));
   }
 
@@ -276,7 +278,7 @@ class MenuServiceClientResilienceIntegrationTest {
   }
 
   @Test
-  void findMenuItemsAsMap_breakerOpensMidRetry_stopsRetrying() {
+  void findMenuItemsAsMap_breakerOpensMidRetry_throwsServiceUnavailableExceptionAfterOneRequest() {
     for (int failure = 0; failure < 4; failure++) {
       breaker.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
     }
@@ -292,6 +294,7 @@ class MenuServiceClientResilienceIntegrationTest {
         () -> assertInstanceOf(CallNotPermittedException.class, thrown.getCause()),
         () -> assertEquals(1, requestsSinceSetUp()),
         () -> assertEquals(5, breaker.getMetrics().getNumberOfFailedCalls()),
+        () -> assertEquals(0, breaker.getMetrics().getNumberOfSuccessfulCalls()),
         () -> assertEquals(1, breaker.getMetrics().getNumberOfNotPermittedCalls()),
         () -> assertEquals(CircuitBreaker.State.OPEN, breaker.getState()));
   }
