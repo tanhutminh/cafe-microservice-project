@@ -87,6 +87,17 @@ are written as plain bash. On Git Bash for Windows, `gcloud` needs `CLOUDSDK_PYT
 
   That is the Cloud SDK's default per-user install path; if yours lives elsewhere,
   `gcloud.cmd info --format='value(basic.python_location)'` prints the right one.
+- On Git Bash for Windows only, recommended: `HELM_CACHE_HOME` pointing outside `%TEMP%`. By default
+  Helm keeps its repository cache under `%TEMP%\helm`, which Disk Cleanup (or Storage Sense) can
+  empty. When that happens, `scripts/deploy.sh` fails (see "Troubleshooting deploys", item 13). Add
+  the variable to `~/.bashrc`, then open a new Git Bash window (or run `source ~/.bashrc`):
+
+  ```bash
+  echo 'export HELM_CACHE_HOME="$LOCALAPPDATA/helm"' >> ~/.bashrc
+  ```
+
+  If you already added Helm repositories, run `helm repo update` once after that, since the new
+  cache starts empty.
 - `git` and `sha256sum` on your `PATH` — `scripts/deploy.sh` checks the repo state with git, and
   `scripts/image-tag.sh` hashes with `sha256sum` (Git Bash ships both; macOS before 15 (Sequoia)
   lacks `sha256sum`).
@@ -883,24 +894,28 @@ causes:
     `mem_limit` and `memswap_limit` with it) or find the leak; don't add `-Xmx`, since the heap
     already follows the limit.
 13. **`scripts/deploy.sh` (or Step 7's `helm dependency build`) fails with
-    `open …\helm\repository\<repo>-index.yaml: The system cannot find the file specified` (or
-    `… the path specified`; on Linux and macOS,
-    `open …/helm/repository/<repo>-index.yaml: no such file or directory`), where
-    `<repo>-index.yaml` is e.g. `cnpg-index.yaml`** — Helm's cache of repository indexes is gone,
-    and nothing has reached the cluster yet. `helm dependency build` reads the cached index of every
-    repository in Helm's list (`helm repo list`, which includes the three added in Step 3), in that
-    order, even with `--skip-refresh` and only `file://` dependencies, and stops at the first one
-    missing: the file the error names. On Windows that cache lives under `%TEMP%\helm` by default,
-    which Disk Cleanup can empty. Run `helm repo update` to rebuild the indexes, then deploy
-    again. To keep the cache out of `%TEMP%`, add `HELM_CACHE_HOME` to `~/.bashrc`, as with
-    `CLOUDSDK_PYTHON` in Prerequisites:
+    `open …\helm\repository\<repo>-index.yaml: The system cannot find the file specified`,
+    `… the path specified`, or on Linux and macOS
+    `open …/helm/repository/<repo>-index.yaml: no such file or directory`** — `<repo>` is a Helm
+    repository's name, for example `cnpg` in `cnpg-index.yaml`. Nothing has reached the cluster
+    yet.
 
-    ```bash
-    echo 'export HELM_CACHE_HOME="$LOCALAPPDATA/helm"' >> ~/.bashrc
-    ```
+    The cause is a missing file in Helm's repository cache. `helm repo add` and `helm repo update`
+    save a copy of each repository's index there. `helm dependency build` reads that copy for every
+    repository in `helm repo list`, including the three added in Step 3. It does so even with
+    `--skip-refresh`, and even when the chart has only `file://` dependencies. It reads the copies
+    in the order `helm repo list` shows, and stops at the first missing one: the file the error
+    names.
 
-    Then open a new Git Bash window and run `helm repo update` once more, since the new cache
-    starts empty.
+    On Windows the cache lives by default under `%TEMP%\helm`, which Disk Cleanup (or Storage Sense)
+    can empty. The list of repositories is kept elsewhere (`%APPDATA%\helm`) and survives, so the
+    repositories don't need to be added again.
+
+    To fix it, run `helm repo update` to download every index again, then rerun the command that
+    failed.
+
+    To keep the cache out of `%TEMP%`, set `HELM_CACHE_HOME` as in Prerequisites, including its
+    `helm repo update` step.
 
 ---
 
@@ -1264,14 +1279,18 @@ enough:
 - **Spring Boot and Spring Cloud minor versions** — a Spring Cloud release train supports only
   certain Boot minor versions, so the two are bumped together by hand. The trains are numbered
   `<year>.<n>`. A new train in the same year is a minor version, for example 2025.0 to 2025.1. A new
-  year's train is a major version, which the rule above already ignores.
+  year's train is a major version, which the rule above already ignores. When bumping Boot's minor
+  version, also set the nine ignored plugins' version properties (see "Nine Maven plugins" below) to
+  the versions the new Boot version manages. Then run `docker compose build` locally before merging.
+  These are the same steps as for a Dependabot Spring Boot PR (see "Spring Boot" below).
 - **springdoc minor versions** — springdoc's compatibility matrix, in its FAQ, lists the springdoc
   minor versions built for each Boot minor version. When bumping Boot's minor version, also move
-  springdoc to the newest one listed for the new Boot minor version, and set
-  `swagger-annotations.version` as the comment in `backend/pom.xml` says.
-- **`swagger-annotations-jakarta`** — it must not be newer than the swagger-core that springdoc
-  brings (see the comment in `backend/pom.xml`). It changes by hand when springdoc's minor version
-  does (see "springdoc minor versions" above).
+  springdoc to the newest one listed for the new Boot minor version. Then set
+  `swagger-annotations-jakarta.version` to a version no newer than the version of swagger-core that
+  comes with the new springdoc version (see the comment in `backend/pom.xml`).
+- **`swagger-annotations-jakarta`** — it must not be newer than the version of swagger-core that
+  comes with springdoc (see the comment in `backend/pom.xml`). It changes by hand when springdoc's
+  minor version does (see "springdoc minor versions" above).
 - **Nine Maven plugins** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
   surefire) — their versions in `backend/pom.xml` are the ones Spring Boot manages.
 - **Version updates of the `maven` image** — its tag ends in the Java major version
@@ -2105,6 +2124,17 @@ mục "Yêu cầu môi trường").
 
   Đó là đường dẫn cài đặt mặc định theo user của Cloud SDK; nếu SDK của bạn nằm ở chỗ khác,
   `gcloud.cmd info --format='value(basic.python_location)'` sẽ in ra đường dẫn đúng.
+- Chỉ với Git Bash trên Windows, nên có: `HELM_CACHE_HOME` trỏ ra ngoài `%TEMP%`. Mặc định Helm lưu
+  cache repository trong `%TEMP%\helm`, nơi Disk Cleanup (hoặc Storage Sense) có thể xoá sạch. Khi
+  đó `scripts/deploy.sh` sẽ fail (xem mục 13 của "Xử lý sự cố khi deploy"). Thêm biến vào
+  `~/.bashrc`, rồi mở 1 cửa sổ Git Bash mới (hoặc chạy `source ~/.bashrc`):
+
+  ```bash
+  echo 'export HELM_CACHE_HOME="$LOCALAPPDATA/helm"' >> ~/.bashrc
+  ```
+
+  Nếu đã thêm repository Helm từ trước, hãy chạy `helm repo update` 1 lần sau đó, vì cache mới ban
+  đầu còn trống.
 - `git` và `sha256sum` nằm trong `PATH` — `scripts/deploy.sh` kiểm tra trạng thái repo bằng git, còn
   `scripts/image-tag.sh` tính hash bằng `sha256sum` (Git Bash có sẵn cả 2; macOS trước bản 15
   (Sequoia) không có `sha256sum`).
@@ -2908,24 +2938,26 @@ Các triệu chứng có thể gặp khi deploy — phần lớn ở lần deplo
     `memswap_limit` của compose theo) hoặc tìm chỗ rò rỉ; đừng thêm `-Xmx`, vì heap đã tự theo
     limit.
 13. **`scripts/deploy.sh` (hoặc lệnh `helm dependency build` ở Bước 7) fail với
-    `open …\helm\repository\<repo>-index.yaml: The system cannot find the file specified` (hoặc
-    `… the path specified`; trên Linux và macOS là
-    `open …/helm/repository/<repo>-index.yaml: no such file or directory`), trong đó
-    `<repo>-index.yaml` là vd `cnpg-index.yaml`** — cache index repository của Helm đã mất, và chưa
-    có gì được gửi tới cluster. `helm dependency build` đọc index đã cache của mọi repository trong
-    danh sách của Helm (`helm repo list`, gồm cả 3 repository thêm ở Bước 3), theo đúng thứ tự đó,
-    kể cả khi dùng `--skip-refresh` và chỉ có dependency `file://`, và dừng ở repository đầu tiên
-    bị thiếu: file mà lỗi nêu tên. Trên Windows, cache đó mặc định nằm trong `%TEMP%\helm`, nơi
-    Disk Cleanup có thể xoá sạch. Chạy `helm repo update` để tạo lại các index, rồi deploy lại.
-    Để đưa cache ra khỏi `%TEMP%`, thêm `HELM_CACHE_HOME` vào `~/.bashrc`, giống `CLOUDSDK_PYTHON`
-    ở phần Yêu cầu môi trường:
+    `open …\helm\repository\<repo>-index.yaml: The system cannot find the file specified`,
+    `… the path specified`, hoặc trên Linux và macOS là
+    `open …/helm/repository/<repo>-index.yaml: no such file or directory`** — `<repo>` là tên 1
+    repository của Helm, vd `cnpg` trong `cnpg-index.yaml`. Lúc này chưa có gì được gửi tới cluster.
 
-    ```bash
-    echo 'export HELM_CACHE_HOME="$LOCALAPPDATA/helm"' >> ~/.bashrc
-    ```
+    Nguyên nhân là 1 file bị thiếu trong cache repository của Helm. `helm repo add` và
+    `helm repo update` lưu 1 bản index của từng repository vào cache này. `helm dependency build`
+    đọc bản index đó của mọi repository trong `helm repo list`, gồm cả 3 repository thêm ở Bước 3.
+    Nó vẫn đọc kể cả khi dùng `--skip-refresh`, và kể cả khi chart chỉ có dependency `file://`. Nó
+    đọc theo thứ tự mà `helm repo list` hiển thị, và dừng ở bản đầu tiên bị thiếu: chính file mà lỗi
+    nêu tên.
 
-    Rồi mở 1 cửa sổ Git Bash mới và chạy `helm repo update` thêm 1 lần, vì cache mới ban đầu còn
-    trống.
+    Trên Windows, cache này mặc định nằm trong `%TEMP%\helm`, nơi Disk Cleanup (hoặc Storage Sense)
+    có thể xoá sạch. Danh sách repository thì được lưu ở chỗ khác (`%APPDATA%\helm`) và vẫn còn
+    nguyên, nên không cần thêm lại các repository.
+
+    Để sửa, chạy `helm repo update` để tải lại mọi index, rồi chạy lại lệnh vừa fail.
+
+    Để đưa cache ra khỏi `%TEMP%`, đặt `HELM_CACHE_HOME` như ở phần Yêu cầu môi trường, gồm cả bước
+    `helm repo update` ở đó.
 
 ---
 
@@ -3286,13 +3318,17 @@ thay đổi của `dependabot.yml` vào tới `master`. Nó chỉ đề xuất 1
 - **Các bản minor của Spring Boot và Spring Cloud** — 1 release train của Spring Cloud chỉ hỗ trợ 1
   số bản minor nhất định của Boot, nên cả 2 được nâng cùng nhau bằng tay. Các train được đánh số
   theo dạng `<year>.<n>`. Train mới trong cùng năm là 1 bản minor, ví dụ 2025.0 lên 2025.1. Train
-  của năm mới là 1 bản major, mà rule ở trên đã bỏ qua.
+  của năm mới là 1 bản major, mà rule ở trên đã bỏ qua. Khi nâng bản minor của Boot, hãy đặt luôn
+  các property phiên bản của 9 plugin bị bỏ qua (xem "9 plugin Maven" bên dưới) theo các phiên bản
+  mà bản Boot mới quản lý. Rồi chạy `docker compose build` ở máy trước khi merge. Đây cũng chính là
+  các bước cần làm cho 1 PR Spring Boot của Dependabot (xem "Spring Boot" bên dưới).
 - **Các bản minor của springdoc** — bảng tương thích trong FAQ của springdoc ghi các bản minor của
   springdoc được build cho từng bản minor của Boot. Khi nâng bản minor của Boot, hãy nâng luôn
-  springdoc lên bản minor mới nhất mà bảng đó ghi cho bản minor mới của Boot, và đặt
-  `swagger-annotations.version` theo comment trong `backend/pom.xml`.
-- **`swagger-annotations-jakarta`** — nó không được mới hơn swagger-core mà springdoc mang theo
-  (xem comment trong `backend/pom.xml`). Nó đổi bằng tay khi bản minor của springdoc đổi
+  springdoc lên bản minor mới nhất mà bảng đó ghi cho bản minor mới của Boot. Rồi chọn cho
+  `swagger-annotations-jakarta.version` 1 phiên bản không mới hơn phiên bản của swagger-core đi kèm
+  với bản springdoc mới (xem comment trong `backend/pom.xml`).
+- **`swagger-annotations-jakarta`** — nó không được mới hơn phiên bản của swagger-core đi kèm với
+  springdoc (xem comment trong `backend/pom.xml`). Nó đổi bằng tay khi bản minor của springdoc đổi
   (xem "Các bản minor của springdoc" ở trên).
 - **9 plugin Maven** (clean, compiler, dependency, deploy, enforcer, install, jar, resources,
   surefire) — phiên bản của chúng trong `backend/pom.xml` là các phiên bản mà Spring Boot quản lý.
