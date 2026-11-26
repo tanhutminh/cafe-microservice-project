@@ -12,7 +12,7 @@ package com.cafe.orderservice.testsupport;
 public final class ContainerImages {
 
   public static final String POSTGRES =
-      "postgres@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636";
+      "postgres@sha256:64c8b0d31e4ab6ea665e8426ea406a94bf52de3c05b3a4a8bf713704eefa9328";
   public static final String KAFKA =
       "apache/kafka@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837";
 
