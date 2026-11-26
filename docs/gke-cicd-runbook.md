@@ -678,7 +678,7 @@ with that service's real port/db/kafka/jwt values and its own `image.repository`
 # rewriting it, and fails if Chart.yaml's dependencies no longer match that lock;
 # --skip-refresh: skips re-downloading the indexes of all Helm repositories configured on this
 # machine (`helm repo list`), which a file:// dependency doesn't need; Helm still reads their
-# cached indexes, so those must exist
+# cached indexes, so those must exist (see "Troubleshooting deploys", item 13)
 helm dependency build --skip-refresh charts/cafe
 # render and lint locally before touching the real cluster (rendering is the real check);
 # lint should report 0 failed - an "icon is recommended" INFO and a "templates/ directory does
@@ -753,6 +753,9 @@ Secrets in the `cafe` namespace:
 git checkout master && git pull
 bash scripts/deploy.sh
 ```
+
+If `helm dependency build` fails because a `<repo>-index.yaml` is missing, see
+"Troubleshooting deploys", item 13.
 
 The script only returns once all 6 app Deployments are ready — the DB-backed pods pass through
 `Init:0/1` while their `wait-for-db` initContainer waits (Step 6/7) — or fails, listing the pods
@@ -895,13 +898,13 @@ causes:
     already follows the limit.
 13. **`scripts/deploy.sh` (or Step 7's `helm dependency build`) fails with
     `open …\helm\repository\<repo>-index.yaml: The system cannot find the file specified`,
-    `… the path specified`, or on Linux and macOS
+    `… the path specified`, or, on Linux and macOS,
     `open …/helm/repository/<repo>-index.yaml: no such file or directory`** — `<repo>` is a Helm
     repository's name, for example `cnpg` in `cnpg-index.yaml`. Nothing has reached the cluster
     yet.
 
     The cause is a missing file in Helm's repository cache. `helm repo add` and `helm repo update`
-    save a copy of each repository's index there. `helm dependency build` reads that copy for every
+    save a copy of each repository's index there. `helm dependency build` reads the copy for each
     repository in `helm repo list`, including the three added in Step 3. It does so even with
     `--skip-refresh`, and even when the chart has only `file://` dependencies. It reads the copies
     in the order `helm repo list` shows, and stops at the first missing one: the file the error
@@ -2718,7 +2721,7 @@ alias với giá trị port/db/kafka/jwt thật của service đó và `image.re
 # rewriting it, and fails if Chart.yaml's dependencies no longer match that lock;
 # --skip-refresh: skips re-downloading the indexes of all Helm repositories configured on this
 # machine (`helm repo list`), which a file:// dependency doesn't need; Helm still reads their
-# cached indexes, so those must exist
+# cached indexes, so those must exist (see "Troubleshooting deploys", item 13)
 helm dependency build --skip-refresh charts/cafe
 # render and lint locally before touching the real cluster (rendering is the real check);
 # lint should report 0 failed - an "icon is recommended" INFO and a "templates/ directory does
@@ -2796,6 +2799,9 @@ namespace `cafe`:
 git checkout master && git pull
 bash scripts/deploy.sh
 ```
+
+Nếu `helm dependency build` fail vì thiếu 1 file `<repo>-index.yaml`, xem mục 13 của
+"Xử lý sự cố khi deploy".
 
 Script chỉ trả về khi cả 6 app Deployment đã sẵn sàng — các pod dùng DB đi qua `Init:0/1` trong
 lúc initContainer `wait-for-db` của chúng chờ (Bước 6/7) — hoặc thất bại, kèm danh sách pod để
@@ -2954,7 +2960,7 @@ Các triệu chứng có thể gặp khi deploy — phần lớn ở lần deplo
     có thể xoá sạch. Danh sách repository thì được lưu ở chỗ khác (`%APPDATA%\helm`) và vẫn còn
     nguyên, nên không cần thêm lại các repository.
 
-    Để sửa, chạy `helm repo update` để tải lại mọi index, rồi chạy lại lệnh vừa fail.
+    Cách sửa: chạy `helm repo update` để tải lại mọi index, rồi chạy lại lệnh vừa fail.
 
     Để đưa cache ra khỏi `%TEMP%`, đặt `HELM_CACHE_HOME` như ở phần Yêu cầu môi trường, gồm cả bước
     `helm repo update` ở đó.
