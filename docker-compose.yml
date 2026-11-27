@@ -26,7 +26,7 @@ services:
   postgres:
     # The comment above the version in k8s/data-layer/postgres-cluster.yaml lists every place to
     # change with it.
-    image: postgres:18.4@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636
+    image: postgres:18.7@sha256:64c8b0d31e4ab6ea665e8426ea406a94bf52de3c05b3a4a8bf713704eefa9328
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USERNAME}
